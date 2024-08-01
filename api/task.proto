@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package task;
+
+option go_package = "/home/loreste/leba;task";
+
+service TaskManager {
+  rpc AssignTask (TaskRequest) returns (TaskResponse);
+  rpc GetTaskStatus (StatusRequest) returns (StatusResponse);
+}
+
+message TaskRequest {
+  string task_id = 1;
+  string backend_id = 2;
+}
+
+message TaskResponse {
+  bool success = 1;
+}
+
+message StatusRequest {
+  string task_id = 1;
+}
+
+message StatusResponse {
+  string status = 1;
+}

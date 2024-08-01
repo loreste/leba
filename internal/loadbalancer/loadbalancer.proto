@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+option go_package = "leba/internal/loadbalancer";
+
+package loadbalancer;
+
+service LoadBalancer {
+    rpc GetBackendInfo (BackendInfoRequest) returns (BackendInfoResponse);
+}
+
+message BackendInfoRequest {
+    string id = 1;
+}
+
+message BackendInfoResponse {
+    BackendInfo backend_info = 1;
+}
+
+message BackendInfo {
+    string id = 1;
+    string address = 2;
+}

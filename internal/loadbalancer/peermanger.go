@@ -1,3 +1,4 @@
+// internal/loadbalancer/peermanager.go
 package loadbalancer
 
 import (
@@ -18,7 +19,7 @@ type Peer struct {
 	Address  string
 	wsConn   *websocket.Conn
 	isActive bool
-	mu       sync.Mutex
+	mu       sync.RWMutex // Protects wsConn and isActive
 }
 
 // PeeringManager manages communication with peers
@@ -27,7 +28,7 @@ type PeeringManager struct {
 	selfNode *Peer
 	config   *config.Config
 	lb       *LoadBalancer
-	mu       sync.RWMutex
+	// Removed unused mu field
 	upgrader websocket.Upgrader
 }
 
@@ -44,7 +45,7 @@ func NewPeeringManager(config *config.Config, lb *LoadBalancer) *PeeringManager 
 		lb:       lb,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all connections, implement security measures as needed
+				return true // Allow all connections; implement security measures as needed
 			},
 		},
 	}
@@ -77,9 +78,7 @@ func (pm *PeeringManager) connectToPeer(peerConfig config.PeerConfig) {
 			isActive: true,
 		}
 
-		pm.mu.Lock()
 		pm.peers[peerConfig.NodeID] = peer
-		pm.mu.Unlock()
 
 		log.Printf("Connected to peer: %s", peerConfig.NodeID)
 
@@ -110,9 +109,7 @@ func (pm *PeeringManager) handleWebSocket(w http.ResponseWriter, r *http.Request
 		isActive: true,
 	}
 
-	pm.mu.Lock()
 	pm.peers[peerID] = peer
-	pm.mu.Unlock()
 
 	log.Printf("Peer connected: %s", peerID)
 
@@ -133,7 +130,6 @@ func (pm *PeeringManager) handlePeerConnection(peer *Peer) {
 			return
 		}
 
-		// Handle incoming messages (e.g., state synchronization, backend updates, peer updates)
 		pm.handleIncomingMessage(peer, message)
 	}
 }
@@ -146,7 +142,6 @@ func (pm *PeeringManager) handleIncomingMessage(peer *Peer, message []byte) {
 		return
 	}
 
-	// Handle different types of messages
 	switch data["type"] {
 	case "state_sync":
 		pm.handleStateSync(data["payload"])
@@ -167,11 +162,9 @@ func (pm *PeeringManager) handleStateSync(payload interface{}) {
 		return
 	}
 
-	// Process state synchronization data
 	log.Printf("Received state sync data: %+v", stateData)
 	pm.syncState(stateData)
 
-	// Broadcast state sync to all peers
 	message, _ := json.Marshal(map[string]interface{}{
 		"type":    "state_sync",
 		"payload": stateData,
@@ -187,11 +180,9 @@ func (pm *PeeringManager) handleBackendUpdate(payload interface{}) {
 		return
 	}
 
-	// Update backend details, e.g., health status or active connections
 	log.Printf("Received backend update: %+v", backend)
 	pm.updateBackend(backend)
 
-	// Notify peers about the backend update
 	message, _ := json.Marshal(map[string]interface{}{
 		"type":    "backend_update",
 		"payload": backend,
@@ -207,11 +198,9 @@ func (pm *PeeringManager) handlePeerUpdate(payload interface{}) {
 		return
 	}
 
-	// Update peer details, e.g., connection status or address
 	log.Printf("Received peer update: %+v", peer)
 	pm.updatePeer(peer)
 
-	// Notify the specific peer about the update
 	message, _ := json.Marshal(map[string]interface{}{
 		"type":    "peer_update",
 		"payload": peer,
@@ -223,21 +212,16 @@ func (pm *PeeringManager) handlePeerUpdate(payload interface{}) {
 
 // removePeer removes a peer from the peering manager
 func (pm *PeeringManager) removePeer(nodeID string) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	delete(pm.peers, nodeID)
 	log.Printf("Peer removed: %s", nodeID)
 }
 
 // broadcastToPeers sends a message to all connected peers
 func (pm *PeeringManager) broadcastToPeers(message []byte) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	for _, peer := range pm.peers {
 		if peer.isActive {
-			if err := peer.wsConn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if err := pm.sendMessageToPeer(peer.NodeID, message); err != nil {
 				log.Printf("Failed to send message to peer %s: %v", peer.NodeID, err)
-				peer.isActive = false
 			}
 		}
 	}
@@ -245,13 +229,17 @@ func (pm *PeeringManager) broadcastToPeers(message []byte) {
 
 // sendMessageToPeer sends a message to a specific peer
 func (pm *PeeringManager) sendMessageToPeer(nodeID string, message []byte) error {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	peer, exists := pm.peers[nodeID]
 	if !exists || !peer.isActive {
 		return fmt.Errorf("peer not available: %s", nodeID)
 	}
-	return peer.wsConn.WriteMessage(websocket.TextMessage, message)
+	peer.mu.RLock()
+	defer peer.mu.RUnlock()
+	if err := peer.wsConn.WriteMessage(websocket.TextMessage, message); err != nil {
+		peer.isActive = false
+		return err
+	}
+	return nil
 }
 
 // syncState synchronizes the local state with the state received from a peer
@@ -261,20 +249,21 @@ func (pm *PeeringManager) syncState(stateData StateData) {
 
 	for addr, backend := range stateData.Backends {
 		if existingBackend, exists := pm.lb.backendPool.backends[addr]; exists {
+			existingBackend.mu.Lock()
 			existingBackend.Health = backend.Health
 			existingBackend.ActiveConnections = backend.ActiveConnections
+			existingBackend.mu.Unlock()
 		} else {
 			pm.lb.backendPool.backends[addr] = backend
 		}
 	}
 
-	// Update peers if needed, similar logic can be added
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	for nodeID, peer := range stateData.Peers {
 		if existingPeer, exists := pm.peers[nodeID]; exists {
+			existingPeer.mu.Lock()
 			existingPeer.Address = peer.Address
 			existingPeer.isActive = peer.isActive
+			existingPeer.mu.Unlock()
 		} else {
 			pm.peers[nodeID] = peer
 		}
@@ -287,9 +276,11 @@ func (pm *PeeringManager) updateBackend(backend *Backend) {
 	defer pm.lb.backendPool.mu.Unlock()
 
 	if existingBackend, exists := pm.lb.backendPool.backends[backend.Address]; exists {
+		existingBackend.mu.Lock()
 		existingBackend.Health = backend.Health
 		existingBackend.ActiveConnections = backend.ActiveConnections
 		existingBackend.Weight = backend.Weight
+		existingBackend.mu.Unlock()
 	} else {
 		pm.lb.backendPool.backends[backend.Address] = backend
 	}
@@ -297,16 +288,15 @@ func (pm *PeeringManager) updateBackend(backend *Backend) {
 
 // updatePeer updates a peer's information
 func (pm *PeeringManager) updatePeer(peer *Peer) {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
 	if existingPeer, exists := pm.peers[peer.NodeID]; exists {
+		existingPeer.mu.Lock()
 		existingPeer.Address = peer.Address
 		existingPeer.isActive = peer.isActive
 		if existingPeer.wsConn != nil && !existingPeer.isActive {
 			existingPeer.wsConn.Close()
 			existingPeer.wsConn = nil
 		}
+		existingPeer.mu.Unlock()
 	} else {
 		pm.peers[peer.NodeID] = peer
 	}

@@ -34,7 +34,7 @@ type LoadBalancer struct {
 func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, tlsConfig *tls.Config, cacheConfig config.CacheConfig, certFile, keyFile string) *LoadBalancer {
 	var c *cache.Cache
 	if cacheConfig.Enabled {
-		c = cache.New(time.Duration(cacheConfig.Expiration)*time.Second, time.Duration(cacheConfig.Expiration)*time.Second)
+		c = cache.New(time.Duration(cacheConfig.Expiration)*time.Second, time.Duration(cacheConfig.CleanupInterval)*time.Second)
 	}
 	return &LoadBalancer{
 		frontendAddress: frontendAddress,
@@ -92,7 +92,25 @@ func (lb *LoadBalancer) forwardHTTPRequest(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	req.Header = r.Header
+	req.Header = r.Header.Clone()
+
+	// Update X-Forwarded-For header
+	clientIP := r.RemoteAddr
+	if existingClientIP := r.Header.Get("X-Forwarded-For"); existingClientIP != "" {
+		clientIP = fmt.Sprintf("%s, %s", existingClientIP, clientIP)
+	}
+	req.Header.Set("X-Forwarded-For", clientIP)
+
+	// Set X-Forwarded-Proto header
+	if r.TLS != nil {
+		req.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+
+	// Preserve the original Host header
+	req.Host = r.Host
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -173,8 +191,7 @@ func (lb *LoadBalancer) forwardDatabaseRequest(w http.ResponseWriter, r *http.Re
 
 		rowResult := make(map[string]interface{})
 		for i, col := range columns {
-			val := values[i]
-			rowResult[col] = val
+			rowResult[col] = values[i]
 		}
 		result, _ := json.Marshal(rowResult)
 		results = append(results, string(result))

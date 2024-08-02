@@ -1,12 +1,15 @@
+// internal/config/config.go
 package config
 
 import (
+	"io"
+	"log"
 	"os"
-	"sync"
 
 	"gopkg.in/yaml.v2"
 )
 
+// Config represents the overall configuration structure
 type Config struct {
 	FrontendAddress string          `yaml:"frontend_address"`
 	APIPort         string          `yaml:"api_port"`
@@ -18,15 +21,15 @@ type Config struct {
 	Backends        []BackendConfig `yaml:"backends"`
 	TLSConfig       TLSConfig       `yaml:"tls_config"`
 	CacheConfig     CacheConfig     `yaml:"cache_config"`
-	mu              sync.Mutex
-	filePath        string
 }
 
+// PeerConfig represents configuration for a peer node
 type PeerConfig struct {
 	Address string `yaml:"address"`
 	NodeID  string `yaml:"node_id"`
 }
 
+// BackendConfig represents configuration for a backend server
 type BackendConfig struct {
 	Address            string `yaml:"address"`
 	Protocol           string `yaml:"protocol"`
@@ -34,9 +37,10 @@ type BackendConfig struct {
 	Weight             int    `yaml:"weight"`
 	MaxOpenConnections int    `yaml:"max_open_connections"`
 	MaxIdleConnections int    `yaml:"max_idle_connections"`
-	ConnMaxLifetime    int    `yaml:"conn_max_lifetime"` // in seconds
+	ConnMaxLifetime    int    `yaml:"conn_max_lifetime"`
 }
 
+// TLSConfig holds TLS configuration details
 type TLSConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	CertFile string `yaml:"cert_file"`
@@ -45,32 +49,40 @@ type TLSConfig struct {
 	HTTP3    bool   `yaml:"http3"`
 }
 
+// CacheConfig holds configuration settings for caching
 type CacheConfig struct {
-	Enabled    bool `yaml:"enabled"`
-	CacheSize  int  `yaml:"cache_size"`
-	Expiration int  `yaml:"expiration"` // in seconds
+	Enabled         bool `yaml:"enabled"`
+	Expiration      int  `yaml:"expiration"`       // Expiration time for cached items in seconds
+	CleanupInterval int  `yaml:"cleanup_interval"` // Interval for cleaning up expired items in seconds
 }
 
-func LoadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+// LoadConfig loads configuration from a given file path
+func LoadConfig(configPath string) (*Config, error) {
+	config := &Config{}
+	configFile, err := os.Open(configPath)
 	if err != nil {
 		return nil, err
 	}
-	var config Config
-	err = yaml.Unmarshal(data, &config)
+	defer configFile.Close()
+
+	byteValue, err := io.ReadAll(configFile)
 	if err != nil {
 		return nil, err
 	}
-	config.filePath = path
-	return &config, nil
+
+	err = yaml.Unmarshal(byteValue, config)
+	if err != nil {
+		return nil, err
+	}
+
+	return config, nil
 }
 
-func (c *Config) SaveConfig() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	data, err := yaml.Marshal(c)
+// Example usage of LoadConfig function
+func ExampleLoadConfig() {
+	config, err := LoadConfig("config.yml")
 	if err != nil {
-		return err
+		log.Fatalf("Failed to load config: %v", err)
 	}
-	return os.WriteFile(c.filePath, data, 0644)
+	log.Printf("Config loaded: %+v", config)
 }

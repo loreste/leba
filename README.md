@@ -1,5 +1,5 @@
-# leba
-leba - Distributed Load Balancer
+# Leba
+## Leba - Distributed Load Balancer
 leba is a distributed TCP load balancer that supports various backend protocols such as HTTP, HTTPS, MySQL, and PostgreSQL. It is designed to be deployed across multiple servers, using gRPC for inter-node communication and configuration management. The load balancer supports least-connections load balancing and dynamic backend management.
 
 Features

@@ -1,6 +1,8 @@
 package loadbalancer
 
-import "sync"
+import (
+	"sync"
+)
 
 // Backend represents a backend server
 type Backend struct {
@@ -11,9 +13,9 @@ type Backend struct {
 	Health             bool
 	MaxOpenConnections int
 	MaxIdleConnections int
-	ConnMaxLifetime    int // in seconds
+	ConnMaxLifetime    int
 	ActiveConnections  int
-	mu                 sync.Mutex
+	mu                 sync.RWMutex // Protects all fields
 }
 
 // BackendPool represents a pool of backend servers
@@ -52,4 +54,26 @@ func (p *BackendPool) ListBackends() []*Backend {
 		backends = append(backends, backend)
 	}
 	return backends
+}
+
+// UpdateActiveConnections updates the number of active connections for a backend
+func (p *BackendPool) UpdateActiveConnections(address string, delta int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if backend, exists := p.backends[address]; exists {
+		backend.mu.Lock()
+		backend.ActiveConnections += delta
+		if backend.ActiveConnections < 0 {
+			backend.ActiveConnections = 0
+		}
+		backend.mu.Unlock()
+	}
+}
+
+// GetBackend retrieves a backend by its address
+func (p *BackendPool) GetBackend(address string) (*Backend, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	backend, exists := p.backends[address]
+	return backend, exists
 }

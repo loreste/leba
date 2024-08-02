@@ -1,4 +1,3 @@
-// internal/loadbalancer/grpc_handlers.go
 package loadbalancer
 
 import (

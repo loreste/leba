@@ -1,4 +1,3 @@
-// internal/loadbalancer/peermanager.go
 package loadbalancer
 
 import (

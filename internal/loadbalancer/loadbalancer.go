@@ -1,4 +1,3 @@
-// internal/loadbalancer/loadbalancer.go
 package loadbalancer
 
 import (

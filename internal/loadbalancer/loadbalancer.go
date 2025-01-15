@@ -1,12 +1,15 @@
 package loadbalancer
 
 import (
-	"database/sql"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
-	"strings"
 	"sync"
+	"time"
 
 	"crypto/tls"
 	"leba/internal/config"
@@ -22,11 +25,12 @@ type LoadBalancer struct {
 	cacheConfig     config.CacheConfig
 	certFile        string
 	keyFile         string
+	peerManager     *PeerManager
 	mu              sync.RWMutex
 }
 
 // NewLoadBalancer creates a new LoadBalancer instance
-func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, tlsConfig *tls.Config, cacheConfig config.CacheConfig, certFile, keyFile string) *LoadBalancer {
+func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, tlsConfig *tls.Config, cacheConfig config.CacheConfig, certFile, keyFile string, peerManager *PeerManager) *LoadBalancer {
 	return &LoadBalancer{
 		frontendAddress: frontendAddress,
 		backendPool:     backendPool,
@@ -34,92 +38,117 @@ func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, tlsConfig
 		cacheConfig:     cacheConfig,
 		certFile:        certFile,
 		keyFile:         keyFile,
+		peerManager:     peerManager,
 	}
 }
 
-// Start starts the load balancer's HTTP server
-func (lb *LoadBalancer) Start() error {
-	log.Printf("Starting load balancer on %s", lb.frontendAddress)
-	http.HandleFunc("/", lb.handleRequest)
-	return http.ListenAndServe(lb.frontendAddress, nil)
+// StartClusterSync periodically broadcasts the backend state to peers
+func (lb *LoadBalancer) StartClusterSync() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		lb.peerManager.BroadcastState()
+	}
 }
 
-// handleRequest handles incoming HTTP requests and forwards them to a backend
-func (lb *LoadBalancer) handleRequest(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("query")
-	if query == "" {
-		http.Error(w, "Query parameter is missing", http.StatusBadRequest)
-		return
-	}
+// StartService starts a specific protocol service
+func (lb *LoadBalancer) StartService(protocol string, port int) error {
+	address := fmt.Sprintf(":%d", port)
+	log.Printf("Starting %s load balancer on %s", protocol, address)
 
-	backend, err := lb.routeQuery(query)
+	switch protocol {
+	case "http":
+		http.HandleFunc("/", lb.handleHTTP)
+		return http.ListenAndServe(address, nil)
+
+	case "https":
+		http.HandleFunc("/", lb.handleHTTPS)
+		return http.ListenAndServeTLS(address, lb.certFile, lb.keyFile, nil)
+
+	case "postgres":
+		return lb.startPostgres(address)
+
+	default:
+		return fmt.Errorf("unsupported protocol: %s", protocol)
+	}
+}
+
+// handleHTTP handles HTTP requests
+func (lb *LoadBalancer) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	backend, err := lb.routeRequest("http")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to route request: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to route HTTP request: %v", err), http.StatusInternalServerError)
 		return
 	}
+	http.Redirect(w, r, fmt.Sprintf("http://%s%s", backend.Address, r.URL.Path), http.StatusTemporaryRedirect)
+}
 
-	// Execute the query on the selected backend
-	connStr := fmt.Sprintf("host=%s port=%d sslmode=disable", backend.Address, backend.Port)
-	db, err := sql.Open("postgres", connStr)
+// handleHTTPS handles HTTPS requests
+func (lb *LoadBalancer) handleHTTPS(w http.ResponseWriter, r *http.Request) {
+	backend, err := lb.routeRequest("https")
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to connect to backend: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to route HTTPS request: %v", err), http.StatusInternalServerError)
 		return
 	}
-	defer db.Close()
+	http.Redirect(w, r, fmt.Sprintf("https://%s%s", backend.Address, r.URL.Path), http.StatusTemporaryRedirect)
+}
 
-	rows, err := db.Query(query)
+// startPostgres handles PostgreSQL connections
+func (lb *LoadBalancer) startPostgres(address string) error {
+	log.Printf("Starting PostgreSQL load balancer on %s", address)
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Query execution failed: %v", err), http.StatusInternalServerError)
-		return
+		return fmt.Errorf("failed to start PostgreSQL listener: %v", err)
 	}
-	defer rows.Close()
 
-	var results []string
-	for rows.Next() {
-		var result string
-		if err := rows.Scan(&result); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to read query result: %v", err), http.StatusInternalServerError)
-			return
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("PostgreSQL connection error: %v", err)
+			continue
 		}
-		results = append(results, result)
+
+		go lb.handlePostgresConnection(conn)
 	}
-
-	backend.mu.Lock()
-	backend.ActiveConnections--
-	backend.mu.Unlock()
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(strings.Join(results, "\n")))
 }
 
-// routeQuery routes the query based on type (read/write)
-func (lb *LoadBalancer) routeQuery(query string) (*Backend, error) {
+func (lb *LoadBalancer) handlePostgresConnection(conn net.Conn) {
+	defer conn.Close()
+
+	backend, err := lb.routeRequest("postgres")
+	if err != nil {
+		log.Printf("Failed to route PostgreSQL request: %v", err)
+		return
+	}
+
+	backendConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", backend.Address, backend.Port))
+	if err != nil {
+		log.Printf("Failed to connect to PostgreSQL backend: %v", err)
+		return
+	}
+	defer backendConn.Close()
+
+	go io.Copy(backendConn, conn)
+	io.Copy(conn, backendConn)
+}
+
+// routeRequest routes the query or connection based on protocol
+func (lb *LoadBalancer) routeRequest(protocol string) (*Backend, error) {
 	lb.backendPool.mu.RLock()
 	defer lb.backendPool.mu.RUnlock()
 
 	var selectedBackend *Backend
-
-	if isReadQuery(query) {
-		// Route to the least-connected replica
-		for _, backend := range lb.backendPool.backends {
-			if backend.Role == "replica" && backend.Health {
-				if selectedBackend == nil || backend.ActiveConnections < selectedBackend.ActiveConnections {
-					selectedBackend = backend
-				}
-			}
-		}
-	} else {
-		// Route to the primary
-		for _, backend := range lb.backendPool.backends {
-			if backend.Role == "primary" && backend.Health {
+	for _, backend := range lb.backendPool.backends {
+		if backend.Protocol == protocol && backend.Health {
+			if selectedBackend == nil || backend.ActiveConnections < selectedBackend.ActiveConnections {
 				selectedBackend = backend
-				break
 			}
 		}
 	}
 
 	if selectedBackend == nil {
-		return nil, fmt.Errorf("no available backend for query")
+		return nil, fmt.Errorf("no available backend for protocol: %s", protocol)
 	}
 
 	selectedBackend.mu.Lock()
@@ -129,8 +158,85 @@ func (lb *LoadBalancer) routeQuery(query string) (*Backend, error) {
 	return selectedBackend, nil
 }
 
-// isReadQuery checks if a query is a read operation
-func isReadQuery(query string) bool {
-	query = strings.TrimSpace(strings.ToLower(query))
-	return strings.HasPrefix(query, "select")
+// PeerManager manages communication between nodes in the cluster
+type PeerManager struct {
+	peers       []string
+	stateMutex  sync.RWMutex
+	backendPool *BackendPool
+}
+
+// NewPeerManager creates a new PeerManager
+func NewPeerManager(peers []string, backendPool *BackendPool) *PeerManager {
+	return &PeerManager{
+		peers:       peers,
+		backendPool: backendPool,
+	}
+}
+
+// BroadcastState sends the local backend pool state to all peers
+func (pm *PeerManager) BroadcastState() {
+	pm.stateMutex.RLock()
+	defer pm.stateMutex.RUnlock()
+
+	for _, peer := range pm.peers {
+		go func(peer string) {
+			err := pm.sendStateToPeer(peer)
+			if err != nil {
+				log.Printf("Failed to send state to peer %s: %v", peer, err)
+			}
+		}(peer)
+	}
+}
+
+// sendStateToPeer sends the backend pool state to a specific peer
+func (pm *PeerManager) sendStateToPeer(peer string) error {
+	pm.stateMutex.RLock()
+	defer pm.stateMutex.RUnlock()
+
+	stateData, err := json.Marshal(pm.backendPool.ListBackends())
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/update_state", peer), bytes.NewBuffer(stateData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("non-OK response from peer %s: %s", peer, resp.Status)
+	}
+	return nil
+}
+
+// UpdateState updates the local backend pool state with data from a peer
+func (pm *PeerManager) UpdateState(newState []Backend) {
+	pm.stateMutex.Lock()
+	defer pm.stateMutex.Unlock()
+
+	for _, backend := range newState {
+		pm.backendPool.AddOrUpdateBackend(&backend)
+	}
+}
+
+// AddOrUpdateBackend adds a backend if it doesn't exist or updates it if it does
+func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	existingBackend, exists := bp.backends[newBackend.Address]
+	if exists {
+		existingBackend.ActiveConnections = newBackend.ActiveConnections
+		existingBackend.Health = newBackend.Health
+	} else {
+		bp.backends[newBackend.Address] = newBackend
+	}
 }

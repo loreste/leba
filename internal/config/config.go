@@ -10,16 +10,17 @@ import (
 
 // Config represents the overall configuration structure
 type Config struct {
-	FrontendAddress string          `yaml:"frontend_address"`
-	APIPort         string          `yaml:"api_port"`
-	PeerPort        string          `yaml:"peer_port"`
-	ClusterDNS      string          `yaml:"cluster_dns"`
-	NodeID          string          `yaml:"node_id"`
-	FrontendDNS     string          `yaml:"frontend_dns"`
-	InitialPeers    []PeerConfig    `yaml:"initial_peers"`
-	Backends        []BackendConfig `yaml:"backends"`
-	TLSConfig       TLSConfig       `yaml:"tls_config"`
-	CacheConfig     CacheConfig     `yaml:"cache_config"`
+	FrontendAddress  string            `yaml:"frontend_address"`
+	APIPort          string            `yaml:"api_port"`
+	PeerPort         string            `yaml:"peer_port"`
+	ClusterDNS       string            `yaml:"cluster_dns"`
+	NodeID           string            `yaml:"node_id"`
+	FrontendDNS      string            `yaml:"frontend_dns"`
+	InitialPeers     []PeerConfig      `yaml:"initial_peers"`
+	Backends         []BackendConfig   `yaml:"backends"`
+	TLSConfig        TLSConfig         `yaml:"tls_config"`
+	CacheConfig      CacheConfig       `yaml:"cache_config"`
+	FrontendServices []FrontendService `yaml:"frontend_services"` // Added for dynamic services
 }
 
 // PeerConfig represents configuration for a peer node
@@ -37,7 +38,7 @@ type BackendConfig struct {
 	MaxOpenConnections int    `yaml:"max_open_connections"`
 	MaxIdleConnections int    `yaml:"max_idle_connections"`
 	ConnMaxLifetime    int    `yaml:"conn_max_lifetime"`
-	Role               string `yaml:"role"` // Added this field
+	Role               string `yaml:"role"` // primary or replica
 }
 
 // TLSConfig holds TLS configuration details
@@ -54,6 +55,12 @@ type CacheConfig struct {
 	Enabled         bool `yaml:"enabled"`
 	Expiration      int  `yaml:"expiration"`       // Expiration time for cached items in seconds
 	CleanupInterval int  `yaml:"cleanup_interval"` // Interval for cleaning up expired items in seconds
+}
+
+// FrontendService represents a service configuration for the load balancer
+type FrontendService struct {
+	Protocol string `yaml:"protocol"`
+	Port     int    `yaml:"port"`
 }
 
 // LoadConfig loads configuration from a given file path

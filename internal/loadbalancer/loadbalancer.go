@@ -1,3 +1,4 @@
+// loadbalancer.go
 package loadbalancer
 
 import (
@@ -14,7 +15,8 @@ import (
 	"crypto/tls"
 	"leba/internal/config"
 
-	_ "github.com/lib/pq" // PostgreSQL driver
+	_ "github.com/go-sql-driver/mysql" // MySQL driver
+	_ "github.com/lib/pq"              // PostgreSQL driver
 )
 
 // LoadBalancer represents the main load balancer logic
@@ -69,6 +71,9 @@ func (lb *LoadBalancer) StartService(protocol string, port int) error {
 	case "postgres":
 		return lb.startPostgres(address)
 
+	case "mysql":
+		return lb.startMySQL(address)
+
 	default:
 		return fmt.Errorf("unsupported protocol: %s", protocol)
 	}
@@ -109,22 +114,42 @@ func (lb *LoadBalancer) startPostgres(address string) error {
 			continue
 		}
 
-		go lb.handlePostgresConnection(conn)
+		go lb.handleDatabaseConnection(conn, "postgres")
 	}
 }
 
-func (lb *LoadBalancer) handlePostgresConnection(conn net.Conn) {
+// startMySQL handles MySQL connections
+func (lb *LoadBalancer) startMySQL(address string) error {
+	log.Printf("Starting MySQL load balancer on %s", address)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("failed to start MySQL listener: %v", err)
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("MySQL connection error: %v", err)
+			continue
+		}
+
+		go lb.handleDatabaseConnection(conn, "mysql")
+	}
+}
+
+// handleDatabaseConnection handles database connections for PostgreSQL and MySQL
+func (lb *LoadBalancer) handleDatabaseConnection(conn net.Conn, protocol string) {
 	defer conn.Close()
 
-	backend, err := lb.routeRequest("postgres")
+	backend, err := lb.routeRequest(protocol)
 	if err != nil {
-		log.Printf("Failed to route PostgreSQL request: %v", err)
+		log.Printf("Failed to route %s request: %v", protocol, err)
 		return
 	}
 
 	backendConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", backend.Address, backend.Port))
 	if err != nil {
-		log.Printf("Failed to connect to PostgreSQL backend: %v", err)
+		log.Printf("Failed to connect to %s backend: %v", protocol, err)
 		return
 	}
 	defer backendConn.Close()

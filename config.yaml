@@ -1,40 +1,49 @@
-frontend_address: ":5000"
-api_port: "8080"
-peer_port: "8081"
-cluster_dns: "lb-cluster.example.com"
-node_id: "node1"
-frontend_dns: "loadbalancer.example.com"
+frontend_address: ":5000" # Address for the frontend load balancer
+api_port: "8080"         # API management port
+peer_port: "8081"        # Port for peer communication
+cluster_dns: "lb-cluster.example.com" # DNS for the load balancer cluster
+node_id: "node1"         # Unique identifier for this node
+frontend_dns: "loadbalancer.example.com" # Public-facing DNS
 
+# Allowed ports for each protocol
+allowed_ports:
+  http: [80]
+  https: [443]
+  postgres: [5432]
+  mysql: [3306]
+
+# Peer nodes in the cluster
 initial_peers:
-  - address: "node2.example.com:8081"
-    node_id: "node2"
-  - address: "node3.example.com:8081"
-    node_id: "node3"
+  - address: "peer1.example.com:8081"
+    node_id: "peer1"
+  - address: "peer2.example.com:8081"
+    node_id: "peer2"
 
+# Backend server configurations
 backends:
-  - address: "backend1.example.com:80"
+  - address: "192.168.1.10"
     protocol: "http"
     port: 80
     weight: 1
-    role: "replica" # Added role field for consistency
+    role: "replica" # HTTP replica backend
 
-  - address: "backend2.example.com:443"
+  - address: "192.168.1.11"
     protocol: "https"
     port: 443
-    weight: 1
-    role: "replica" # Added role field for consistency
+    weight: 2
+    role: "replica" # HTTPS replica backend
 
-  - address: "db1.example.com:5432"
-    protocol: "postgresql"
+  - address: "192.168.2.10"
+    protocol: "postgres"
     port: 5432
     weight: 1
-    role: "primary" # Added role for PostgreSQL primary
+    role: "primary" # PostgreSQL primary backend
 
-  - address: "db2.example.com:3306"
+  - address: "192.168.2.11"
     protocol: "mysql"
     port: 3306
     weight: 1
-    role: "replica" # Added role for MySQL
+    role: "replica" # MySQL replica backend
 
 tls_config:
   enabled: true
@@ -45,4 +54,16 @@ tls_config:
 
 cache_config:
   enabled: true
-  expiration: 300
+  expiration: 300         # Expiration time for cached items in seconds
+  cleanup_interval: 60    # Interval for cleaning up expired items in seconds
+
+# Frontend services dynamically defined
+frontend_services:
+  - protocol: "http"
+    port: 80
+  - protocol: "https"
+    port: 443
+  - protocol: "postgres"
+    port: 5432
+  - protocol: "mysql"
+    port: 3306

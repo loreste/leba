@@ -222,8 +222,8 @@ func (pm *PeerManager) UpdateState(newState []Backend) {
 	pm.stateMutex.Lock()
 	defer pm.stateMutex.Unlock()
 
-	for _, backend := range newState {
-		pm.backendPool.AddOrUpdateBackend(&backend)
+	for i := range newState {
+		pm.backendPool.AddOrUpdateBackend(&newState[i])
 	}
 }
 

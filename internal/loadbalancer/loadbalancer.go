@@ -1,4 +1,3 @@
-// loadbalancer.go
 package loadbalancer
 
 import (

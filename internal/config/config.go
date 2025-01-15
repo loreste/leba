@@ -20,7 +20,8 @@ type Config struct {
 	Backends         []BackendConfig   `yaml:"backends"`
 	TLSConfig        TLSConfig         `yaml:"tls_config"`
 	CacheConfig      CacheConfig       `yaml:"cache_config"`
-	FrontendServices []FrontendService `yaml:"frontend_services"` // Added for dynamic services
+	FrontendServices []FrontendService `yaml:"frontend_services"`
+	AllowedPorts     map[string][]int  `yaml:"allowed_ports"` // Added for dynamic allowed ports
 }
 
 // PeerConfig represents configuration for a peer node

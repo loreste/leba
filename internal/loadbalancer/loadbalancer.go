@@ -27,14 +27,16 @@ type LoadBalancer struct {
 	certFile        string
 	keyFile         string
 	peerManager     *PeerManager
+	allowedPorts    map[string][]int // Added to hold allowed ports dynamically
 	mu              sync.RWMutex
 }
 
 // NewLoadBalancer creates a new LoadBalancer instance
-func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, tlsConfig *tls.Config, cacheConfig config.CacheConfig, certFile, keyFile string, peerManager *PeerManager) *LoadBalancer {
+func NewLoadBalancer(frontendAddress string, backendPool *BackendPool, allowedPorts map[string][]int, tlsConfig *tls.Config, cacheConfig config.CacheConfig, certFile, keyFile string, peerManager *PeerManager) *LoadBalancer {
 	return &LoadBalancer{
 		frontendAddress: frontendAddress,
 		backendPool:     backendPool,
+		allowedPorts:    allowedPorts,
 		tlsConfig:       tlsConfig,
 		cacheConfig:     cacheConfig,
 		certFile:        certFile,
@@ -157,7 +159,7 @@ func (lb *LoadBalancer) handleDatabaseConnection(conn net.Conn, protocol string)
 	io.Copy(conn, backendConn)
 }
 
-// routeRequest routes the query or connection based on protocol
+// routeRequest routes the query or connection based on protocol and validates ports
 func (lb *LoadBalancer) routeRequest(protocol string) (*Backend, error) {
 	lb.backendPool.mu.RLock()
 	defer lb.backendPool.mu.RUnlock()
@@ -165,6 +167,12 @@ func (lb *LoadBalancer) routeRequest(protocol string) (*Backend, error) {
 	var selectedBackend *Backend
 	for _, backend := range lb.backendPool.backends {
 		if backend.Protocol == protocol && backend.Health {
+			// Validate ports dynamically
+			if !lb.isPortAllowed(protocol, backend.Port) {
+				log.Printf("Port %d not allowed for protocol %s", backend.Port, protocol)
+				continue
+			}
+
 			if selectedBackend == nil || backend.ActiveConnections < selectedBackend.ActiveConnections {
 				selectedBackend = backend
 			}
@@ -180,6 +188,21 @@ func (lb *LoadBalancer) routeRequest(protocol string) (*Backend, error) {
 	selectedBackend.mu.Unlock()
 
 	return selectedBackend, nil
+}
+
+// isPortAllowed checks if the port is allowed for the given protocol
+func (lb *LoadBalancer) isPortAllowed(protocol string, port int) bool {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	if ports, exists := lb.allowedPorts[protocol]; exists {
+		for _, allowedPort := range ports {
+			if port == allowedPort {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // PeerManager manages communication between nodes in the cluster
@@ -246,8 +269,8 @@ func (pm *PeerManager) UpdateState(newState []Backend) {
 	pm.stateMutex.Lock()
 	defer pm.stateMutex.Unlock()
 
-	for i := range newState {
-		pm.backendPool.AddOrUpdateBackend(&newState[i])
+	for _, backend := range newState {
+		pm.backendPool.AddOrUpdateBackend(&backend)
 	}
 }
 

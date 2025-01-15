@@ -2,9 +2,7 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"log"
-	"net/http"
 
 	"leba/internal/config"
 	"leba/internal/loadbalancer"
@@ -27,6 +25,7 @@ func main() {
 		}
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{"h2"}, // Enable HTTP/2
 		}
 	}
 
@@ -41,25 +40,25 @@ func main() {
 			MaxOpenConnections: backendCfg.MaxOpenConnections,
 			MaxIdleConnections: backendCfg.MaxIdleConnections,
 			ConnMaxLifetime:    backendCfg.ConnMaxLifetime,
-			Health:             true,            // Assume healthy at start
-			Role:               backendCfg.Role, // Set primary or replica
+			Health:             true, // Assume healthy at start
 		}
 		backendPool.AddBackend(backend)
 	}
 
-	// Convert InitialPeers to []string
-	peers := make([]string, len(cfg.InitialPeers))
-	for i, peer := range cfg.InitialPeers {
-		peers[i] = peer.Address
+	// Convert InitialPeers to a slice of strings
+	var peerAddresses []string
+	for _, peer := range cfg.InitialPeers {
+		peerAddresses = append(peerAddresses, peer.Address)
 	}
 
-	// Initialize PeerManager with peers
-	peerManager := loadbalancer.NewPeerManager(peers, backendPool)
+	// Initialize the peer manager
+	peerManager := loadbalancer.NewPeerManager(peerAddresses, backendPool)
 
 	// Create the LoadBalancer instance
 	lb := loadbalancer.NewLoadBalancer(
 		cfg.FrontendAddress,
 		backendPool,
+		cfg.AllowedPorts, // Dynamically load allowed ports
 		tlsConfig,
 		cfg.CacheConfig,
 		cfg.TLSConfig.CertFile,
@@ -67,29 +66,17 @@ func main() {
 		peerManager,
 	)
 
-	// Start peer state synchronization
+	// Start cluster synchronization
 	go lb.StartClusterSync()
 
-	// Start each frontend service dynamically
+	// Start frontend services dynamically
 	for _, service := range cfg.FrontendServices {
-		go func(protocol string, port int) {
-			if err := lb.StartService(protocol, port); err != nil {
-				log.Fatalf("Failed to start %s service: %v", protocol, err)
+		go func(service config.FrontendService) {
+			if err := lb.StartService(service.Protocol, service.Port); err != nil {
+				log.Printf("Failed to start service for protocol %s on port %d: %v", service.Protocol, service.Port, err)
 			}
-		}(service.Protocol, service.Port)
+		}(service)
 	}
-
-	// HTTP endpoint to receive peer updates
-	http.HandleFunc("/update_state", func(w http.ResponseWriter, r *http.Request) {
-		var newState []loadbalancer.Backend
-		err := json.NewDecoder(r.Body).Decode(&newState)
-		if err != nil {
-			http.Error(w, "Invalid state update", http.StatusBadRequest)
-			return
-		}
-		peerManager.UpdateState(newState)
-		w.WriteHeader(http.StatusOK)
-	})
 
 	// Keep the application running
 	select {}

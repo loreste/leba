@@ -37,6 +37,7 @@ type BackendConfig struct {
 	MaxOpenConnections int    `yaml:"max_open_connections"`
 	MaxIdleConnections int    `yaml:"max_idle_connections"`
 	ConnMaxLifetime    int    `yaml:"conn_max_lifetime"`
+	Role               string `yaml:"role"` // Added this field
 }
 
 // TLSConfig holds TLS configuration details

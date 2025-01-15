@@ -39,7 +39,8 @@ func main() {
 			MaxOpenConnections: backendCfg.MaxOpenConnections,
 			MaxIdleConnections: backendCfg.MaxIdleConnections,
 			ConnMaxLifetime:    backendCfg.ConnMaxLifetime,
-			Health:             true, // Assume healthy at start
+			Health:             true,            // Assume healthy at start
+			Role:               backendCfg.Role, // Set primary or replica
 		}
 		backendPool.AddBackend(backend)
 	}

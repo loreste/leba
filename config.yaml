@@ -5,12 +5,17 @@ cluster_dns: "lb-cluster.example.com" # DNS for the load balancer cluster
 node_id: "node1"         # Unique identifier for this node
 frontend_dns: "loadbalancer.example.com" # Public-facing DNS
 
+# Synchronization settings
+peer_sync_interval: "5s" # Interval for synchronizing state with peers
+
 # Allowed ports for each protocol
 allowed_ports:
   http: [80]
   https: [443]
   postgres: [5432]
   mysql: [3306]
+  sip: [5060]
+  sip_tls: [5061]
 
 # Peer nodes in the cluster
 initial_peers:
@@ -45,6 +50,18 @@ backends:
     weight: 1
     role: "replica" # MySQL replica backend
 
+  - address: "192.168.3.10"
+    protocol: "sip"
+    port: 5060
+    weight: 1
+    role: "primary" # SIP primary backend
+
+  - address: "192.168.3.11"
+    protocol: "sip_tls"
+    port: 5061
+    weight: 1
+    role: "primary" # SIP-TLS primary backend
+
 tls_config:
   enabled: true
   cert_file: "/path/to/cert.pem"
@@ -57,6 +74,9 @@ cache_config:
   expiration: 300         # Expiration time for cached items in seconds
   cleanup_interval: 60    # Interval for cleaning up expired items in seconds
 
+# Logging configuration
+log_file_path: "/var/log/loadbalancer.log" # Path for logging events
+
 # Frontend services dynamically defined
 frontend_services:
   - protocol: "http"
@@ -67,3 +87,7 @@ frontend_services:
     port: 5432
   - protocol: "mysql"
     port: 3306
+  - protocol: "sip"
+    port: 5060
+  - protocol: "sip_tls"
+    port: 5061

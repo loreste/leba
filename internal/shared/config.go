@@ -1,4 +1,4 @@
-package config
+package shared
 
 import (
 	"io"
@@ -6,28 +6,26 @@ import (
 	"os"
 	"time"
 
-	"leba/internal/shared" // Use the shared package for PeerConfig
-
 	"gopkg.in/yaml.v2"
 )
 
 // Config represents the overall configuration structure
 type Config struct {
-	FrontendAddress  string              `yaml:"frontend_address"`
-	APIPort          string              `yaml:"api_port"`
-	PeerPort         string              `yaml:"peer_port"`
-	ClusterDNS       string              `yaml:"cluster_dns"`
-	NodeID           string              `yaml:"node_id"`
-	FrontendDNS      string              `yaml:"frontend_dns"`
-	InitialPeers     []shared.PeerConfig `yaml:"initial_peers"` // Updated to use shared.PeerConfig
-	Backends         []BackendConfig     `yaml:"backends"`
-	TLSConfig        TLSConfig           `yaml:"tls_config"`
-	CacheConfig      CacheConfig         `yaml:"cache_config"`
-	FrontendServices []FrontendService   `yaml:"frontend_services"`
-	AllowedPorts     map[string][]int    `yaml:"allowed_ports"`
-	PeerSyncInterval time.Duration       `yaml:"peer_sync_interval"`
-	LogFilePath      string              `yaml:"log_file_path"`
-	SIPLogFilePath   string              `yaml:"sip_log_file_path"`
+	FrontendAddress  string            `yaml:"frontend_address"`
+	APIPort          string            `yaml:"api_port"`
+	PeerPort         string            `yaml:"peer_port"`
+	ClusterDNS       string            `yaml:"cluster_dns"`
+	NodeID           string            `yaml:"node_id"`
+	FrontendDNS      string            `yaml:"frontend_dns"`
+	InitialPeers     []PeerConfig      `yaml:"initial_peers"` // Updated to use locally defined PeerConfig
+	Backends         []BackendConfig   `yaml:"backends"`
+	TLSConfig        TLSConfig         `yaml:"tls_config"`
+	CacheConfig      CacheConfig       `yaml:"cache_config"`
+	FrontendServices []FrontendService `yaml:"frontend_services"`
+	AllowedPorts     map[string][]int  `yaml:"allowed_ports"`
+	PeerSyncInterval time.Duration     `yaml:"peer_sync_interval"` // For peer synchronization interval
+	LogFilePath      string            `yaml:"log_file_path"`      // For log file path
+	SIPLogFilePath   string            `yaml:"sip_log_file_path"`  // For SIP log file path
 }
 
 // BackendConfig represents configuration for a backend server

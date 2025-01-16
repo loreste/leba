@@ -12,7 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Peer represents a peer node in the cluster.
+// Peer represents a peer node in the cluster
 type Peer struct {
 	NodeID   string
 	Address  string
@@ -21,7 +21,7 @@ type Peer struct {
 	mu       sync.RWMutex // Protects wsConn and isActive
 }
 
-// PeeringManager manages communication with peers.
+// PeeringManager manages communication with peers
 type PeeringManager struct {
 	peers    map[string]*Peer
 	selfNode *Peer
@@ -31,7 +31,7 @@ type PeeringManager struct {
 	upgrader websocket.Upgrader
 }
 
-// NewPeeringManager creates a new PeeringManager.
+// NewPeeringManager creates a new PeeringManager
 func NewPeeringManager(config shared.Config, lb *LoadBalancer) *PeeringManager {
 	selfNode := &Peer{
 		NodeID:  config.NodeID,
@@ -44,19 +44,27 @@ func NewPeeringManager(config shared.Config, lb *LoadBalancer) *PeeringManager {
 		lb:       lb,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all connections; implement security measures as needed.
+				return true // Allow all connections; implement security measures as needed
 			},
 		},
 	}
 }
 
-// Start initializes the peering manager and connects to initial peers.
+// SetLoadBalancer assigns a LoadBalancer instance to the PeeringManager
+func (pm *PeeringManager) SetLoadBalancer(lb *LoadBalancer) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.lb = lb
+	log.Println("LoadBalancer instance assigned to PeeringManager")
+}
+
+// Start initializes the peering manager and connects to initial peers
 func (pm *PeeringManager) Start() {
 	for _, peerConfig := range pm.config.InitialPeers {
 		go pm.connectToPeer(peerConfig)
 	}
 	http.HandleFunc("/ws", pm.handleWebSocket)
-	log.Printf("Peering server started on port %s", pm.config.PeerPort)
+	log.Printf("Peering server started on %s", pm.config.PeerPort)
 	go func() {
 		if err := http.ListenAndServe(":"+pm.config.PeerPort, nil); err != nil {
 			log.Fatalf("Failed to start peering server: %v", err)
@@ -64,7 +72,7 @@ func (pm *PeeringManager) Start() {
 	}()
 }
 
-// connectToPeer establishes a WebSocket connection to a peer.
+// connectToPeer establishes a WebSocket connection to a peer
 func (pm *PeeringManager) connectToPeer(peerConfig shared.PeerConfig) {
 	for {
 		wsURL := "ws://" + peerConfig.Address + "/ws"
@@ -93,7 +101,7 @@ func (pm *PeeringManager) connectToPeer(peerConfig shared.PeerConfig) {
 	}
 }
 
-// handleWebSocket handles incoming WebSocket connections from peers.
+// handleWebSocket handles incoming WebSocket connections from peers
 func (pm *PeeringManager) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := pm.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -123,7 +131,7 @@ func (pm *PeeringManager) handleWebSocket(w http.ResponseWriter, r *http.Request
 	go pm.handlePeerConnection(peer)
 }
 
-// handlePeerConnection manages communication with a connected peer.
+// handlePeerConnection manages communication with a connected peer
 func (pm *PeeringManager) handlePeerConnection(peer *Peer) {
 	defer func() {
 		peer.wsConn.Close()
@@ -136,11 +144,12 @@ func (pm *PeeringManager) handlePeerConnection(peer *Peer) {
 			log.Printf("Error reading message from peer %s: %v", peer.NodeID, err)
 			return
 		}
+
 		pm.handleIncomingMessage(peer, message)
 	}
 }
 
-// handleIncomingMessage processes messages received from peers.
+// handleIncomingMessage processes messages received from peers
 func (pm *PeeringManager) handleIncomingMessage(peer *Peer, message []byte) {
 	var data map[string]interface{}
 	if err := json.Unmarshal(message, &data); err != nil {
@@ -160,7 +169,7 @@ func (pm *PeeringManager) handleIncomingMessage(peer *Peer, message []byte) {
 	}
 }
 
-// handleStateSync handles state synchronization messages.
+// handleStateSync handles state synchronization messages
 func (pm *PeeringManager) handleStateSync(payload interface{}) {
 	var stateData StateData
 	if err := mapToStruct(payload, &stateData); err != nil {
@@ -168,10 +177,11 @@ func (pm *PeeringManager) handleStateSync(payload interface{}) {
 		return
 	}
 
+	log.Printf("Received state sync data: %+v", stateData)
 	pm.syncState(stateData)
 }
 
-// handleBackendUpdate handles backend update messages.
+// handleBackendUpdate handles backend update messages
 func (pm *PeeringManager) handleBackendUpdate(payload interface{}) {
 	var backend *Backend
 	if err := mapToStruct(payload, &backend); err != nil {
@@ -179,10 +189,11 @@ func (pm *PeeringManager) handleBackendUpdate(payload interface{}) {
 		return
 	}
 
+	log.Printf("Received backend update: %+v", backend)
 	pm.lb.backendPool.AddOrUpdateBackend(backend)
 }
 
-// handlePeerUpdate handles peer update messages.
+// handlePeerUpdate handles peer update messages
 func (pm *PeeringManager) handlePeerUpdate(payload interface{}) {
 	var peer *Peer
 	if err := mapToStruct(payload, &peer); err != nil {
@@ -190,10 +201,11 @@ func (pm *PeeringManager) handlePeerUpdate(payload interface{}) {
 		return
 	}
 
+	log.Printf("Received peer update: %+v", peer)
 	pm.updatePeer(peer)
 }
 
-// removePeer removes a peer from the peering manager.
+// removePeer removes a peer from the peering manager
 func (pm *PeeringManager) removePeer(nodeID string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -201,7 +213,7 @@ func (pm *PeeringManager) removePeer(nodeID string) {
 	log.Printf("Peer removed: %s", nodeID)
 }
 
-// syncState synchronizes the local state with the state received from a peer.
+// syncState synchronizes the local state with the state received from a peer
 func (pm *PeeringManager) syncState(stateData StateData) {
 	pm.lb.backendPool.mu.Lock()
 	defer pm.lb.backendPool.mu.Unlock()
@@ -209,14 +221,17 @@ func (pm *PeeringManager) syncState(stateData StateData) {
 	for _, backend := range stateData.Backends {
 		pm.lb.backendPool.AddOrUpdateBackend(backend)
 	}
+
+	log.Printf("State synchronized with peer")
 }
 
-// updatePeer updates a peer's information.
+// updatePeer updates a peer's information
 func (pm *PeeringManager) updatePeer(peer *Peer) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if existingPeer, exists := pm.peers[peer.NodeID]; exists {
+	existingPeer, exists := pm.peers[peer.NodeID]
+	if exists {
 		existingPeer.mu.Lock()
 		existingPeer.Address = peer.Address
 		existingPeer.isActive = peer.isActive
@@ -226,13 +241,13 @@ func (pm *PeeringManager) updatePeer(peer *Peer) {
 	}
 }
 
-// StateData represents the state information exchanged between peers.
+// StateData represents the state information exchanged between peers
 type StateData struct {
 	Backends map[string]*Backend `json:"backends"`
 	Peers    map[string]*Peer    `json:"peers"`
 }
 
-// mapToStruct converts a map to a struct using JSON marshalling/unmarshalling.
+// mapToStruct converts a map to a struct using JSON marshalling/unmarshalling
 func mapToStruct(data interface{}, target interface{}) error {
 	bytes, err := json.Marshal(data)
 	if err != nil {

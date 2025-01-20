@@ -2,46 +2,53 @@ syntax = "proto3";
 
 package loadbalancer;
 
-option go_package = "leba/internal/loadbalancer/proto;proto";
+// Set the Go package path to match the intended structure
+option go_package = "leba/internal/loadbalancer/proto";
 
-// The LoadBalancer service definition.
+// The LoadBalancer service definition
 service LoadBalancer {
   rpc AddBackend(BackendRequest) returns (BackendResponse);
   rpc RemoveBackend(RemoveBackendRequest) returns (BackendResponse);
   rpc ListBackends(ListBackendsRequest) returns (ListBackendsResponse);
 }
 
+// Request to add a backend server
 message BackendRequest {
-  string address = 1;
-  string protocol = 2;
-  int32 port = 3;
-  int32 weight = 4;
-  int32 max_open_connections = 5;
-  int32 max_idle_connections = 6;
-  int32 conn_max_lifetime = 7;
+  string address = 1; // IP address or hostname of the backend
+  string protocol = 2; // Protocol (e.g., HTTP, HTTPS, SIP)
+  int32 port = 3; // Port number
+  int32 weight = 4; // Load balancing weight
+  int32 max_open_connections = 5; // Maximum number of open connections
+  int32 max_idle_connections = 6; // Maximum number of idle connections
+  int32 conn_max_lifetime = 7; // Connection max lifetime in seconds
 }
 
+// Response for backend operations
 message BackendResponse {
-  string message = 1;
+  string message = 1; // Response message (e.g., success or error details)
 }
 
+// Request to remove a backend server
 message RemoveBackendRequest {
-  string address = 1;
+  string address = 1; // IP address or hostname of the backend to remove
 }
 
+// Request to list all backend servers
 message ListBackendsRequest {}
 
+// Response for listing backend servers
 message ListBackendsResponse {
-  repeated BackendInfo backends = 1;
+  repeated BackendInfo backends = 1; // List of backend server information
 }
 
+// Information about a backend server
 message BackendInfo {
-  string address = 1;
-  string protocol = 2;
-  int32 port = 3;
-  int32 weight = 4;
-  int32 max_open_connections = 5;
-  int32 max_idle_connections = 6;
-  int32 conn_max_lifetime = 7;
-  bool health = 8;
+  string address = 1; // IP address or hostname of the backend
+  string protocol = 2; // Protocol (e.g., HTTP, HTTPS, SIP)
+  int32 port = 3; // Port number
+  int32 weight = 4; // Load balancing weight
+  int32 max_open_connections = 5; // Maximum number of open connections
+  int32 max_idle_connections = 6; // Maximum number of idle connections
+  int32 conn_max_lifetime = 7; // Connection max lifetime in seconds
+  bool health = 8; // Health status of the backend (true for healthy)
 }

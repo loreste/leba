@@ -2,6 +2,7 @@ package loadbalancer
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"crypto/tls"
 	"leba/internal/config"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
@@ -66,13 +66,15 @@ func (lb *LoadBalancer) StartService(protocol string, port int) error {
 	switch protocol {
 	case "http":
 		log.Println("Starting HTTP service...")
-		http.HandleFunc("/", lb.handleHTTP)
-		return http.ListenAndServe(address, nil)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/http", lb.handleHTTP) // Unique route for HTTP
+		return http.ListenAndServe(address, mux)
 
 	case "https":
 		log.Println("Starting HTTPS service...")
-		http.HandleFunc("/", lb.handleHTTPS)
-		return http.ListenAndServeTLS(address, lb.certFile, lb.keyFile, nil)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/https", lb.handleHTTPS) // Unique route for HTTPS
+		return http.ListenAndServeTLS(address, lb.certFile, lb.keyFile, mux)
 
 	case "postgres":
 		log.Println("Starting PostgreSQL service...")
@@ -286,19 +288,5 @@ func (pm *PeerManager) UpdateState(newState []Backend) {
 
 	for i := range newState {
 		pm.backendPool.AddOrUpdateBackend(&newState[i])
-	}
-}
-
-// AddOrUpdateBackend adds a backend if it doesn't exist or updates it if it does
-func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
-
-	existingBackend, exists := bp.backends[newBackend.Address]
-	if exists {
-		existingBackend.ActiveConnections = newBackend.ActiveConnections
-		existingBackend.Health = newBackend.Health
-	} else {
-		bp.backends[newBackend.Address] = newBackend
 	}
 }

@@ -57,3 +57,28 @@ func (bp *BackendPool) ListBackends() []*Backend {
 	}
 	return result
 }
+
+// AddOrUpdateBackend adds a backend if it doesn't exist or updates it if it does
+func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	existingBackend, exists := bp.backends[newBackend.Address]
+	if exists {
+		// Update existing backend properties
+		existingBackend.mu.Lock()
+		existingBackend.Protocol = newBackend.Protocol
+		existingBackend.Port = newBackend.Port
+		existingBackend.Weight = newBackend.Weight
+		existingBackend.MaxOpenConnections = newBackend.MaxOpenConnections
+		existingBackend.MaxIdleConnections = newBackend.MaxIdleConnections
+		existingBackend.ConnMaxLifetime = newBackend.ConnMaxLifetime
+		existingBackend.Health = newBackend.Health
+		existingBackend.Role = newBackend.Role
+		existingBackend.ActiveConnections = newBackend.ActiveConnections
+		existingBackend.mu.Unlock()
+	} else {
+		// Add new backend
+		bp.backends[newBackend.Address] = newBackend
+	}
+}

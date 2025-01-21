@@ -1,9 +1,7 @@
 package loadbalancer
 
 import (
-	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -13,9 +11,6 @@ import (
 	"time"
 
 	"leba/internal/config"
-
-	_ "github.com/go-sql-driver/mysql" // MySQL driver
-	_ "github.com/lib/pq"              // PostgreSQL driver
 )
 
 // LoadBalancer represents the main load balancer logic
@@ -67,13 +62,13 @@ func (lb *LoadBalancer) StartService(protocol string, port int) error {
 	case "http":
 		log.Println("Starting HTTP service...")
 		mux := http.NewServeMux()
-		mux.HandleFunc("/http", lb.handleHTTP) // Unique route for HTTP
+		mux.HandleFunc("/", lb.handleHTTP)
 		return http.ListenAndServe(address, mux)
 
 	case "https":
 		log.Println("Starting HTTPS service...")
 		mux := http.NewServeMux()
-		mux.HandleFunc("/https", lb.handleHTTPS) // Unique route for HTTPS
+		mux.HandleFunc("/", lb.handleHTTPS)
 		return http.ListenAndServeTLS(address, lb.certFile, lb.keyFile, mux)
 
 	case "postgres":
@@ -93,25 +88,13 @@ func (lb *LoadBalancer) StartService(protocol string, port int) error {
 // handleHTTP handles HTTP requests
 func (lb *LoadBalancer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Handling HTTP request: %s", r.URL.Path)
-	backend, err := lb.routeRequest("http")
-	if err != nil {
-		log.Printf("HTTP routing error: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to route HTTP request: %v", err), http.StatusInternalServerError)
-		return
-	}
-	http.Redirect(w, r, fmt.Sprintf("http://%s%s", backend.Address, r.URL.Path), http.StatusTemporaryRedirect)
+	lb.routeAndForward(w, r, "http")
 }
 
 // handleHTTPS handles HTTPS requests
 func (lb *LoadBalancer) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Handling HTTPS request: %s", r.URL.Path)
-	backend, err := lb.routeRequest("https")
-	if err != nil {
-		log.Printf("HTTPS routing error: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to route HTTPS request: %v", err), http.StatusInternalServerError)
-		return
-	}
-	http.Redirect(w, r, fmt.Sprintf("https://%s%s", backend.Address, r.URL.Path), http.StatusTemporaryRedirect)
+	lb.routeAndForward(w, r, "https")
 }
 
 // startPostgres handles PostgreSQL connections
@@ -174,6 +157,18 @@ func (lb *LoadBalancer) handleDatabaseConnection(conn net.Conn, protocol string)
 	io.Copy(conn, backendConn)
 }
 
+// routeAndForward handles routing and forwarding HTTP/HTTPS requests
+func (lb *LoadBalancer) routeAndForward(w http.ResponseWriter, r *http.Request, protocol string) {
+	backend, err := lb.routeRequest(protocol)
+	if err != nil {
+		log.Printf("Routing error for protocol %s: %v", protocol, err)
+		http.Error(w, fmt.Sprintf("Failed to route request: %v", err), http.StatusInternalServerError)
+		return
+	}
+	url := fmt.Sprintf("%s://%s%s", protocol, backend.Address, r.URL.Path)
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
 // routeRequest routes the query or connection based on protocol and validates ports
 func (lb *LoadBalancer) routeRequest(protocol string) (*Backend, error) {
 	log.Printf("Routing request for protocol: %s", protocol)
@@ -219,74 +214,4 @@ func (lb *LoadBalancer) isPortAllowed(protocol string, port int) bool {
 		}
 	}
 	return false
-}
-
-// PeerManager manages communication between nodes in the cluster
-type PeerManager struct {
-	peers       []string
-	stateMutex  sync.RWMutex
-	backendPool *BackendPool
-}
-
-// NewPeerManager creates a new PeerManager
-func NewPeerManager(peers []string, backendPool *BackendPool) *PeerManager {
-	log.Println("Initializing PeerManager...")
-	return &PeerManager{
-		peers:       peers,
-		backendPool: backendPool,
-	}
-}
-
-// BroadcastState sends the local backend pool state to all peers
-func (pm *PeerManager) BroadcastState() {
-	pm.stateMutex.RLock()
-	defer pm.stateMutex.RUnlock()
-
-	for _, peer := range pm.peers {
-		go func(peer string) {
-			err := pm.sendStateToPeer(peer)
-			if err != nil {
-				log.Printf("Failed to send state to peer %s: %v", peer, err)
-			}
-		}(peer)
-	}
-}
-
-// sendStateToPeer sends the backend pool state to a specific peer
-func (pm *PeerManager) sendStateToPeer(peer string) error {
-	pm.stateMutex.RLock()
-	defer pm.stateMutex.RUnlock()
-
-	stateData, err := json.Marshal(pm.backendPool.ListBackends())
-	if err != nil {
-		return err
-	}
-
-	client := &http.Client{}
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/update_state", peer), bytes.NewBuffer(stateData))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("non-OK response from peer %s: %s", peer, resp.Status)
-	}
-	return nil
-}
-
-// UpdateState updates the local backend pool state with data from a peer
-func (pm *PeerManager) UpdateState(newState []Backend) {
-	pm.stateMutex.Lock()
-	defer pm.stateMutex.Unlock()
-
-	for i := range newState {
-		pm.backendPool.AddOrUpdateBackend(&newState[i])
-	}
 }

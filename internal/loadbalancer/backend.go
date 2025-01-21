@@ -5,7 +5,6 @@ import (
 )
 
 // Backend represents a server backend
-// Updated to include Role for read/write differentiation
 type Backend struct {
 	Address            string
 	Protocol           string
@@ -58,6 +57,14 @@ func (bp *BackendPool) ListBackends() []*Backend {
 	return result
 }
 
+// GetBackend retrieves a specific backend by address
+func (bp *BackendPool) GetBackend(address string) (*Backend, bool) {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	backend, exists := bp.backends[address]
+	return backend, exists
+}
+
 // AddOrUpdateBackend adds a backend if it doesn't exist or updates it if it does
 func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
 	bp.mu.Lock()
@@ -67,6 +74,8 @@ func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
 	if exists {
 		// Update existing backend properties
 		existingBackend.mu.Lock()
+		defer existingBackend.mu.Unlock()
+
 		existingBackend.Protocol = newBackend.Protocol
 		existingBackend.Port = newBackend.Port
 		existingBackend.Weight = newBackend.Weight
@@ -76,7 +85,6 @@ func (bp *BackendPool) AddOrUpdateBackend(newBackend *Backend) {
 		existingBackend.Health = newBackend.Health
 		existingBackend.Role = newBackend.Role
 		existingBackend.ActiveConnections = newBackend.ActiveConnections
-		existingBackend.mu.Unlock()
 	} else {
 		// Add new backend
 		bp.backends[newBackend.Address] = newBackend

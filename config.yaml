@@ -45,6 +45,46 @@ backends:
     weight: 1
     role: "replica" # MySQL replica backend
 
+# DNS-based backend configurations
+dns_backends:
+  - domain: "app.example.com"
+    protocol: "http"
+    port: 80
+    weight: 1
+    is_primary: true
+    group_name: "app-servers"
+    resolution_timeout: 5s
+    resolution_interval: 30s
+    ttl: 60s
+
+  - domain: "db.example.com"
+    protocol: "postgres"
+    port: 5432
+    weight: 1
+    is_primary: true
+    group_name: "db-servers"
+    resolution_timeout: 5s
+    resolution_interval: 30s
+    ttl: 60s
+
+# Simple DNS backends using string format (domain:port/protocol)
+dns_backend_strings:
+  - "api.example.com:80/http"
+  - "cache.example.com:6379/redis"
+  - "mongo.example.com:27017/mongodb"
+
+# Failover group configurations
+failover_groups:
+  - name: "app-servers"
+    mode: "active-passive"
+    backends: ["app1.example.com", "app2.example.com", "app3.example.com"]
+    primary: "app1.example.com"
+
+  - name: "db-servers"
+    mode: "active-passive"
+    backends: ["db1.example.com", "db2.example.com"]
+    primary: "db1.example.com"
+
 tls_config:
   enabled: true
   cert_file: "/path/to/cert.pem"

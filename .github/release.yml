@@ -1,0 +1,25 @@
+changelog:
+  categories:
+    - title: '🚀 Features'
+      labels:
+        - 'feature'
+        - 'enhancement'
+    - title: '🐛 Bug Fixes'
+      labels:
+        - 'fix'
+        - 'bugfix'
+        - 'bug'
+    - title: '🧰 Maintenance'
+      labels:
+        - 'chore'
+        - 'maintenance'
+        - 'documentation'
+    - title: '⚠️ Breaking Changes'
+      labels:
+        - 'breaking-change'
+    - title: '🔧 Dependencies'
+      labels:
+        - 'dependencies'
+    - title: '🔐 Security'
+      labels:
+        - 'security'

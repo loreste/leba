@@ -1,26 +1,45 @@
 # LEBA API Documentation
 
-## Management API
+## Overview
 
-LEBA provides a comprehensive HTTP API for configuration, monitoring, and runtime management.
+The LEBA Management API provides comprehensive programmatic access to all load balancer functionality. This RESTful API enables real-time configuration updates, monitoring, and operational management without service interruption.
 
-### API Authentication
+## Authentication
 
-All API requests require JWT authentication:
+### JWT Authentication
+
+All API endpoints require JWT authentication. Include the JWT token in the Authorization header:
 
 ```bash
-curl -H "Authorization: Bearer YOUR_JWT_TOKEN" http://localhost:8080/api/v1/status
+curl -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     http://localhost:8080/api/v1/status
 ```
 
-### Backends Management
+### Obtaining a JWT Token
+
+Generate a JWT token using your configured secret:
+
+```bash
+# Example using jwt-cli or similar tool
+jwt encode --secret="your-jwt-secret" \
+           --exp="+1h" \
+           '{"sub": "admin", "role": "admin"}'
+```
+
+## API Endpoints
+
+### Backend Management
 
 #### List All Backends
+
+Retrieve a comprehensive list of all configured backends with their current status.
 
 ```
 GET /api/v1/backends
 ```
 
-Response:
+**Response Format:**
 ```json
 {
   "backends": [
@@ -30,30 +49,61 @@ Response:
       "port": 80,
       "health": true,
       "active_connections": 5,
-      "weight": 1
+      "weight": 1,
+      "circuit_state": "closed",
+      "failure_count": 0,
+      "last_health_check": "2024-01-15T10:30:00Z"
     }
   ],
-  "count": 1
+  "count": 1,
+  "timestamp": "2024-01-15T10:35:00Z"
 }
 ```
 
+**Status Codes:**
+- `200 OK` - Request successful
+- `401 Unauthorized` - Invalid or missing JWT token
+- `500 Internal Server Error` - Server error
+
 #### Add Backend
+
+Dynamically add a new backend to the load balancer pool.
 
 ```
 POST /api/v1/backends
 ```
 
-Request body:
+**Request Body:**
 ```json
 {
   "address": "192.168.1.11",
   "protocol": "http",
   "port": 80,
-  "weight": 1
+  "weight": 1,
+  "max_connections": 100,
+  "health_check_interval": "10s",
+  "tags": ["production", "zone-a"]
 }
 ```
 
+**Response:**
+```json
+{
+  "backend_id": "backend-192.168.1.11:80",
+  "message": "Backend added successfully",
+  "timestamp": "2024-01-15T10:36:00Z"
+}
+```
+
+**Status Codes:**
+- `201 Created` - Backend added successfully
+- `400 Bad Request` - Invalid backend configuration
+- `409 Conflict` - Backend already exists
+- `401 Unauthorized` - Invalid or missing JWT token
+
 #### Remove Backend
+
+Safely remove a backend from the pool with graceful connection draining.
 
 ```
 DELETE /api/v1/backends/{backend_id}

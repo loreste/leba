@@ -45,3 +45,6 @@ config.local.yaml
 *.key
 *.crt
 *.csr
+
+# Development documentation
+DEVELOPMENT.md

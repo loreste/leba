@@ -1,30 +1,44 @@
-# LEBA Failover System
+# High Availability & Failover Configuration
 
 ## Overview
 
-The LEBA Failover System provides advanced high availability capabilities through active/passive failover groups. This system ensures service continuity by automatically redirecting traffic when primary backends become unavailable.
+LEBA's enterprise-grade failover system delivers mission-critical high availability through intelligent traffic management, automatic failure detection, and seamless failover orchestration. Designed for zero-downtime operations, it ensures continuous service availability even during backend failures, maintenance windows, or infrastructure events.
 
-## Features
+## Architecture & Capabilities
 
-- **Multiple Failover Modes**
-  - Active/Passive: Traffic goes to primary backend until it fails
-  - Normal: Traffic is distributed to all healthy backends
-  
-- **Automatic Primary Election**
-  - If the primary fails, a new primary is automatically elected
-  - Configurable election strategies
+### Failover Strategies
 
-- **Failure Detection Integration**
-  - Works with health checking and circuit breaker patterns
-  - Detects network failures, application errors, and timeouts
+#### Active-Passive Mode
+- **Primary-First Routing**: All traffic directed to primary backend during normal operations
+- **Automatic Failover**: Instant traffic redirection upon primary failure detection
+- **Failback Options**: Configurable automatic or manual failback to primary
+- **State Preservation**: Maintain session state during failover events
 
-- **Manual Failover Control**
-  - Force failover through API commands
-  - Schedule maintenance windows
+#### Active-Active Mode
+- **Load Distribution**: Traffic distributed across all healthy backends
+- **Dynamic Rebalancing**: Automatic traffic redistribution on backend changes
+- **Weighted Routing**: Fine-grained traffic control based on backend capacity
+- **Geographic Affinity**: Route based on client proximity to backends
 
-- **DNS Integration**
-  - Create failover groups with DNS-discovered backends
-  - Works seamlessly with dynamic DNS resolution
+### Advanced Features
+
+#### Intelligent Health Monitoring
+- **Multi-Layer Health Checks**: Application, network, and protocol-specific checks
+- **Predictive Failure Detection**: Identify degrading backends before complete failure
+- **Custom Health Criteria**: Define complex health evaluation logic
+- **Health Score Tracking**: Continuous backend performance scoring
+
+#### Failover Orchestration
+- **Sub-Second Detection**: Rapid failure identification and response
+- **Graceful Degradation**: Progressive traffic reduction for failing backends
+- **Connection Draining**: Safe migration of active connections
+- **Rollback Protection**: Prevent flapping between unstable backends
+
+#### Operational Control
+- **Manual Override**: Force failover for maintenance or testing
+- **Scheduled Maintenance**: Plan failover windows with automatic execution
+- **API-Driven Control**: Full programmatic failover management
+- **Audit Logging**: Complete failover event history and analysis
 
 ## Configuration
 

@@ -1,17 +1,28 @@
-# LEBA DNS-Based Backend Discovery
+# DNS-Based Service Discovery
 
 ## Overview
 
-DNS-based Backend Discovery enables LEBA to dynamically discover and connect to backend services using DNS resolution. This feature is particularly useful in dynamic environments like Kubernetes, AWS, or other cloud platforms where service IP addresses frequently change.
+LEBA's DNS-based service discovery enables automatic, real-time backend discovery through DNS resolution. This enterprise-grade feature seamlessly integrates with modern infrastructure platforms including Kubernetes, AWS Route 53, Google Cloud DNS, and traditional DNS servers, providing zero-touch backend management in dynamic environments.
 
-## Features
+## Key Features
 
-- **Dynamic Discovery**: Automatically discover backend services through DNS resolution
-- **Periodic Refreshing**: Continuously update backend pools as DNS records change
-- **Failover Integration**: Works with the failover system for high availability
-- **Multiple Configuration Options**: Support for both structured and simple string configs
-- **TTL Management**: Honor DNS TTL or override with custom settings
-- **Resolution Controls**: Configure timeout and interval settings
+### Automatic Discovery
+- **Real-time Resolution**: Continuously discover and update backend endpoints
+- **Multi-Record Support**: Handle A, AAAA, and SRV records
+- **Intelligent Caching**: Respect DNS TTL with configurable overrides
+- **Health-Aware Updates**: Only add healthy backends to the pool
+
+### Advanced Capabilities
+- **Graceful Updates**: Zero-downtime backend additions and removals
+- **Failover Integration**: Seamless integration with active/passive failover groups
+- **Load Distribution**: Automatic weight distribution based on SRV priorities
+- **Resolution Strategies**: Support for round-robin, weighted, and geographic DNS
+- **Error Resilience**: Automatic retry with exponential backoff
+
+### Monitoring & Observability
+- **Resolution Metrics**: Track DNS query performance and failures
+- **Change Detection**: Log all backend additions and removals
+- **Health Correlation**: Correlate DNS changes with backend health
 
 ## Configuration
 

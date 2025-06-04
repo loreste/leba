@@ -1,4 +1,5 @@
 //go:build !integration
+
 package loadbalancer
 
 import (
@@ -13,7 +14,6 @@ func TestBackendCircuitBreaker(t *testing.T) {
 		Protocol:     "http",
 		Port:         8080,
 		Health:       true,
-		CircuitState: CircuitClosed,
 	}
 
 	// Test initial state
@@ -47,9 +47,8 @@ func TestBackendCircuitBreaker(t *testing.T) {
 	}
 
 	// Manually transition to half-open state
-	backend.mu.Lock()
-	backend.CircuitState = CircuitHalfOpen
-	backend.mu.Unlock()
+	// Force circuit to half-open by manipulating internal state
+	backend.circuitState.Store(int32(CircuitHalfOpen))
 
 	// Should be available for trial requests in half-open state
 	if !backend.IsAvailable() {
@@ -65,8 +64,8 @@ func TestBackendCircuitBreaker(t *testing.T) {
 	}
 
 	// Verify circuit is closed
-	if backend.CircuitState != CircuitClosed {
-		t.Errorf("Expected circuit state to be closed, got %v", backend.CircuitState)
+	if backend.GetCircuitState() != CircuitClosed {
+		t.Errorf("Expected circuit state to be closed, got %v", backend.GetCircuitState())
 	}
 }
 
@@ -79,7 +78,6 @@ func TestBackendPoolOperations(t *testing.T) {
 		Protocol:     "http",
 		Port:         80,
 		Health:       true,
-		CircuitState: CircuitClosed,
 	}
 	pool.AddBackend(backend1)
 
@@ -89,7 +87,6 @@ func TestBackendPoolOperations(t *testing.T) {
 		Protocol:     "https",
 		Port:         443,
 		Health:       true,
-		CircuitState: CircuitClosed,
 	}
 	pool.AddBackend(backend2)
 
@@ -140,7 +137,6 @@ func TestCircuitBreakerTimeouts(t *testing.T) {
 		Protocol:       "http",
 		Port:           8080,
 		Health:         true,
-		CircuitState:   CircuitClosed,
 		CircuitTimeout: 100 * time.Millisecond, // Very short timeout for testing
 	}
 
@@ -150,15 +146,15 @@ func TestCircuitBreakerTimeouts(t *testing.T) {
 	}
 
 	// Circuit should be open
-	if backend.CircuitState != CircuitOpen {
-		t.Errorf("Expected circuit state to be open, got %v", backend.CircuitState)
+	if backend.GetCircuitState() != CircuitOpen {
+		t.Errorf("Expected circuit state to be open, got %v", backend.GetCircuitState())
 	}
 
 	// Wait for circuit timeout (plus a small buffer)
 	time.Sleep(150 * time.Millisecond)
 
 	// Circuit should transition to half-open
-	if backend.CircuitState != CircuitHalfOpen {
-		t.Errorf("Expected circuit state to be half-open after timeout, got %v", backend.CircuitState)
+	if backend.GetCircuitState() != CircuitHalfOpen {
+		t.Errorf("Expected circuit state to be half-open after timeout, got %v", backend.GetCircuitState())
 	}
 }

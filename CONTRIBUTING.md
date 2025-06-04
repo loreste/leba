@@ -1,16 +1,22 @@
 # Contributing to LEBA
 
-We love your input! We want to make contributing to LEBA as easy and transparent as possible, whether it's:
+Thank you for your interest in contributing to LEBA! This document provides guidelines and instructions for contributing to the project. We value all contributions, from bug reports to feature implementations.
 
-- Reporting a bug
-- Discussing the current state of the code
-- Submitting a fix
-- Proposing new features
-- Becoming a maintainer
+## Code of Conduct
 
-## Development Process
+By participating in this project, you agree to abide by our Code of Conduct, which promotes a respectful and inclusive environment for all contributors.
 
-We use GitHub to host code, to track issues and feature requests, as well as accept pull requests.
+## How to Contribute
+
+### Reporting Issues
+
+- **Bug Reports**: Include detailed steps to reproduce, expected vs. actual behavior, and system information
+- **Feature Requests**: Describe the use case, proposed solution, and potential alternatives
+- **Security Issues**: Please report security vulnerabilities privately to security@leba-project.org
+
+### Development Workflow
+
+We follow a standard GitHub flow for all contributions:
 
 ### Pull Requests
 
@@ -20,28 +26,76 @@ We use GitHub to host code, to track issues and feature requests, as well as acc
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-### Git Commit Messages
+### Commit Message Guidelines
 
-* Use the present tense ("Add feature" not "Added feature")
-* Use the imperative mood ("Move cursor to..." not "Moves cursor to...")
-* Limit the first line to 72 characters or less
-* Reference issues and pull requests liberally after the first line
-* Consider starting the commit message with an applicable type prefix:
-    * feat: A new feature
-    * fix: A bug fix
-    * docs: Documentation only changes
-    * style: Changes that do not affect the meaning of the code
-    * refactor: A code change that neither fixes a bug nor adds a feature
-    * perf: A code change that improves performance
-    * test: Adding missing tests or correcting existing tests
-    * chore: Changes to the build process or auxiliary tools
+We follow the Conventional Commits specification for clear and consistent commit history:
 
-## Code Style
+#### Format
+```
+<type>(<scope>): <subject>
 
-* Follow standard Go formatting (use `go fmt`)
-* Run `go vet` and `golint` before submitting PRs
-* Write meaningful, descriptive commit messages
-* Include comments that help others understand your code's purpose and functionality
+<body>
+
+<footer>
+```
+
+#### Types
+- **feat**: New feature implementation
+- **fix**: Bug fix
+- **docs**: Documentation changes
+- **style**: Code style changes (formatting, missing semicolons, etc.)
+- **refactor**: Code restructuring without changing functionality
+- **perf**: Performance improvements
+- **test**: Test additions or modifications
+- **chore**: Build process, dependencies, or tooling changes
+
+#### Examples
+```
+feat(backend): add circuit breaker implementation
+
+Implement circuit breaker pattern for backend connections to prevent
+cascading failures. The circuit breaker has three states: closed,
+open, and half-open.
+
+Closes #123
+```
+
+```
+fix(health): correct race condition in health checker
+
+Use atomic operations instead of mutex locks for performance-critical
+health status updates.
+```
+
+## Code Quality Standards
+
+### Go Code Guidelines
+
+- **Formatting**: Use `gofmt` and `goimports` for consistent formatting
+- **Linting**: Pass `golangci-lint` checks (run `make lint`)
+- **Testing**: Maintain test coverage above 80% for new code
+- **Documentation**: Document all exported functions, types, and packages
+- **Error Handling**: Always handle errors explicitly, wrap with context when appropriate
+
+### Testing Requirements
+
+- **Unit Tests**: Write comprehensive unit tests for all new functionality
+- **Integration Tests**: Add integration tests for API endpoints and complex workflows
+- **Benchmarks**: Include benchmarks for performance-critical code paths
+- **Race Detection**: Ensure all tests pass with `-race` flag
+
+### Performance Considerations
+
+- **Memory Management**: Use object pools for frequently allocated objects
+- **Concurrency**: Prefer atomic operations over mutex locks where possible
+- **Profiling**: Profile code for CPU and memory usage in performance-critical sections
+
+### Security Guidelines
+
+- **Input Validation**: Validate all external inputs
+- **Error Messages**: Don't expose sensitive information in error messages
+- **Dependencies**: Keep dependencies minimal and up-to-date
+- **Secrets**: Never commit secrets or credentials
 
 ## License
 

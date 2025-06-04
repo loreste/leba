@@ -54,18 +54,18 @@ LEBA is a high-performance, production-ready distributed load balancer designed 
 
 #### Building from Source
 ```bash
-git clone https://github.com/yourusername/leba.git
+git clone https://github.com/loreste/leba.git
 cd leba
 make build  # Builds with embedded version info
 ```
 
 #### Using Pre-built Binaries
-Download the appropriate binary for your platform from the [releases page](https://github.com/yourusername/leba/releases).
+Download the appropriate binary for your platform from the [releases page](https://github.com/loreste/leba/releases).
 
 #### Docker Installation
 ```bash
-docker pull yourusername/leba:latest
-docker run -d -p 5000:5000 -p 8080:8080 -v /path/to/config.yaml:/etc/leba/config.yaml yourusername/leba:latest
+docker pull loreste/leba:latest
+docker run -d -p 5000:5000 -p 8080:8080 -v /path/to/config.yaml:/etc/leba/config.yaml loreste/leba:latest
 ```
 
 ### Basic Configuration

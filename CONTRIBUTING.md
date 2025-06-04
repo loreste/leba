@@ -12,7 +12,7 @@ By participating in this project, you agree to abide by our Code of Conduct, whi
 
 - **Bug Reports**: Include detailed steps to reproduce, expected vs. actual behavior, and system information
 - **Feature Requests**: Describe the use case, proposed solution, and potential alternatives
-- **Security Issues**: Please report security vulnerabilities privately to security@leba-project.org
+- **Security Issues**: Please report security vulnerabilities privately through GitHub Security Advisories
 
 ### Development Workflow
 

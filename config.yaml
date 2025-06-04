@@ -1,9 +1,9 @@
 frontend_address: ":5000" # Address for the frontend load balancer
 api_port: "8080"         # API management port
 peer_port: "8081"        # Port for peer communication
-cluster_dns: "lb-cluster.example.com" # DNS for the load balancer cluster
-node_id: "node1"         # Unique identifier for this node
-frontend_dns: "loadbalancer.example.com" # Public-facing DNS
+cluster_dns: "leba-cluster.example.com" # DNS for the load balancer cluster
+node_id: "leba-node1"         # Unique identifier for this node
+frontend_dns: "leba.example.com" # Public-facing DNS
 
 # Allowed ports for each protocol
 allowed_ports:
@@ -14,10 +14,10 @@ allowed_ports:
 
 # Peer nodes in the cluster
 initial_peers:
-  - address: "peer1.example.com:8081"
-    node_id: "peer1"
-  - address: "peer2.example.com:8081"
-    node_id: "peer2"
+  - address: "leba-peer1.example.com:8081"
+    node_id: "leba-peer1"
+  - address: "leba-peer2.example.com:8081"
+    node_id: "leba-peer2"
 
 # Backend server configurations
 backends:
@@ -47,17 +47,17 @@ backends:
 
 # DNS-based backend configurations
 dns_backends:
-  - domain: "app.example.com"
+  - domain: "api.example.com"
     protocol: "http"
     port: 80
     weight: 1
     is_primary: true
-    group_name: "app-servers"
+    group_name: "api-servers"
     resolution_timeout: 5s
     resolution_interval: 30s
     ttl: 60s
 
-  - domain: "db.example.com"
+  - domain: "database.example.com"
     protocol: "postgres"
     port: 5432
     weight: 1
@@ -75,15 +75,15 @@ dns_backend_strings:
 
 # Failover group configurations
 failover_groups:
-  - name: "app-servers"
+  - name: "api-servers"
     mode: "active-passive"
-    backends: ["app1.example.com", "app2.example.com", "app3.example.com"]
-    primary: "app1.example.com"
+    backends: ["api1.example.com", "api2.example.com", "api3.example.com"]
+    primary: "api1.example.com"
 
   - name: "db-servers"
     mode: "active-passive"
-    backends: ["db1.example.com", "db2.example.com"]
-    primary: "db1.example.com"
+    backends: ["database1.example.com", "database2.example.com"]
+    primary: "database1.example.com"
 
 tls_config:
   enabled: true

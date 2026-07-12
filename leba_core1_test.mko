@@ -1,0 +1,343 @@
+// Adversarial core tests (config, ACL, LB, doctor, admin, rate, health)
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/doctor.mko"
+pull . "./src/admin.mko"
+
+
+fn TestParseDurationEdges() {
+    assert_eq(parse_duration_ms("2s"), 2000)
+    assert_eq(parse_duration_ms("500ms"), 500)
+    assert_eq(parse_duration_ms("1m"), 60000)
+    assert_eq(parse_duration_ms(""), 0)
+    assert_eq(parse_duration_ms("nope"), 0)
+    assert_eq(parse_duration_ms("10"), 10)
+}
+
+
+fn TestParseRateEdges() {
+    assert_eq(parse_rate("1000/s"), 1000)
+    assert_eq(parse_rate("250"), 250)
+    assert_eq(parse_rate(""), 0)
+}
+
+
+fn TestParseSizeEdges() {
+    assert_eq(parse_size_bytes("128"), 128)
+    assert_eq(parse_size_bytes("2KB"), 2048)
+    assert_eq(parse_size_bytes("3mb"), 3145728)
+    assert_eq(parse_size_bytes(""), 0)
+}
+
+
+fn TestSubstrAndPathQuery() {
+    assert_eq_str(substr("abcdef", 1, 4), "bcd")
+    assert_eq_str(substr("ab", 0, 50), "ab")
+    assert_eq_str(substr("ab", 5, 1), "")
+    assert_eq_str(path_only("/x?y=1"), "/x")
+    assert_eq_str(path_only("/x"), "/x")
+    assert_eq_str(query_of("/x?y=1"), "?y=1")
+    assert_eq_str(query_of("/x"), "")
+}
+
+
+fn TestCookieGetAdversarial() {
+    assert_eq_str(cookie_get("a=1; LEBAID=s2; b=3", "LEBAID"), "s2")
+    assert_eq_str(cookie_get("LEBAID=s2", "LEBAID"), "s2")
+    assert_eq_str(cookie_get("x=y", "LEBAID"), "")
+    assert_eq_str(cookie_get("", "LEBAID"), "")
+    assert_eq_str(cookie_get("LEBAID=", "LEBAID"), "")
+}
+
+
+fn TestHttpUrlAndHostPort() {
+    assert_eq_str(http_url("127.0.0.1", 8080, "/api"), "http://127.0.0.1:8080/api")
+    assert_eq_str(http_url("h", 1, "no-slash"), "http://h:1/no-slash")
+    let hp = parse_host_port("127.0.0.1:9001")
+    assert_eq_str(hp.host, "127.0.0.1")
+    assert_eq_str(hp.port, "9001")
+    let hp2 = parse_host_port("nosplit")
+    assert_eq_str(hp2.port, "0")
+}
+
+
+fn TestJsonEscape() {
+    assert(str_contains(json_escape("a\"b"), "\\\""))
+}
+
+
+fn TestHashStable() {
+    assert(hash_str("abc") >= 0)
+    assert_eq(hash_str("abc"), hash_str("abc"))
+}
+
+
+fn TestConfigMinimal() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  default_backend api\nbackend api\n  balance round_robin\n  server s1 127.0.0.1:9001 weight 10 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.frontends[0].bind_port, 8080)
+    assert_eq_str(w.frontends[0].bind_host, "")
+    assert_eq(w.servers[0].weight, 10)
+    assert_eq(w.frontends[0].maxconn, w.defaults.maxconn)
+}
+
+fn TestFrontendBindHostPort() {
+    let raw = "frontend web\n  bind 127.0.0.1:8080\n  mode http\n  default_backend api\nbackend api\n  server s1 127.0.0.1:9001 weight 10 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.frontends[0].bind_host, "127.0.0.1")
+    assert_eq(w.frontends[0].bind_port, 8080)
+}
+
+
+fn TestDefaultBackendKeyword() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  server a 127.0.0.1:9 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.frontends[0].backend, "api")
+    assert(len(w.routes) >= 1)
+}
+
+
+fn TestBareBackendSectionFootgun() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  backend api\nbackend api\n  server a 127.0.0.1:9 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let mut has_route = 0
+    let mut i = 0
+    while i < len(w.routes) {
+        if str_eq(w.routes[i].frontend, "web") {
+            has_route = 1
+        }
+        i = i + 1
+    }
+    let rep = doctor_world(w)
+    if has_route == 0 {
+        assert_eq(rep.ok, 0)
+    }
+}
+
+
+fn TestAccessLogAndRateLimitParse() {
+    let raw = "frontend web\n  bind 9\n  mode http\n  access_log off\n  rate_limit 100/s\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.frontends[0].access_log, 0)
+    assert_eq(w.frontends[0].rate_limit, 100)
+}
+
+fn TestMaxconnParseAndInheritance() {
+    let raw = "defaults\n  maxconn 77\n  request_body_limit 2MB\nfrontend web\n  bind 9\n  mode http\n  default_backend api\nbackend api\n  maxconn 3\n  server a 127.0.0.1:1 weight 1 check\nfrontend stats\n  bind 10\n  mode stats\n  maxconn 5\n  request_body_limit 64KB\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.defaults.maxconn, 77)
+    assert_eq(w.frontends[0].maxconn, 77)
+    assert_eq(w.frontends[1].maxconn, 5)
+    assert_eq(w.frontends[0].request_body_limit_bytes, 2097152)
+    assert_eq(w.frontends[1].request_body_limit_bytes, 65536)
+    assert_eq(w.backends[0].maxconn, 3)
+}
+
+
+fn TestServerNoCheckAndWeight() {
+    let raw = "frontend w\n  bind 1\n  mode http\n  default_backend b\nbackend b\n  server s 10.0.0.1:80 weight 7 maxconn 2 no_check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.servers[0].check, 0)
+    assert_eq(w.servers[0].weight, 7)
+    assert_eq(w.servers[0].maxconn, 2)
+    assert_eq(w.servers[0].port, 80)
+}
+
+
+fn TestServersFileLoadsBackendMembers() {
+    let servers_path = "/tmp/leba_servers_file_test.txt"
+    let config_path = "/tmp/leba_servers_file_config.conf"
+    let _ = write_file(servers_path, "a 127.0.0.1:10 weight 3 maxconn 8 check\nserver b 127.0.0.1:11 weight 4 no_check\n")
+    let _ = write_file(config_path, "frontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  servers_file /tmp/leba_servers_file_test.txt\n")
+    let w = parse_config_file(config_path)
+    assert_eq(w.ok, 1)
+    assert_eq(len(w.servers), 2)
+    assert_eq_str(w.servers[0].name, "a")
+    assert_eq(w.servers[0].weight, 3)
+    assert_eq(w.servers[0].maxconn, 8)
+    assert_eq(w.servers[1].check, 0)
+    let _ = remove_file(servers_path)
+    let _ = remove_file(config_path)
+}
+
+
+fn TestServersFileRelativeToConfigDir() {
+    let servers_path = "/tmp/leba_servers_file_rel.txt"
+    let config_path = "/tmp/leba_servers_file_rel.conf"
+    let _ = write_file(servers_path, "rel 127.0.0.1:12\n")
+    let _ = write_file(config_path, "frontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  servers_file leba_servers_file_rel.txt\n")
+    let w = parse_config_file(config_path)
+    assert_eq(w.ok, 1)
+    assert_eq(len(w.servers), 1)
+    assert_eq_str(w.servers[0].name, "rel")
+    let _ = remove_file(servers_path)
+    let _ = remove_file(config_path)
+}
+
+
+fn TestRuntimeStateFileLoadsServerState() {
+    let state_path = "/tmp/leba_runtime_state.txt"
+    let config_path = "/tmp/leba_runtime_state.conf"
+    let _ = write_file(state_path, "api a 0 1\n")
+    let _ = write_file(config_path, "defaults\n  state_file /tmp/leba_runtime_state.txt\nfrontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  server a 127.0.0.1:10\n")
+    let w = parse_config_file(config_path)
+    assert_eq(w.ok, 1)
+    assert_eq(w.servers[0].alive, 0)
+    assert_eq(w.servers[0].drain, 1)
+    let _ = remove_file(state_path)
+    let _ = remove_file(config_path)
+}
+
+
+fn TestRuntimeStateFileSave() {
+    let state_path = "/tmp/leba_runtime_state_save.txt"
+    let mut servers = make([]Server, 0, 1)
+    let mut s = server_new("a", "127.0.0.1", 10, 1, 1, "api")
+    s.alive = 0
+    s.drain = 1
+    servers = append(servers, s)
+    let _ = save_runtime_state_file(state_path, "", servers)
+    let raw = read_file(state_path)
+    assert(str_contains(raw, "api a 0 1"))
+    let _ = remove_file(state_path)
+}
+
+
+fn TestRouteAndAcl() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  deny path_prefix /admin\n  route path_prefix /api -> api\n  route default -> web\nbackend api\n  server a 127.0.0.1:1 weight 1 check\nbackend web\n  server w 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq_str(select_backend(w.routes, "web", "/api/v1", "h", ""), "api")
+    assert_eq_str(select_backend(w.routes, "web", "/home", "h", ""), "web")
+    assert_eq(acl_decide(w.acls, "web", "/admin/x", "h", "GET"), 1)
+    assert_eq(acl_decide(w.acls, "web", "/public", "h", "GET"), 0)
+}
+
+
+fn TestEmptyPathPrefixNeverMatches() {
+    assert_eq(match_kind("path_prefix", "", "/anything", "h", "GET", ""), 0)
+    assert_eq(match_kind("path_suffix", "", "/x", "h", "GET", ""), 0)
+    assert_eq(match_kind("path_contains", "", "/x", "h", "GET", ""), 0)
+    let mut routes = make([]Route, 0, 2)
+    routes = append(routes, route_new("web", "path_prefix", "", "evil"))
+    routes = append(routes, route_new("web", "default", "", "good"))
+    assert_eq_str(select_backend(routes, "web", "/x", "h", "good"), "good")
+}
+
+
+fn TestHostMatchWithPort() {
+    assert_eq(match_kind("host", "api.local", "/", "api.local", "GET", ""), 1)
+    assert_eq(match_kind("host", "api.local", "/", "api.local:443", "GET", ""), 1)
+    assert_eq(match_kind("host", "api.local", "/", "api.local.evil", "GET", ""), 0)
+}
+
+
+fn TestAllowListRequiresMatch() {
+    let mut acls = make([]AclRule, 0, 1)
+    acls = append(acls, acl_new("web", "allow", "path_prefix", "/public"))
+    assert_eq(acl_decide(acls, "web", "/public/a", "h", "GET"), 0)
+    assert_eq(acl_decide(acls, "web", "/private", "h", "GET"), 1)
+}
+
+
+fn TestDenyWinsOverAllow() {
+    let mut acls = make([]AclRule, 0, 2)
+    acls = append(acls, acl_new("web", "allow", "path_prefix", "/admin"))
+    acls = append(acls, acl_new("web", "deny", "path_prefix", "/admin/secret"))
+    assert_eq(acl_decide(acls, "web", "/admin/ok", "h", "GET"), 0)
+    assert_eq(acl_decide(acls, "web", "/admin/secret", "h", "GET"), 1)
+}
+
+
+fn TestMethodAcl() {
+    let mut acls = make([]AclRule, 0, 1)
+    acls = append(acls, acl_new("web", "deny", "method", "DELETE"))
+    assert_eq(acl_decide(acls, "web", "/", "h", "DELETE"), 1)
+    assert_eq(acl_decide(acls, "web", "/", "h", "GET"), 0)
+}
+
+
+fn TestFirstMatchRouteWins() {
+    let mut routes = make([]Route, 0, 3)
+    routes = append(routes, route_new("web", "path_prefix", "/api", "api"))
+    routes = append(routes, route_new("web", "path_prefix", "/api/v2", "api2"))
+    routes = append(routes, route_new("web", "default", "", "web"))
+    assert_eq_str(select_backend(routes, "web", "/api/v2/x", "h", ""), "api")
+}
+
+
+fn TestLeastConn() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.conns = 5
+    servers[0] = s0
+    let mut s1 = servers[1]
+    s1.conns = 1
+    servers[1] = s1
+    let mut b = backend_new("api")
+    b.balance = "least_conn"
+    assert_eq(pick_server(servers, b, "c", "", ""), 1)
+}
+
+
+fn TestDrainSkipsWhenAlternativeExists() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.drain = 1
+    servers[0] = s0
+    let mut be = backend_new("api")
+    be.balance = "round_robin"
+    assert_eq(pick_server(servers, be, "x", "", ""), 1)
+}
+
+
+fn TestStickyIgnoresDrainedTarget() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.drain = 1
+    servers[0] = s0
+    let mut be = backend_new("api")
+    be.balance = "round_robin"
+    assert_eq(pick_server(servers, be, "client", "LEBAID", "a"), 1)
+}
+
+
+fn TestStickyHonorsHealthyTarget() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut be = backend_new("api")
+    be.balance = "round_robin"
+    assert_eq(pick_server(servers, be, "c", "LEBAID", "b"), 1)
+}
+
+
+fn TestAllDownReturnsNegative() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.alive = 0
+    servers[0] = s0
+    let be = backend_new("api")
+    assert_eq(pick_server(servers, be, "c", "", ""), -1)
+}
+
+
+fn TestEmptyBackendNoServers() {
+    let servers = make([]Server, 0, 0)
+    let be = backend_new("missing")
+    assert_eq(pick_server(servers, be, "c", "", ""), -1)
+}

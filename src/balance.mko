@@ -1,0 +1,265 @@
+// Load-balancing algorithms and server eligibility helpers.
+pack balance
+
+fn server_indices_for(servers: []Server, backend: string) -> []int {
+    let mut out = make([]int, 0, 8)
+    let mut i = 0
+    while i < len(servers) {
+        if str_eq(servers[i].backend, backend) {
+            out = append(out, i)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn count_alive(servers: []Server, idxs: []int) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < len(idxs) {
+        let s = servers[idxs[i]]
+        // alive and not draining
+        if s.alive == 1 {
+            if s.drain == 0 {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn backend_conn_count(servers: []Server, backend: string) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < len(servers) {
+        if str_eq(servers[i].backend, backend) {
+            n = n + servers[i].conns
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn total_conn_count(servers: []Server) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < len(servers) {
+        n = n + servers[i].conns
+        i = i + 1
+    }
+    return n
+}
+
+fn backend_at_maxconn(servers: []Server, be: Backend) -> int {
+    if be.maxconn <= 0 {
+        return 0
+    }
+    if backend_conn_count(servers, be.name) >= be.maxconn {
+        return 1
+    }
+    return 0
+}
+
+fn frontend_at_maxconn(servers: []Server, fe: Frontend) -> int {
+    if fe.maxconn <= 0 {
+        return 0
+    }
+    if total_conn_count(servers) >= fe.maxconn {
+        return 1
+    }
+    return 0
+}
+
+fn server_eligible(s: Server) -> int {
+    if s.alive != 1 {
+        return 0
+    }
+    if s.drain != 0 {
+        return 0
+    }
+    if s.maxconn > 0 {
+        if s.conns >= s.maxconn {
+            return 0
+        }
+    }
+    return 1
+}
+
+// Pick a server index into the global servers array, or -1 if none available.
+// Mutates backend.rr_idx for round-robin state (caller must write backend back).
+fn pick_server(
+    servers: []Server,
+    be: Backend,
+    client_key: string,
+    sticky_name: string,
+    sticky_val: string
+) -> int {
+    let idxs = server_indices_for(servers, be.name)
+    if len(idxs) == 0 {
+        return -1
+    }
+
+    // Sticky cookie: value is server name (must be eligible — never stick to DRAIN/DOWN)
+    if not str_eq(sticky_name, "") {
+        if not str_eq(sticky_val, "") {
+            let mut i = 0
+            while i < len(idxs) {
+                let si = idxs[i]
+                if str_eq(servers[si].name, sticky_val) {
+                    if server_eligible(servers[si]) == 1 {
+                        return si
+                    }
+                }
+                i = i + 1
+            }
+            // sticky target unusable — fall through to normal pick
+        }
+    }
+
+    // Eligible only (UP and not DRAIN). Drained servers never receive new traffic.
+    // Last-resort for all-DOWN (not drain): pick any alive so total outage is rare;
+    // pure DRAIN of all members fails closed (502) so deploys can empty a pool.
+    let alive_n = count_alive(servers, idxs)
+    let mut pool = make([]int, 0, len(idxs))
+    let mut j = 0
+    while j < len(idxs) {
+        let si = idxs[j]
+        if server_eligible(servers[si]) == 1 {
+            pool = append(pool, si)
+        }
+        j = j + 1
+    }
+    if len(pool) == 0 {
+        // Fail closed when only DRAIN members remain (deploy empty pool).
+        // If everything is hard-DOWN, also fail closed (no silent blackhole to dead hosts).
+        let _ = alive_n
+        return -1
+    }
+
+    let algo = be.balance
+    if str_eq(algo, "random") {
+        let r = rand_intn(len(pool))
+        return pool[r]
+    }
+
+    if str_eq(algo, "ip_hash") {
+        let h = hash_str(client_key)
+        let idx = h % len(pool)
+        return pool[idx]
+    }
+
+    if str_eq(algo, "sip_call_id") {
+        let h = hash_str(client_key)
+        let idx = h % len(pool)
+        return pool[idx]
+    }
+
+    if str_eq(algo, "least_conn") {
+        let mut best = pool[0]
+        let mut best_c = servers[best].conns
+        let mut k = 1
+        while k < len(pool) {
+            let si = pool[k]
+            if servers[si].conns < best_c {
+                best = si
+                best_c = servers[si].conns
+            } else {
+                if servers[si].conns == best_c {
+                    // tie-break by weight (higher preferred)
+                    if servers[si].weight > servers[best].weight {
+                        best = si
+                        best_c = servers[si].conns
+                    }
+                }
+            }
+            k = k + 1
+        }
+        return best
+    }
+
+    if str_eq(algo, "weighted") {
+        // weighted random
+        let mut total = 0
+        let mut k = 0
+        while k < len(pool) {
+            let w = servers[pool[k]].weight
+            if w < 1 {
+                total = total + 1
+            } else {
+                total = total + w
+            }
+            k = k + 1
+        }
+        if total < 1 {
+            total = 1
+        }
+        let mut r = rand_intn(total)
+        k = 0
+        while k < len(pool) {
+            let mut w = servers[pool[k]].weight
+            if w < 1 {
+                w = 1
+            }
+            if r < w {
+                return pool[k]
+            }
+            r = r - w
+            k = k + 1
+        }
+        return pool[len(pool) - 1]
+    }
+
+    // round_robin (default) — weighted smooth-ish: skip by cycling
+    let mut start = be.rr_idx % len(pool)
+    if start < 0 {
+        start = 0
+    }
+    // prefer higher weight by multi-slot expansion conceptually:
+    // simple RR for base; weighted handled above
+    return pool[start]
+}
+
+fn next_rr(be: Backend) -> Backend {
+    let mut out = be
+    out.rr_idx = be.rr_idx + 1
+    if out.rr_idx > 1000000000 {
+        out.rr_idx = 0
+    }
+    return out
+}
+
+fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Server {
+    if idx < 0 {
+        return servers
+    }
+    if idx >= len(servers) {
+        return servers
+    }
+    let mut out = servers
+    let mut s = out[idx]
+    s.total_req = s.total_req + 1
+    s.total_bytes = s.total_bytes + bytes
+    if err != 0 {
+        s.total_err = s.total_err + 1
+    }
+    out[idx] = s
+    return out
+}
+
+fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
+    if idx < 0 {
+        return servers
+    }
+    if idx >= len(servers) {
+        return servers
+    }
+    let mut out = servers
+    let mut s = out[idx]
+    s.conns = s.conns + delta
+    if s.conns < 0 {
+        s.conns = 0
+    }
+    out[idx] = s
+    return out
+}

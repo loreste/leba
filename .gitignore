@@ -1,0 +1,10 @@
+# Build cache and artifacts
+.mako/
+/leba
+*.o
+
+# Local TLS material
+certs/
+
+# Editor/OS noise
+.DS_Store

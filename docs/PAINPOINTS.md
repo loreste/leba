@@ -1,0 +1,100 @@
+# Operator Pain Points Leba Targets
+
+Leba is built around a small set of operational problems that show up in load
+balancer day-to-day work: unclear routing, risky config changes, limited
+runtime control, and missing default observability.
+
+This document describes the workflows Leba tries to make straightforward. It
+does not claim complete coverage of every load-balancing feature.
+
+## Target Workflows
+
+| # | Pain | Leba capability |
+|---|------|-----------------|
+| 1 | Configs are hard to review | Plain `frontend`, `backend`, `route`, `deny`, and `server` lines |
+| 2 | Validation output is not actionable | `leba doctor` prints errors, warnings, and suggested fixes |
+| 3 | Request routing is hard to reason about | `leba explain METHOD PATH [HOST]` dry-runs routing and ACLs |
+| 4 | Runtime control needs custom ceremony | HTTP admin API for drain, ready, disable, and enable |
+| 5 | Backend deploys need safer traffic removal | First-class drain state; drained servers do not receive new traffic |
+| 6 | Basic dashboard data is missing | Built-in HTML UI plus JSON and metrics endpoints |
+| 7 | Probes are often bolted on later | `/readyz` and `/livez` are built in |
+| 8 | Logs need manual formatting to be useful | Structured operational logs and access logs by default |
+| 9 | Bad configs can reach runtime | Doctor catches port clashes, missing backends, empty backends, and malformed rules |
+| 10 | Simple rate limits are too much work | `rate_limit 5000/s` on a frontend |
+| 11 | Sticky sessions should be explicit | `sticky cookie NAME` |
+| 12 | TLS file mistakes should be caught early | `tls_cert` and `tls_key` paths are validated by doctor |
+| 13 | Server state changes should be scriptable | CLI admin commands wrap the HTTP admin API |
+| 14 | Request correlation should be available | Access logs include request ids and trace ids; HTTP upstreams receive validated trace context |
+
+## Common Workflows
+
+### Validate A Config
+
+```bash
+leba doctor configs/leba.conf
+```
+
+Expected output includes a PASS/FAIL result, counts of errors and warnings, and
+fix suggestions for each issue.
+
+### Explain A Request
+
+```bash
+leba explain configs/leba.conf GET /api/v1 host.example
+```
+
+This does not open sockets. It parses the config and reports whether the request
+would be denied and which backend would be selected.
+
+### Drain A Server For Maintenance
+
+```bash
+curl -u user:pass -X POST http://127.0.0.1:18404/admin/drain/api/api1
+# update api1
+curl -u user:pass -X POST http://127.0.0.1:18404/admin/ready/api/api1
+```
+
+Drain state affects new traffic. Existing connection behavior depends on the
+protocol path and the client/upstream behavior.
+
+### Probe Runtime Health
+
+```bash
+curl http://127.0.0.1:18404/livez
+curl http://127.0.0.1:18404/readyz
+```
+
+`livez` reports that the process is responsive. `readyz` reports whether the
+configured runtime state has eligible upstream capacity.
+
+## Honest Boundaries
+
+- Leba covers a focused subset of load-balancing behavior.
+- Config hot-reload is not implemented yet.
+- Runtime server state is persisted across restart when `state_file` is
+  configured; otherwise it is in-memory only.
+- TLS and basic HTTP/2 ingress are implemented for simple request/response
+  proxying; deeper HTTP/2 streaming/multiplexing semantics and HTTP/3 are not.
+- SIP-over-TCP and SIP-over-UDP Call-ID affinity are implemented for signaling;
+  RTP/media relay is not implemented.
+- Service discovery is supported through `servers_file`; manual protected
+  reload and automatic file watching are implemented when the runtime watcher
+  backend is available.
+- The test suite covers important local paths, but your own traffic patterns
+  still need staging and validation.
+
+## Roadmap
+
+- [ ] Hitless config reload.
+- [x] Protected manual `servers_file` reload.
+- [x] Watched `servers_file` reload.
+- [x] TLS termination for simple HTTP proxying.
+- [x] Basic HTTP/2 ingress over TLS/ALPN.
+- [ ] Broader HTTP/2 streaming/multiplexing coverage.
+- [ ] HTTP/3/QUIC ingress proxying.
+- [x] SIP-over-TCP Call-ID affinity.
+- [x] SIP-over-UDP signaling proxying.
+- [ ] RTP/media relay.
+- [x] Metrics text endpoint.
+- [ ] More exhaustive concurrent connection tests.
+- [x] Upstream forwarding of validated trace headers.

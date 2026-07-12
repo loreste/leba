@@ -1,0 +1,26 @@
+[Unit]
+Description=Leba load balancer
+Documentation=https://github.com/loreste/leba
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=leba
+Group=leba
+EnvironmentFile=-/etc/leba/leba.env
+ExecStartPre=/usr/local/bin/leba doctor ${LEBA_CONFIG}
+ExecStart=/usr/local/bin/leba -f ${LEBA_CONFIG}
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/run/leba /var/lib/leba /var/log/leba
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

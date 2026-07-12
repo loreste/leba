@@ -1,0 +1,1844 @@
+pack proxy
+
+struct FwdResult {
+    status: int
+    body: string
+    ok: int
+    bytes: int
+    retries: int
+}
+
+struct ProxyResult {
+    err: int
+    bytes_out: int
+    denied: int
+    rate_limited: int
+    retries: int
+    server_idx: int
+    bytes_in: int
+    servers: []Server
+    backends: []Backend
+    buckets: []RateBucket
+}
+
+fn raw_response_status(raw: string) -> int {
+    let lines = str_split(raw, "\r\n")
+    if len(lines) <= 0 {
+        return 0
+    }
+    let parts = str_split(str_trim_space(lines[0]), " ")
+    let mut seen = 0
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if not str_eq(p, "") {
+            if seen == 1 {
+                return to_int(p)
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn raw_response_body(raw: string) -> string {
+    let cut = str_index(raw, "\r\n\r\n")
+    if cut < 0 {
+        return raw
+    }
+    return substr(raw, cut + 4, str_len(raw))
+}
+
+fn upstream_http_request_text(method: string, path: string, body: string, host: string, port: int, traceparent: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, method)
+    builder_write(b, " ")
+    if str_eq(path, "") {
+        builder_write(b, "/")
+    } else {
+        builder_write(b, path)
+    }
+    builder_write(b, " HTTP/1.0\r\nHost: ")
+    builder_write(b, host)
+    builder_write(b, ":")
+    builder_write(b, int_to_string(port))
+    builder_write(b, "\r\nConnection: close\r\n")
+    if not str_eq(traceparent, "") {
+        builder_write(b, "traceparent: ")
+        builder_write(b, traceparent)
+        builder_write(b, "\r\n")
+    }
+    if not str_eq(body, "") {
+        builder_write(b, "Content-Length: ")
+        builder_write(b, int_to_string(str_len(body)))
+        builder_write(b, "\r\n")
+    }
+    builder_write(b, "\r\n")
+    if not str_eq(body, "") {
+        builder_write(b, body)
+    }
+    return builder_string(b)
+}
+
+// Concurrent dispatch: kick-safe fields only (ints + strings + channels).
+// Worker tasks cannot carry []Server across kick; accept thread does ACL/pick;
+// workers only do upstream I/O + respond.
+struct Dispatch {
+    need_worker: int
+    c: int
+    method: string
+    path: string
+    body: string
+    traceparent: string
+    trace_id: string
+    span_id: string
+    up_host: string
+    up_port: int
+    up_pool: int
+    timeout_ms: int
+    retries: int
+    server_idx: int
+    access_log: int
+    err: int
+    denied: int
+    rate_limited: int
+    bytes_out: int
+    bytes_in: int
+    servers: []Server
+    backends: []Backend
+    buckets: []RateBucket
+}
+
+struct RawRequest {
+    ok: int
+    method: string
+    path: string
+    host: string
+    cookie: string
+    traceparent: string
+    body: string
+    bytes_in: int
+}
+
+fn raw_request_complete(raw: string, max_bytes: int) -> int {
+    if max_bytes > 0 {
+        if str_len(raw) > max_bytes {
+            return 1
+        }
+    }
+    let cut = str_index(raw, "\r\n\r\n")
+    if cut < 0 {
+        return 0
+    }
+    let parsed = http_parse(raw)
+    if http_parsed_chunked(parsed) == 1 {
+        if str_contains(raw, "\r\n0\r\n\r\n") {
+            return 1
+        }
+        return 0
+    }
+    let cl = http_parsed_content_length(parsed)
+    if cl <= 0 {
+        return 1
+    }
+    if str_len(raw) >= cut + 4 + cl {
+        return 1
+    }
+    return 0
+}
+
+fn proxy_traceparent(incoming: string, access_log: int) -> string {
+    if traceparent_valid(incoming) == 1 {
+        return incoming
+    }
+    if access_log == 1 {
+        return traceparent_new()
+    }
+    return ""
+}
+
+fn log_proxy_reject(reason: string, method: string, path: string, host: string, detail: string) {
+    let mut b = str_builder()
+    builder_write(b, "reason=")
+    builder_write(b, reason)
+    builder_write(b, " method=")
+    builder_write(b, method)
+    builder_write(b, " path=\"")
+    builder_write(b, path)
+    builder_write(b, "\" host=\"")
+    builder_write(b, host)
+    builder_write(b, "\"")
+    if not str_eq(detail, "") {
+        builder_write(b, " ")
+        builder_write(b, detail)
+    }
+    log_warn_event("request_rejected", builder_string(b))
+}
+
+fn log_upstream_failure(method: string, path: string, host: string, port: int, status: int, retries: int) {
+    let mut b = str_builder()
+    builder_write(b, "method=")
+    builder_write(b, method)
+    builder_write(b, " path=\"")
+    builder_write(b, path)
+    builder_write(b, "\" upstream=")
+    builder_write(b, host)
+    builder_write(b, ":")
+    builder_write(b, int_to_string(port))
+    builder_write(b, " status=")
+    builder_write(b, int_to_string(status))
+    builder_write(b, " retries=")
+    builder_write(b, int_to_string(retries))
+    log_error_event("upstream_failure", builder_string(b))
+}
+
+fn raw_http_reason(status: int) -> string {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 400 {
+        return "Bad Request"
+    }
+    if status == 413 {
+        return "Payload Too Large"
+    }
+    if status == 403 {
+        return "Forbidden"
+    }
+    if status == 429 {
+        return "Too Many Requests"
+    }
+    if status == 502 {
+        return "Bad Gateway"
+    }
+    if status == 503 {
+        return "Service Unavailable"
+    }
+    return "OK"
+}
+
+fn raw_http_respond(fd: int, status: int, body: string) -> int {
+    return raw_http_respond_method(fd, "GET", status, body)
+}
+
+fn raw_http_respond_ct_method(fd: int, method: string, status: int, content_type: string, body: string) -> int {
+    let mut b = str_builder()
+    builder_write(b, "HTTP/1.1 ")
+    builder_write(b, int_to_string(status))
+    builder_write(b, " ")
+    builder_write(b, raw_http_reason(status))
+    builder_write(b, "\r\nContent-Type: ")
+    builder_write(b, content_type)
+    builder_write(b, "\r\nContent-Length: ")
+    builder_write(b, int_to_string(str_len(body)))
+    builder_write(b, "\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return tcp_write(fd, builder_string(b))
+}
+
+fn raw_http_respond_method(fd: int, method: string, status: int, body: string) -> int {
+    return raw_http_respond_ct_method(fd, method, status, "text/plain; charset=utf-8", body)
+}
+
+fn tls_http_respond_ct_method(conn: TlsConn, method: string, status: int, content_type: string, body: string) -> int {
+    let mut b = str_builder()
+    builder_write(b, "HTTP/1.1 ")
+    builder_write(b, int_to_string(status))
+    builder_write(b, " ")
+    builder_write(b, raw_http_reason(status))
+    builder_write(b, "\r\nContent-Type: ")
+    builder_write(b, content_type)
+    builder_write(b, "\r\nContent-Length: ")
+    builder_write(b, int_to_string(str_len(body)))
+    builder_write(b, "\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return tls_write(conn, builder_string(b))
+}
+
+fn tls_http_respond_method(conn: TlsConn, method: string, status: int, body: string) -> int {
+    return tls_http_respond_ct_method(conn, method, status, "text/plain; charset=utf-8", body)
+}
+
+fn leba_welcome_html() -> string {
+    return "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>LEBA</title><style>body{margin:0;height:100vh;display:grid;place-items:center;font:18px Arial;color:#1b1f24;background:#f7f8fa}.w{text-align:center}.l{display:inline-grid;place-items:center;width:104px;height:104px;border-radius:20px;background:#111827;color:white;font-size:32px;font-weight:800}h1{font-size:52px;margin:24px 0 8px}.b{width:80px;height:6px;background:#15a46d;border-radius:6px;margin:24px auto}</style></head><body><main class=\"w\"><div class=\"l\">LB</div><h1>LEBA</h1><p>No backend is configured for this site yet.</p><div class=\"b\"></div></main></body></html>\n"
+}
+
+fn raw_http_respond_welcome(fd: int, method: string) -> int {
+    return raw_http_respond_ct_method(fd, method, 200, "text/html; charset=utf-8", leba_welcome_html())
+}
+
+fn tls_http_respond_welcome(conn: TlsConn, method: string) -> int {
+    return tls_http_respond_ct_method(conn, method, 200, "text/html; charset=utf-8", leba_welcome_html())
+}
+
+fn leba_should_welcome(path: string) -> int {
+    if str_eq(path, "/") {
+        return 1
+    }
+    if str_eq(path, "/index.html") {
+        return 1
+    }
+    return 0
+}
+
+fn h2_header_value(name: string) -> string {
+    let mut i = 0
+    let n = hpack_decoded_count()
+    while i < n {
+        if str_eq(hpack_decoded_name(i), name) {
+            return hpack_decoded_value(i)
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn h2_raw_request(method: string, path: string, host: string) -> RawRequest {
+    let mut m = method
+    if str_eq(m, "") {
+        m = "GET"
+    }
+    let mut p = path
+    if str_eq(p, "") {
+        p = "/"
+    }
+    let mut h = host
+    if str_eq(h, "") {
+        h = "localhost"
+    }
+    return RawRequest {
+        ok: 1,
+        method: m,
+        path: p,
+        host: h,
+        cookie: "",
+        traceparent: "",
+        body: "",
+        bytes_in: str_len(m) + str_len(p) + str_len(h)
+    }
+}
+
+fn raw_header(raw: string, name: string) -> string {
+    let lines = str_split(raw, "\r\n")
+    let mut i = 1
+    let mut pb = str_builder()
+    builder_write(pb, name)
+    builder_write(pb, ":")
+    let prefix = str_to_lower(builder_string(pb))
+    while i < len(lines) {
+        let line = str_trim_space(lines[i])
+        if str_eq(line, "") {
+            return ""
+        }
+        if str_has_prefix(str_to_lower(line), prefix) {
+            return str_trim_space(substr(line, str_len(prefix), str_len(line)))
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn sip_header(raw: string, name: string) -> string {
+    return raw_header(raw, name)
+}
+
+fn sip_call_id(raw: string) -> string {
+    let cid = sip_header(raw, "Call-ID")
+    if not str_eq(cid, "") {
+        return cid
+    }
+    return sip_header(raw, "i")
+}
+
+fn udp_flow_find(flows: []UdpFlow, frontend: string, backend: string, call_id: string) -> int {
+    let mut i = 0
+    while i < len(flows) {
+        let f = flows[i]
+        if str_eq(f.frontend, frontend) {
+            if str_eq(f.backend, backend) {
+                if str_eq(f.call_id, call_id) {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn udp_flow_peer_is_client(flows: []UdpFlow, frontend: string, peer: int, call_id: string) -> int {
+    let mut i = 0
+    while i < len(flows) {
+        let f = flows[i]
+        if str_eq(f.frontend, frontend) {
+            if f.client_peer == peer {
+                if str_eq(call_id, "") {
+                    return 1
+                }
+                if str_eq(f.call_id, call_id) {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn udp_flow_peer_is_server(flows: []UdpFlow, frontend: string, backend: string, peer: int, call_id: string) -> int {
+    let idx = udp_flow_find(flows, frontend, backend, call_id)
+    if idx < 0 {
+        return 0
+    }
+    let f = flows[idx]
+    if f.server_peer == peer {
+        return 1
+    }
+    return 0
+}
+
+fn udp_flow_mark_server_peer(
+    flows: []UdpFlow,
+    frontend: string,
+    backend: string,
+    call_id: string,
+    server_peer: int
+) -> []UdpFlow {
+    let idx = udp_flow_find(flows, frontend, backend, call_id)
+    if idx < 0 {
+        return flows
+    }
+    let mut out = flows
+    let mut f = out[idx]
+    f.server_peer = server_peer
+    f.last_seen_ms = now_ms()
+    out[idx] = f
+    return out
+}
+
+fn udp_flow_upsert(
+    flows: []UdpFlow,
+    frontend: string,
+    backend: string,
+    call_id: string,
+    client_peer: int,
+    server_idx: int
+) -> []UdpFlow {
+    if str_eq(call_id, "") {
+        return flows
+    }
+    let idx = udp_flow_find(flows, frontend, backend, call_id)
+    let now = now_ms()
+    let mut out = flows
+    if idx >= 0 {
+        let mut f = out[idx]
+        f.client_peer = client_peer
+        f.server_idx = server_idx
+        f.last_seen_ms = now
+        out[idx] = f
+        return out
+    }
+    out = append(out, UdpFlow {
+        frontend: frontend,
+        backend: backend,
+        call_id: call_id,
+        client_peer: client_peer,
+        server_peer: -1,
+        server_idx: server_idx,
+        last_seen_ms: now
+    })
+    return out
+}
+
+fn raw_request_part(line: string, part_no: int) -> string {
+    let parts = str_split(str_trim_space(line), " ")
+    let mut seen = 0
+    let mut i = 0
+    while i < len(parts) {
+        let p = str_trim_space(parts[i])
+        if not str_eq(p, "") {
+            if seen == part_no {
+                return p
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn normalize_request_target(target: string) -> string {
+    if str_has_prefix(target, "/") {
+        return target
+    }
+    if str_eq(target, "*") {
+        return target
+    }
+    let mut t = target
+    if str_has_prefix(t, "http://") {
+        t = substr(t, 7, str_len(t))
+    } else {
+        if str_has_prefix(t, "https://") {
+            t = substr(t, 8, str_len(t))
+        } else {
+            return ""
+        }
+    }
+    let slash = str_index(t, "/")
+    if slash < 0 {
+        return "/"
+    }
+    return substr(t, slash, str_len(t))
+}
+
+fn parse_raw_request(raw: string) -> RawRequest {
+    let parsed = http_parse(raw)
+    let cut = str_index(raw, "\r\n\r\n")
+    let line_end = str_index(raw, "\r\n")
+    let mut first = raw
+    if line_end >= 0 {
+        first = substr(raw, 0, line_end)
+    }
+    let mut method = http_parsed_method(parsed)
+    let mut path = normalize_request_target(http_parsed_path(parsed))
+    let mut body = http_parsed_body(parsed)
+    let mut host = http_parsed_host(parsed)
+    let mut cookie = http_parsed_header(parsed, "Cookie")
+    let mut traceparent = http_parsed_header(parsed, "traceparent")
+    let mut ok = http_parsed_ok(parsed)
+    if ok == 0 {
+        method = raw_request_part(first, 0)
+        path = normalize_request_target(raw_request_part(first, 1))
+        body = ""
+        if cut >= 0 {
+            body = substr(raw, cut + 4, str_len(raw))
+        }
+        host = raw_header(raw, "Host")
+        cookie = raw_header(raw, "Cookie")
+        traceparent = raw_header(raw, "traceparent")
+        if cut >= 0 {
+            if not str_eq(method, "") {
+                if not str_eq(path, "") {
+                    if str_has_prefix(raw_request_part(first, 2), "HTTP/") {
+                        ok = 1
+                    }
+                }
+            }
+        }
+    } else {
+        if cut < 0 {
+            ok = 0
+        }
+        if str_eq(path, "") {
+            ok = 0
+        }
+        if not str_has_prefix(raw_request_part(first, 2), "HTTP/") {
+            ok = 0
+        }
+    }
+    return RawRequest {
+        ok: ok,
+        method: method,
+        path: path,
+        host: host,
+        cookie: cookie,
+        traceparent: traceparent,
+        body: body,
+        bytes_in: str_len(raw)
+    }
+}
+
+fn pack_done_retry(err: int, status: int, si: int, bytes: int, retries: int) -> int {
+    let mut e = 0
+    if err != 0 {
+        e = 1
+    }
+    let mut st = status
+    if st < 0 {
+        st = 0
+    }
+    if st > 999 {
+        st = 999
+    }
+    let mut six = si + 1
+    if six < 0 {
+        six = 0
+    }
+    if six > 4095 {
+        six = 4095
+    }
+    let mut b = bytes
+    if b < 0 {
+        b = 0
+    }
+    if b > 50000000 {
+        b = 50000000
+    }
+    let mut r = retries
+    if r < 0 {
+        r = 0
+    }
+    if r > 1000 {
+        r = 1000
+    }
+    // e | status*2 | (si+1)*2000 | bytes*2000*4096 | retries*retry_base
+    return e + st * 2 + six * 2000 + b * 8192000 + r * 409600008192000
+}
+
+fn pack_done(err: int, status: int, si: int, bytes: int) -> int {
+    return pack_done_retry(err, status, si, bytes, 0)
+}
+
+fn unpack_done_err(v: int) -> int {
+    return v % 2
+}
+
+fn unpack_done_status(v: int) -> int {
+    return (v / 2) % 1000
+}
+
+fn unpack_done_si(v: int) -> int {
+    let six = (v / 2000) % 4096
+    return six - 1
+}
+
+fn unpack_done_bytes(v: int) -> int {
+    return (v / 8192000) % 50000001
+}
+
+fn unpack_done_retries(v: int) -> int {
+    return v / 409600008192000
+}
+
+fn find_backend(backends: []Backend, name: string) -> int {
+    let mut i = 0
+    while i < len(backends) {
+        if str_eq(backends[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn forward_http(
+    method: string,
+    path: string,
+    body: string,
+    traceparent: string,
+    host: string,
+    port: int,
+    timeout_ms: int
+) -> FwdResult {
+    let mut headers = ""
+    if not str_eq(traceparent, "") {
+        let mut hb = str_builder()
+        builder_write(hb, "traceparent: ")
+        builder_write(hb, traceparent)
+        builder_write(hb, "\r\n")
+        headers = builder_string(hb)
+    }
+    let fr = http_forward_full(host, port, method, path, headers, body, timeout_ms)
+    let status = http_forward_status(fr)
+    let resp = http_forward_body(fr)
+    let blen = http_forward_body_len(fr)
+    let ok = http_forward_ok(fr)
+    return FwdResult {
+        status: status,
+        body: resp,
+        ok: ok,
+        bytes: blen,
+        retries: 0
+    }
+}
+
+fn forward_http_retries(
+    method: string,
+    path: string,
+    body: string,
+    traceparent: string,
+    host: string,
+    port: int,
+    timeout_ms: int,
+    retries: int
+) -> FwdResult {
+    let mut res = forward_http(method, path, body, traceparent, host, port, timeout_ms)
+    let mut used = 0
+    let mut limit = retries
+    if limit < 0 {
+        limit = 0
+    }
+    while res.ok == 0 {
+        if used >= limit {
+            res.retries = used
+            return res
+        }
+        used = used + 1
+        res = forward_http(method, path, body, traceparent, host, port, timeout_ms)
+    }
+    res.retries = used
+    return res
+}
+
+// Fast path on accept thread: ACL, rate limit, server pick. No upstream I/O.
+fn prepare_dispatch(
+    c: int,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> Dispatch {
+    let method = http_method(c)
+    let path = http_path(c)
+    let host = http_header(c, "Host")
+    let body = http_body(c)
+    let traceparent = proxy_traceparent(http_header(c, "traceparent"), fe.access_log)
+    let trace_id = traceparent_trace_id(traceparent)
+    let span_id = traceparent_span_id(traceparent)
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
+    let empty = Dispatch {
+        need_worker: 0,
+        c: c,
+        method: method,
+        path: path,
+        body: body,
+        traceparent: traceparent,
+        trace_id: trace_id,
+        span_id: span_id,
+        up_host: "",
+        up_port: 0,
+        up_pool: -1,
+        timeout_ms: 5000,
+        retries: 0,
+        server_idx: -1,
+        access_log: fe.access_log,
+        err: 1,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: str_len(body),
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if str_eq(method, "") {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        let _ = http_respond(c, 400, "bad request\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+    if str_eq(path, "") {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        let _ = http_respond(c, 400, "bad request\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    if fe.request_body_limit_bytes > 0 {
+        if str_len(body) > fe.request_body_limit_bytes {
+            log_proxy_reject("request_too_large", method, path, host, "status=413")
+            let _ = http_respond(c, 413, "request too large\n")
+            let mut dsize = empty
+            dsize.servers = srv_list
+            dsize.backends = be_list
+            dsize.buckets = rate_list
+            return dsize
+        }
+    }
+
+    if fe.rate_limit > 0 {
+        let ri = rate_find(rate_list, fe.name)
+        if ri >= 0 {
+            if rate_would_deny(rate_list[ri]) == 1 {
+                log_proxy_reject("rate_limited", method, path, host, "status=429")
+                let _ = http_respond(c, 429, "rate limited\n")
+                let mut d = empty
+                d.rate_limited = 1
+                d.servers = srv_list
+                d.backends = be_list
+                d.buckets = rate_list
+                return d
+            }
+            rate_list[ri] = rate_take(rate_list[ri])
+        }
+    }
+
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
+        let _ = http_respond(c, 503, "frontend maxconn reached\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    if acl_decide(acls, fe.name, path, host, method) == 1 {
+        log_proxy_reject("acl_denied", method, path, host, "status=403")
+        let _ = http_respond(c, 403, "forbidden\n")
+        let mut d = empty
+        d.denied = 1
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let be_name = select_backend(routes, fe.name, path, host, fe.backend)
+    let bi = find_backend(be_list, be_name)
+    if bi < 0 {
+        if str_eq(be_name, "") {
+            if leba_should_welcome(path) == 1 {
+                let body_welcome = leba_welcome_html()
+                let _ = http_respond_ct(c, 200, "text/html; charset=utf-8", body_welcome)
+                let mut dw = empty
+                dw.err = 0
+                dw.bytes_out = str_len(body_welcome)
+                dw.servers = srv_list
+                dw.backends = be_list
+                dw.buckets = rate_list
+                return dw
+            }
+        }
+        let mut detail = str_builder()
+        builder_write(detail, "status=503 backend=")
+        builder_write(detail, be_name)
+        log_proxy_reject("backend_missing", method, path, host, builder_string(detail))
+        let _ = http_respond(c, 503, "no backend\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        let mut detail2 = str_builder()
+        builder_write(detail2, "status=503 backend=")
+        builder_write(detail2, be.name)
+        builder_write(detail2, " maxconn=")
+        builder_write(detail2, int_to_string(be.maxconn))
+        log_proxy_reject("backend_maxconn", method, path, host, builder_string(detail2))
+        let _ = http_respond(c, 503, "backend maxconn reached\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let cookie = http_header(c, "Cookie")
+    let mut sticky_val = ""
+    if str_len(fe.sticky_cookie) > 0 {
+        sticky_val = cookie_get(cookie, fe.sticky_cookie)
+    }
+
+    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        let mut detail3 = str_builder()
+        builder_write(detail3, "status=502 backend=")
+        builder_write(detail3, be.name)
+        log_proxy_reject("no_server", method, path, host, builder_string(detail3))
+        let _ = http_respond(c, 502, "no server\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let s = srv_list[si]
+    let mut timeout_ms = be.connect_timeout_ms
+    if timeout_ms <= 0 {
+        timeout_ms = 5000
+    }
+
+    // Reserve connection count on accept thread (released when done merges).
+    srv_list = server_conn_delta(srv_list, si, 1)
+
+    return Dispatch {
+        need_worker: 1,
+        c: c,
+        method: method,
+        path: path,
+        body: body,
+        traceparent: traceparent,
+        trace_id: trace_id,
+        span_id: span_id,
+        up_host: s.host,
+        up_port: s.port,
+        up_pool: s.pool,
+        timeout_ms: timeout_ms,
+        retries: be.retries,
+        server_idx: si,
+        access_log: fe.access_log,
+        err: 0,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: str_len(body),
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+}
+
+// Frontend runtime path: use raw TCP accept/read to avoid one-shot http_accept
+// parsing races under concurrent connects.
+fn prepare_raw_dispatch(
+    c: int,
+    req: RawRequest,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> Dispatch {
+    let method = req.method
+    let path = req.path
+    let host = req.host
+    let body = req.body
+    let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
+    let trace_id = traceparent_trace_id(traceparent)
+    let span_id = traceparent_span_id(traceparent)
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
+    let empty = Dispatch {
+        need_worker: 0,
+        c: c,
+        method: method,
+        path: path,
+        body: body,
+        traceparent: traceparent,
+        trace_id: trace_id,
+        span_id: span_id,
+        up_host: "",
+        up_port: 0,
+        up_pool: -1,
+        timeout_ms: 5000,
+        retries: 0,
+        server_idx: -1,
+        access_log: fe.access_log,
+        err: 1,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: req.bytes_in,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if req.bytes_in == 0 {
+        let mut d0 = empty
+        d0.err = 0
+        d0.servers = srv_list
+        d0.backends = be_list
+        d0.buckets = rate_list
+        return d0
+    }
+
+    if fe.request_body_limit_bytes > 0 {
+        if req.bytes_in > fe.request_body_limit_bytes {
+        log_proxy_reject("request_too_large", method, path, host, "status=413")
+        let _ = raw_http_respond_method(c, method, 413, "request too large\n")
+        let mut dsize = empty
+        dsize.servers = srv_list
+        dsize.backends = be_list
+        dsize.buckets = rate_list
+        return dsize
+        }
+    }
+
+    if req.ok == 0 {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        let _ = raw_http_respond_method(c, method, 400, "bad request\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    if fe.rate_limit > 0 {
+        let ri = rate_find(rate_list, fe.name)
+        if ri >= 0 {
+            if rate_would_deny(rate_list[ri]) == 1 {
+                log_proxy_reject("rate_limited", method, path, host, "status=429")
+                let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
+                let mut d = empty
+                d.rate_limited = 1
+                d.servers = srv_list
+                d.backends = be_list
+                d.buckets = rate_list
+                return d
+            }
+            rate_list[ri] = rate_take(rate_list[ri])
+        }
+    }
+
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
+        let _ = raw_http_respond_method(c, method, 503, "frontend maxconn reached\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    if acl_decide(acls, fe.name, path, host, method) == 1 {
+        log_proxy_reject("acl_denied", method, path, host, "status=403")
+        let _ = raw_http_respond_method(c, method, 403, "forbidden\n")
+        let mut d = empty
+        d.denied = 1
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let be_name = select_backend(routes, fe.name, path, host, fe.backend)
+    let bi = find_backend(be_list, be_name)
+    if bi < 0 {
+        if str_eq(be_name, "") {
+            if leba_should_welcome(path) == 1 {
+                let body_welcome = leba_welcome_html()
+                let _ = raw_http_respond_welcome(c, method)
+                let mut dw = empty
+                dw.err = 0
+                dw.bytes_out = str_len(body_welcome)
+                dw.servers = srv_list
+                dw.backends = be_list
+                dw.buckets = rate_list
+                return dw
+            }
+        }
+        let mut detail = str_builder()
+        builder_write(detail, "status=503 backend=")
+        builder_write(detail, be_name)
+        log_proxy_reject("backend_missing", method, path, host, builder_string(detail))
+        let _ = raw_http_respond_method(c, method, 503, "no backend\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        let mut detail2 = str_builder()
+        builder_write(detail2, "status=503 backend=")
+        builder_write(detail2, be.name)
+        builder_write(detail2, " maxconn=")
+        builder_write(detail2, int_to_string(be.maxconn))
+        log_proxy_reject("backend_maxconn", method, path, host, builder_string(detail2))
+        let _ = raw_http_respond_method(c, method, 503, "backend maxconn reached\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let mut sticky_val = ""
+    if str_len(fe.sticky_cookie) > 0 {
+        sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
+    }
+
+    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        let mut detail3 = str_builder()
+        builder_write(detail3, "status=502 backend=")
+        builder_write(detail3, be.name)
+        log_proxy_reject("no_server", method, path, host, builder_string(detail3))
+        let _ = raw_http_respond_method(c, method, 502, "no server\n")
+        let mut d = empty
+        d.servers = srv_list
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+
+    let s = srv_list[si]
+    let mut timeout_ms = be.connect_timeout_ms
+    if timeout_ms <= 0 {
+        timeout_ms = 5000
+    }
+    srv_list = server_conn_delta(srv_list, si, 1)
+
+    return Dispatch {
+        need_worker: 1,
+        c: c,
+        method: method,
+        path: path,
+        body: body,
+        traceparent: traceparent,
+        trace_id: trace_id,
+        span_id: span_id,
+        up_host: s.host,
+        up_port: s.port,
+        up_pool: s.pool,
+        timeout_ms: timeout_ms,
+        retries: be.retries,
+        server_idx: si,
+        access_log: fe.access_log,
+        err: 0,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: req.bytes_in,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+}
+
+fn handle_tls_proxy_request(
+    conn: TlsConn,
+    req: RawRequest,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket,
+    h2_stream: int
+) -> ProxyResult {
+    let method = req.method
+    let path = req.path
+    let host = req.host
+    let body = req.body
+    let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
+    let trace_id = traceparent_trace_id(traceparent)
+    let span_id = traceparent_span_id(traceparent)
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
+    let mut out = ProxyResult {
+        err: 1,
+        bytes_out: 0,
+        denied: 0,
+        rate_limited: 0,
+        retries: 0,
+        server_idx: -1,
+        bytes_in: req.bytes_in,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if req.ok == 0 {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 400, "bad request\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 400, "bad request\n")
+        }
+        return out
+    }
+
+    if fe.request_body_limit_bytes > 0 {
+        if req.bytes_in > fe.request_body_limit_bytes {
+            log_proxy_reject("request_too_large", method, path, host, "status=413")
+            if h2_stream > 0 {
+                let _ = tls_write(conn, http2_response(h2_stream, 413, "request too large\n"))
+            } else {
+                let _ = tls_http_respond_method(conn, method, 413, "request too large\n")
+            }
+            return out
+        }
+    }
+
+    if fe.rate_limit > 0 {
+        let ri = rate_find(rate_list, fe.name)
+        if ri >= 0 {
+            if rate_would_deny(rate_list[ri]) == 1 {
+                log_proxy_reject("rate_limited", method, path, host, "status=429")
+                if h2_stream > 0 {
+                    let _ = tls_write(conn, http2_response(h2_stream, 429, "rate limited\n"))
+                } else {
+                    let _ = tls_http_respond_method(conn, method, 429, "rate limited\n")
+                }
+                out.rate_limited = 1
+                return out
+            }
+            rate_list[ri] = rate_take(rate_list[ri])
+        }
+    }
+
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 503, "frontend maxconn reached\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 503, "frontend maxconn reached\n")
+        }
+        return out
+    }
+
+    if acl_decide(acls, fe.name, path, host, method) == 1 {
+        log_proxy_reject("acl_denied", method, path, host, "status=403")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 403, "forbidden\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 403, "forbidden\n")
+        }
+        out.denied = 1
+        out.buckets = rate_list
+        return out
+    }
+
+    let be_name = select_backend(routes, fe.name, path, host, fe.backend)
+    let bi = find_backend(be_list, be_name)
+    if bi < 0 {
+        if str_eq(be_name, "") {
+            if leba_should_welcome(path) == 1 {
+                let body_welcome = leba_welcome_html()
+                if h2_stream > 0 {
+                    let _ = tls_write(conn, http2_response(h2_stream, 200, body_welcome))
+                } else {
+                    let _ = tls_http_respond_welcome(conn, method)
+                }
+                out.err = 0
+                out.bytes_out = str_len(body_welcome)
+                out.buckets = rate_list
+                return out
+            }
+        }
+        log_proxy_reject("backend_missing", method, path, host, "status=503")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 503, "no backend\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 503, "no backend\n")
+        }
+        out.buckets = rate_list
+        return out
+    }
+
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        log_proxy_reject("backend_maxconn", method, path, host, "status=503")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 503, "backend maxconn reached\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 503, "backend maxconn reached\n")
+        }
+        out.buckets = rate_list
+        return out
+    }
+
+    let mut sticky_val = ""
+    if str_len(fe.sticky_cookie) > 0 {
+        sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
+    }
+    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        log_proxy_reject("no_server", method, path, host, "status=502")
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 502, "no server\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 502, "no server\n")
+        }
+        out.backends = be_list
+        out.buckets = rate_list
+        return out
+    }
+
+    let s = srv_list[si]
+    let mut timeout_ms = be.connect_timeout_ms
+    if timeout_ms <= 0 {
+        timeout_ms = 5000
+    }
+    srv_list = server_conn_delta(srv_list, si, 1)
+    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries)
+    srv_list = server_conn_delta(srv_list, si, 0 - 1)
+    let mut st = res.status
+    if res.ok == 1 {
+        if st <= 0 {
+            st = 200
+        }
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, st, res.body))
+        } else {
+            let _ = tls_http_respond_method(conn, method, st, res.body)
+        }
+        srv_list = mark_server_req(srv_list, si, res.bytes, 0)
+        out.err = 0
+        out.bytes_out = res.bytes
+    } else {
+        st = 502
+        log_upstream_failure(method, path, s.host, s.port, res.status, res.retries)
+        if h2_stream > 0 {
+            let _ = tls_write(conn, http2_response(h2_stream, 502, "bad gateway\n"))
+        } else {
+            let _ = tls_http_respond_method(conn, method, 502, "bad gateway\n")
+        }
+        srv_list = mark_server_req(srv_list, si, 0, 1)
+        out.err = 1
+    }
+    if fe.access_log == 1 {
+        let rid = make_req_id()
+        print(access_log_line(method, path, st, s.host, int_to_string(si), 0, out.bytes_out, rid, trace_id, span_id))
+    }
+    out.retries = res.retries
+    out.server_idx = si
+    out.servers = srv_list
+    out.backends = be_list
+    out.buckets = rate_list
+    return out
+}
+
+fn handle_tls_h2_once(
+    conn: TlsConn,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> ProxyResult {
+    let h2c = http2_conn_new()
+    let _u = http2_conn_use(h2c)
+    let _s = http2_conn_set_server(1)
+    let _w = tls_write(conn, http2_empty_settings())
+    let mut out = ProxyResult {
+        err: 1,
+        bytes_out: 0,
+        denied: 0,
+        rate_limited: 0,
+        retries: 0,
+        server_idx: -1,
+        bytes_in: 0,
+        servers: servers,
+        backends: backends,
+        buckets: buckets
+    }
+    let mut done = 0
+    let mut loops = 0
+    while done == 0 {
+        if loops > 20 {
+            done = 1
+        } else {
+            let bytes = tls_read(conn, 8192)
+            if str_eq(bytes, "") {
+                done = 1
+            } else {
+                out.bytes_in = out.bytes_in + str_len(bytes)
+                let back = http2_conn_pump(bytes)
+                if not str_eq(back, "") {
+                    let _b = tls_write(conn, back)
+                }
+                let stream = http2_conn_header_stream()
+                if stream > 0 {
+                    let _d = hpack_decode_block(http2_conn_header_block(stream))
+                    let req = h2_raw_request(h2_header_value(":method"), h2_header_value(":path"), h2_header_value(":authority"))
+                    out = handle_tls_proxy_request(conn, req, fe, routes, acls, backends, servers, buckets, stream)
+                    done = 1
+                }
+            }
+        }
+        loops = loops + 1
+    }
+    http2_conn_free(h2c)
+    return out
+}
+
+// Worker job: only Copy/string/channel args (crew-safe).
+fn worker_upstream(
+    c: int,
+    method: string,
+    path: string,
+    body: string,
+    traceparent: string,
+    trace_id: string,
+    span_id: string,
+    host: string,
+    port: int,
+    pool: int,
+    timeout_ms: int,
+    retries: int,
+    server_idx: int,
+    access_log: int,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let mut res = FwdResult {
+        status: 0,
+        body: "",
+        ok: 0,
+        bytes: 0,
+        retries: 0
+    }
+    if pool >= 0 {
+        let fd = tcp_pool_acquire(pool)
+        if fd >= 0 {
+            let mut headers = ""
+            if not str_eq(traceparent, "") {
+                let mut hb = str_builder()
+                builder_write(hb, "traceparent: ")
+                builder_write(hb, traceparent)
+                builder_write(hb, "\r\n")
+                headers = builder_string(hb)
+            }
+            let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
+            let ok = http_forward_ok(fr)
+            res = FwdResult {
+                status: http_forward_status(fr),
+                body: http_forward_body(fr),
+                ok: ok,
+                bytes: http_forward_body_len(fr),
+                retries: 0
+            }
+            let _rel = tcp_pool_release(pool, fd, ok)
+        }
+    }
+    if res.ok == 0 {
+        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries)
+    }
+    let mut err = 0
+    let mut st = res.status
+    let mut bytes = res.bytes
+    if res.ok == 1 {
+        if st <= 0 {
+            st = 200
+        }
+        let _ = http_respond(c, st, res.body)
+    } else {
+        err = 1
+        st = 502
+        bytes = 0
+        log_upstream_failure(method, path, host, port, res.status, res.retries)
+        let _ = http_respond(c, 502, "bad gateway\n")
+    }
+    if access_log == 1 {
+        let rid = make_req_id()
+        print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
+    }
+    let _ = http_close(c)
+    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = slots.send(1)
+    return err
+}
+
+fn worker_raw_upstream(
+    c: int,
+    method: string,
+    path: string,
+    body: string,
+    traceparent: string,
+    trace_id: string,
+    span_id: string,
+    host: string,
+    port: int,
+    pool: int,
+    timeout_ms: int,
+    retries: int,
+    server_idx: int,
+    access_log: int,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let mut res = FwdResult {
+        status: 0,
+        body: "",
+        ok: 0,
+        bytes: 0,
+        retries: 0
+    }
+    if pool >= 0 {
+        let fd = tcp_pool_acquire(pool)
+        if fd >= 0 {
+            let mut headers = ""
+            if not str_eq(traceparent, "") {
+                let mut hb = str_builder()
+                builder_write(hb, "traceparent: ")
+                builder_write(hb, traceparent)
+                builder_write(hb, "\r\n")
+                headers = builder_string(hb)
+            }
+            let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
+            let ok = http_forward_ok(fr)
+            res = FwdResult {
+                status: http_forward_status(fr),
+                body: http_forward_body(fr),
+                ok: ok,
+                bytes: http_forward_body_len(fr),
+                retries: 0
+            }
+            let _rel = tcp_pool_release(pool, fd, ok)
+        }
+    }
+    if res.ok == 0 {
+        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries)
+    }
+    let mut err = 0
+    let mut st = res.status
+    let mut bytes = res.bytes
+    if res.ok == 1 {
+        if st <= 0 {
+            st = 200
+        }
+        let _ = raw_http_respond_method(c, method, st, res.body)
+    } else {
+        err = 1
+        st = 502
+        bytes = 0
+        log_upstream_failure(method, path, host, port, res.status, res.retries)
+        let _ = raw_http_respond_method(c, method, 502, "bad gateway\n")
+    }
+    if access_log == 1 {
+        let rid = make_req_id()
+        print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
+    }
+    let _ = tcp_close(c)
+    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = slots.send(1)
+    return err
+}
+
+fn prepare_tcp_dispatch(
+    c: int,
+    fe: Frontend,
+    backends: []Backend,
+    servers: []Server
+) -> Dispatch {
+    let mut srv_list = servers
+    let mut be_list = backends
+    let rate_list = make([]RateBucket, 0, 0)
+    let empty = Dispatch {
+        need_worker: 0,
+        c: c,
+        method: "TCP",
+        path: "",
+        body: "",
+        traceparent: "",
+        trace_id: "",
+        span_id: "",
+        up_host: "",
+        up_port: 0,
+        up_pool: -1,
+        timeout_ms: 30000,
+        retries: 0,
+        server_idx: -1,
+        access_log: fe.access_log,
+        err: 1,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: 0,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", "TCP", "", "", "status=503")
+        let _ = tcp_close(c)
+        let mut d0 = empty
+        d0.servers = srv_list
+        d0.backends = be_list
+        return d0
+    }
+
+    let bi = find_backend(be_list, fe.backend)
+    if bi < 0 {
+        let mut detail = str_builder()
+        builder_write(detail, "status=503 backend=")
+        builder_write(detail, fe.backend)
+        log_proxy_reject("backend_missing", "TCP", "", "", builder_string(detail))
+        let _ = tcp_close(c)
+        let mut d1 = empty
+        d1.servers = srv_list
+        d1.backends = be_list
+        return d1
+    }
+
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        let mut detail2 = str_builder()
+        builder_write(detail2, "status=503 backend=")
+        builder_write(detail2, be.name)
+        builder_write(detail2, " maxconn=")
+        builder_write(detail2, int_to_string(be.maxconn))
+        log_proxy_reject("backend_maxconn", "TCP", "", "", builder_string(detail2))
+        let _ = tcp_close(c)
+        let mut d2 = empty
+        d2.servers = srv_list
+        d2.backends = be_list
+        return d2
+    }
+
+    let mut initial_data = ""
+    let mut pick_key = ""
+    if str_eq(be.balance, "sip_call_id") {
+        let mut wait_ms = be.connect_timeout_ms
+        if wait_ms <= 0 {
+            wait_ms = 3000
+        }
+        if io_read_ready(c, wait_ms) > 0 {
+            initial_data = tcp_read(c)
+            pick_key = sip_call_id(initial_data)
+        }
+        if str_eq(pick_key, "") {
+            pick_key = initial_data
+        }
+    }
+
+    let si = pick_server(srv_list, be, pick_key, "", "")
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        let mut detail3 = str_builder()
+        builder_write(detail3, "status=502 backend=")
+        builder_write(detail3, be.name)
+        log_proxy_reject("no_server", "TCP", "", "", builder_string(detail3))
+        let _ = tcp_close(c)
+        let mut d3 = empty
+        d3.servers = srv_list
+        d3.backends = be_list
+        return d3
+    }
+
+    let s = srv_list[si]
+    let mut idle_ms = be.connect_timeout_ms
+    if idle_ms <= 0 {
+        idle_ms = 30000
+    }
+    srv_list = server_conn_delta(srv_list, si, 1)
+
+    return Dispatch {
+        need_worker: 1,
+        c: c,
+        method: "TCP",
+        path: "",
+        body: initial_data,
+        traceparent: "",
+        trace_id: "",
+        span_id: "",
+        up_host: s.host,
+        up_port: s.port,
+        up_pool: s.pool,
+        timeout_ms: idle_ms,
+        retries: 0,
+        server_idx: si,
+        access_log: fe.access_log,
+        err: 0,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: str_len(initial_data),
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+}
+
+fn worker_tcp_upstream(
+    c: int,
+    frontend: string,
+    host: string,
+    port: int,
+    idle_ms: int,
+    initial_data: string,
+    server_idx: int,
+    access_log: int,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let bytes = proxy_tcp_session(c, host, port, idle_ms, initial_data)
+    let mut err = 0
+    if bytes <= 0 {
+        err = 1
+    }
+    if access_log == 1 {
+        let rid = make_req_id()
+        let mut line = str_builder()
+        builder_write(line, "[access] id=")
+        builder_write(line, rid)
+        builder_write(line, " TCP frontend=")
+        builder_write(line, frontend)
+        builder_write(line, " upstream=")
+        builder_write(line, host)
+        builder_write(line, ":")
+        builder_write(line, int_to_string(port))
+        builder_write(line, " bytes=")
+        builder_write(line, int_to_string(bytes))
+        print(builder_string(line))
+    }
+    let _ = done.send(pack_done(err, 200, server_idx, bytes))
+    let _ = slots.send(1)
+    return err
+}
+
+// Serial proxy (used by tests / single-thread fallback).
+fn proxy_http_once(
+    c: int,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> ProxyResult {
+    let d = prepare_dispatch(c, fe, routes, acls, backends, servers, buckets)
+    if d.need_worker == 0 {
+        let _ = http_close(c)
+        return ProxyResult {
+            err: d.err,
+            bytes_out: d.bytes_out,
+            denied: d.denied,
+            rate_limited: d.rate_limited,
+            retries: 0,
+            server_idx: d.server_idx,
+            bytes_in: d.bytes_in,
+            servers: d.servers,
+            backends: d.backends,
+            buckets: d.buckets
+        }
+    }
+    let res = forward_http_retries(d.method, d.path, d.body, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries)
+    let mut srv_list = d.servers
+    srv_list = server_conn_delta(srv_list, d.server_idx, 0 - 1)
+    if res.ok == 1 {
+        srv_list = mark_server_req(srv_list, d.server_idx, res.bytes, 0)
+        let mut st = res.status
+        if st <= 0 {
+            st = 200
+        }
+        let _ = http_respond(c, st, res.body)
+        let _ = http_close(c)
+        return ProxyResult {
+            err: 0,
+            bytes_out: res.bytes,
+            denied: 0,
+            rate_limited: 0,
+            retries: res.retries,
+            server_idx: d.server_idx,
+            bytes_in: d.bytes_in,
+            servers: srv_list,
+            backends: d.backends,
+            buckets: d.buckets
+        }
+    }
+    srv_list = mark_server_req(srv_list, d.server_idx, 0, 1)
+    let _ = http_respond(c, 502, "bad gateway\n")
+    let _ = http_close(c)
+    return ProxyResult {
+        err: 1,
+        bytes_out: 0,
+        denied: 0,
+        rate_limited: 0,
+        retries: res.retries,
+        server_idx: d.server_idx,
+        bytes_in: d.bytes_in,
+        servers: srv_list,
+        backends: d.backends,
+        buckets: d.buckets
+    }
+}
+
+fn proxy_tcp_session(client: int, host: string, port: int, idle_ms: int, initial_data: string) -> int {
+    let up = tcp_connect(host, port)
+    if up < 0 {
+        let _ = tcp_close(client)
+        return 0
+    }
+    let _ = tcp_nodelay(client)
+    let _ = tcp_nodelay(up)
+    let mut alive = 1
+    let mut nbytes = 0
+    if not str_eq(initial_data, "") {
+        let n0 = tcp_write(up, initial_data)
+        if n0 < 0 {
+            alive = 0
+        } else {
+            nbytes = nbytes + str_len(initial_data)
+        }
+    }
+    let mut spins = 0
+    let mut client_done = 0
+    let mut idle = idle_ms
+    if idle <= 0 {
+        idle = 30000
+    }
+    while alive == 1 {
+        let mut which = 0
+        if client_done == 1 {
+            let w2 = io_native_poll2(up, -1, idle)
+            if w2 == 0 {
+                which = 1
+            } else {
+                which = w2
+            }
+        } else {
+            which = io_native_poll2(client, up, idle)
+        }
+        if which < 0 {
+            spins = spins + 1
+            if spins > 3 {
+                alive = 0
+            }
+        } else {
+            spins = 0
+            if which == 0 {
+                let data = tcp_read(client)
+                if str_eq(data, "") {
+                    client_done = 1
+                } else {
+                    let n = tcp_write(up, data)
+                    if n < 0 {
+                        alive = 0
+                    } else {
+                        nbytes = nbytes + str_len(data)
+                    }
+                }
+            } else {
+                if which == 1 {
+                    let data = tcp_read(up)
+                    if str_eq(data, "") {
+                        alive = 0
+                    } else {
+                        let n = tcp_write(client, data)
+                        if n < 0 {
+                            alive = 0
+                        } else {
+                            nbytes = nbytes + str_len(data)
+                        }
+                    }
+                } else {
+                    alive = 0
+                }
+            }
+        }
+    }
+    let _ = tcp_close(client)
+    let _ = tcp_close(up)
+    return nbytes
+}

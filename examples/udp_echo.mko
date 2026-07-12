@@ -1,0 +1,36 @@
+fn main() {
+    let mut port = 19160
+    let mut name = "udp"
+    if argc() > 1 {
+        match parse_int(arg_get(1)) {
+            Ok(v) => {
+                if v > 0 {
+                    port = v
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    if argc() > 2 {
+        name = arg_get(2)
+    }
+    let u = game_udp_bind(port)
+    let ev = evloop_new()
+    let _ = evloop_add(ev, game_udp_fd(u), 1)
+    let mut handled = 0
+    while handled < 20 {
+        let n = evloop_wait(ev, 5000)
+        if n > 0 {
+            let data = game_udp_recv(u)
+            let peer = game_udp_sender(u)
+            if not str_eq(data, "") {
+                let _ = game_udp_send(u, peer, name + ":" + data)
+                handled = handled + 1
+            }
+        } else {
+            handled = 20
+        }
+    }
+    let _ = evloop_close(ev)
+    game_udp_close(u)
+}

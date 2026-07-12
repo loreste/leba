@@ -1,0 +1,44 @@
+// Tiny TCP echo origin for Leba TCP/database frontend smoke tests.
+// Usage: mako run examples/tcp_echo.mko -- 19100 db1
+
+fn main() {
+    let mut port = 19100
+    let mut name = "tcp"
+    if argc() > 1 {
+        match parse_int(arg_get(1)) {
+            Ok(v) => {
+                if v > 0 {
+                    port = v
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    if argc() > 2 {
+        name = arg_get(2)
+    }
+
+    let fd = tcp_listen(port)
+    if fd < 0 {
+        print("bind failed")
+        return
+    }
+    let mut n = 0
+    while n < 100000 {
+        let c = tcp_accept(fd)
+        if c < 0 {
+            continue
+        }
+        let data = tcp_read(c)
+        if not str_eq(data, "") {
+            let mut b = str_builder()
+            builder_write(b, name)
+            builder_write(b, ":")
+            builder_write(b, data)
+            let _ = tcp_write(c, builder_string(b))
+        }
+        let _ = tcp_close(c)
+        n = n + 1
+    }
+    let _ = tcp_close(fd)
+}

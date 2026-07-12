@@ -1,0 +1,7 @@
+# Mako package manifest — Leba load balancer
+name = "leba"
+version = "0.1.0"
+description = "Enterprise HAProxy-class load balancer written in Mako"
+
+[dependencies]
+# pure Mako — no external packages

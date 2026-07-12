@@ -1,0 +1,122 @@
+// ACL engine — deny/allow by path, host, method, header
+pack acl
+
+fn match_kind(kind: string, value: string, path: string, host: string, method: string, hdr: string) -> int {
+    // Empty match values are footguns ("" is a prefix of every string).
+    // Treat empty value as non-match for path* kinds except exact path "".
+    if str_eq(kind, "path_prefix") {
+        if str_eq(value, "") {
+            return 0
+        }
+        if str_has_prefix(path, value) {
+            return 1
+        }
+        return 0
+    }
+    if str_eq(kind, "path") {
+        if str_eq(path, value) {
+            return 1
+        }
+        return 0
+    }
+    if str_eq(kind, "path_suffix") {
+        if str_eq(value, "") {
+            return 0
+        }
+        if str_has_suffix(path, value) {
+            return 1
+        }
+        return 0
+    }
+    if str_eq(kind, "path_contains") {
+        if str_eq(value, "") {
+            return 0
+        }
+        if str_contains(path, value) {
+            return 1
+        }
+        return 0
+    }
+    if str_eq(kind, "host") {
+        // host may include port
+        if str_eq(host, value) {
+            return 1
+        }
+        if str_has_prefix(host, value) {
+            if str_has_prefix(substr(host, str_len(value), str_len(host)), ":") {
+                return 1
+            }
+        }
+        return 0
+    }
+    if str_eq(kind, "method") {
+        if str_eq(str_to_upper(method), str_to_upper(value)) {
+            return 1
+        }
+        return 0
+    }
+    if str_eq(kind, "header_contains") {
+        if str_contains(hdr, value) {
+            return 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// Returns: 0 = pass, 1 = deny
+// Policy: if any allow rules exist for frontend, request must match at least one allow
+//         (unless no allow rules). Deny always wins when matched.
+fn acl_decide(acls: []AclRule, frontend: string, path: string, host: string, method: string) -> int {
+    let mut has_allow = 0
+    let mut allowed = 0
+    let mut i = 0
+    while i < len(acls) {
+        let r = acls[i]
+        i = i + 1
+        if not str_eq(r.frontend, frontend) {
+            continue
+        }
+        let hit = match_kind(r.kind, r.value, path, host, method, "")
+        if str_eq(r.action, "deny") {
+            if hit == 1 {
+                return 1
+            }
+        } else {
+            if str_eq(r.action, "allow") {
+                has_allow = 1
+                if hit == 1 {
+                    allowed = 1
+                }
+            }
+        }
+    }
+    if has_allow == 1 {
+        if allowed == 0 {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn select_backend(routes: []Route, frontend: string, path: string, host: string, fallback: string) -> string {
+    let p = path_only(path)
+    let mut default_be = fallback
+    let mut i = 0
+    while i < len(routes) {
+        let r = routes[i]
+        i = i + 1
+        if not str_eq(r.frontend, frontend) {
+            continue
+        }
+        if str_eq(r.kind, "default") {
+            default_be = r.backend
+            continue
+        }
+        // reuse match_kind so empty prefixes / host rules stay consistent with ACLs
+        if match_kind(r.kind, r.value, p, host, "GET", "") == 1 {
+            return r.backend
+        }
+    }
+    return default_be
+}

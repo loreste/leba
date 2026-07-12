@@ -1,0 +1,105 @@
+// Token-bucket rate limiter (per frontend)
+// Note: keep logic simple; code generation has struggled with some multi-return patterns.
+pack rate
+
+struct RateBucket {
+    frontend: string
+    tokens: int
+    capacity: int
+    last_ms: int
+    rate_per_sec: int
+}
+
+fn rate_new(frontend: string, rate_per_sec: int) -> RateBucket {
+    let mut capacity = rate_per_sec
+    if capacity < 1 {
+        capacity = 1
+    }
+    return RateBucket {
+        frontend: frontend,
+        tokens: capacity,
+        capacity: capacity,
+        last_ms: now_ms(),
+        rate_per_sec: rate_per_sec
+    }
+}
+
+fn rate_refill(b: RateBucket) -> RateBucket {
+    let mut out = b
+    if out.rate_per_sec <= 0 {
+        return out
+    }
+    let now = now_ms()
+    let elapsed = now - out.last_ms
+    if elapsed <= 0 {
+        return out
+    }
+    if out.tokens >= out.capacity {
+        out.last_ms = now
+        return out
+    }
+    let add = (elapsed * out.rate_per_sec) / 1000
+    if add <= 0 {
+        return out
+    }
+    out.tokens = out.tokens + add
+    if out.tokens >= out.capacity {
+        out.tokens = out.capacity
+        out.last_ms = now
+    } else {
+        let mut used_ms = (add * 1000) / out.rate_per_sec
+        if used_ms < 1 {
+            used_ms = 1
+        }
+        out.last_ms = out.last_ms + used_ms
+    }
+    return out
+}
+
+// Apply one request against the bucket. Returns updated bucket.
+fn rate_take(b: RateBucket) -> RateBucket {
+    let mut out = rate_refill(b)
+    if out.rate_per_sec <= 0 {
+        return out
+    }
+    if out.tokens > 0 {
+        out.tokens = out.tokens - 1
+    }
+    return out
+}
+
+// 1 if the take would reject (bucket empty after elapsed-time refill)
+fn rate_would_deny(b: RateBucket) -> int {
+    if b.rate_per_sec <= 0 {
+        return 0
+    }
+    let out = rate_refill(b)
+    if out.tokens <= 0 {
+        return 1
+    }
+    return 0
+}
+
+fn rate_find(buckets: []RateBucket, frontend: string) -> int {
+    let mut i = 0
+    while i < len(buckets) {
+        if str_eq(buckets[i].frontend, frontend) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn rate_init_all(frontends: []Frontend) -> []RateBucket {
+    let mut out = make([]RateBucket, 0, len(frontends))
+    let mut i = 0
+    while i < len(frontends) {
+        let fe = frontends[i]
+        if fe.rate_limit > 0 {
+            out = append(out, rate_new(fe.name, fe.rate_limit))
+        }
+        i = i + 1
+    }
+    return out
+}

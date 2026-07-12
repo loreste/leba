@@ -1,0 +1,52 @@
+// Concurrent accept runtime — crew worker pool for upstream I/O
+pack runtime
+
+fn fill_slots(slots: chan[int], n: int) {
+    let mut i = 0
+    while i < n {
+        let _ = slots.send(1)
+        i = i + 1
+    }
+}
+
+fn apply_done(
+    v: int,
+    servers: []Server,
+    st: LiveStats
+) -> LiveStats {
+    let err = unpack_done_err(v)
+    let si = unpack_done_si(v)
+    let bytes = unpack_done_bytes(v)
+    let retries = unpack_done_retries(v)
+    // servers mutated by caller after server_conn_delta — we only touch stats here
+    let mut out = st
+    out.total_req = out.total_req + 1
+    out.total_bytes_out = out.total_bytes_out + bytes
+    out.retries = out.retries + retries
+    if err != 0 {
+        out.total_err = out.total_err + 1
+    }
+    out.last_req_ms = now_ms()
+    if out.active_conns > 0 {
+        out.active_conns = out.active_conns - 1
+    }
+    let _ = si
+    let _ = servers
+    return out
+}
+
+fn apply_done_servers(v: int, servers: []Server) -> []Server {
+    let err = unpack_done_err(v)
+    let si = unpack_done_si(v)
+    let bytes = unpack_done_bytes(v)
+    let mut srv = servers
+    if si >= 0 {
+        srv = server_conn_delta(srv, si, 0 - 1)
+        if err == 0 {
+            srv = mark_server_req(srv, si, bytes, 0)
+        } else {
+            srv = mark_server_req(srv, si, 0, 1)
+        }
+    }
+    return srv
+}

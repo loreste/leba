@@ -1,0 +1,179 @@
+// W3C trace-context helpers — request correlation without log-format ceremony
+pack trace
+
+fn hex_lower_digit(n: int) -> string {
+    let d = n % 16
+    if d == 0 {
+        return "0"
+    }
+    if d == 1 {
+        return "1"
+    }
+    if d == 2 {
+        return "2"
+    }
+    if d == 3 {
+        return "3"
+    }
+    if d == 4 {
+        return "4"
+    }
+    if d == 5 {
+        return "5"
+    }
+    if d == 6 {
+        return "6"
+    }
+    if d == 7 {
+        return "7"
+    }
+    if d == 8 {
+        return "8"
+    }
+    if d == 9 {
+        return "9"
+    }
+    if d == 10 {
+        return "a"
+    }
+    if d == 11 {
+        return "b"
+    }
+    if d == 12 {
+        return "c"
+    }
+    if d == 13 {
+        return "d"
+    }
+    if d == 14 {
+        return "e"
+    }
+    return "f"
+}
+
+fn hex_n(width: int) -> string {
+    let mut b = str_builder()
+    let mut i = 0
+    while i < width {
+        builder_write(b, hex_lower_digit(rand_intn(16)))
+        i = i + 1
+    }
+    return builder_string(b)
+}
+
+fn is_hex_char(c: int) -> int {
+    if c >= 48 {
+        if c <= 57 {
+            return 1
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return 1
+        }
+    }
+    if c >= 65 {
+        if c <= 70 {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn trace_hex_ok(s: string, start: int, n: int) -> int {
+    let data = bytes(s)
+    if start + n > len(data) {
+        return 0
+    }
+    let mut all_zero = 1
+    let mut i = 0
+    while i < n {
+        let c = int(data[start + i])
+        if is_hex_char(c) == 0 {
+            return 0
+        }
+        if c != 48 {
+            all_zero = 0
+        }
+        i = i + 1
+    }
+    if all_zero == 1 {
+        return 0
+    }
+    return 1
+}
+
+fn trace_hex_chars_ok(s: string, start: int, n: int) -> int {
+    let data = bytes(s)
+    if start + n > len(data) {
+        return 0
+    }
+    let mut i = 0
+    while i < n {
+        let c = int(data[start + i])
+        if is_hex_char(c) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn traceparent_valid(tp: string) -> int {
+    if str_len(tp) != 55 {
+        return 0
+    }
+    if not str_eq(substr(tp, 2, 3), "-") {
+        return 0
+    }
+    if not str_eq(substr(tp, 35, 36), "-") {
+        return 0
+    }
+    if not str_eq(substr(tp, 52, 53), "-") {
+        return 0
+    }
+    if trace_hex_chars_ok(tp, 0, 2) == 0 {
+        return 0
+    }
+    if trace_hex_ok(tp, 3, 32) == 0 {
+        return 0
+    }
+    if trace_hex_ok(tp, 36, 16) == 0 {
+        return 0
+    }
+    if trace_hex_chars_ok(tp, 53, 2) == 0 {
+        return 0
+    }
+    return 1
+}
+
+fn traceparent_new() -> string {
+    let mut b = str_builder()
+    builder_write(b, "00-")
+    builder_write(b, hex_n(32))
+    builder_write(b, "-")
+    builder_write(b, hex_n(16))
+    builder_write(b, "-01")
+    return builder_string(b)
+}
+
+fn traceparent_or_new(incoming: string) -> string {
+    if traceparent_valid(incoming) == 1 {
+        return incoming
+    }
+    return traceparent_new()
+}
+
+fn traceparent_trace_id(tp: string) -> string {
+    if traceparent_valid(tp) == 0 {
+        return ""
+    }
+    return substr(tp, 3, 35)
+}
+
+fn traceparent_span_id(tp: string) -> string {
+    if traceparent_valid(tp) == 0 {
+        return ""
+    }
+    return substr(tp, 36, 52)
+}

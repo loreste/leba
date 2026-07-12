@@ -1,0 +1,965 @@
+// Runtime admin API.
+//
+//   GET  /admin/servers
+//   POST /admin/drain/<backend>/<server>
+//   POST /admin/ready/<backend>/<server>
+//   POST /admin/disable/<backend>/<server>   (mark DOWN)
+//   POST /admin/enable/<backend>/<server>    (mark UP)
+//   POST /admin/reload-servers               (reload servers_file backends)
+//   GET  /readyz   readiness (any non-drained UP server)
+//   GET  /livez    liveness
+pack admin
+
+struct AdminResult {
+    handled: int
+    status: int
+    body: string
+    servers: []Server
+}
+
+struct AdminStateResult {
+    handled: int
+    status: int
+    body: string
+    servers: []Server
+    frontends: []Frontend
+    backends: []Backend
+    routes: []Route
+    acls: []AclRule
+}
+
+fn path_part(path: string, idx: int) -> string {
+    // path like /admin/drain/api/api1 → parts[0]="", [1]=admin, ...
+    let parts = str_split(path, "/")
+    // str_split("/a/b") may yield ["", "a", "b"]
+    if idx < 0 {
+        return ""
+    }
+    if idx >= len(parts) {
+        return ""
+    }
+    return parts[idx]
+}
+
+fn admin_state_from_result(ar: AdminResult, frontends: []Frontend, backends: []Backend, routes: []Route, acls: []AclRule) -> AdminStateResult {
+    return AdminStateResult {
+        handled: ar.handled,
+        status: ar.status,
+        body: ar.body,
+        servers: ar.servers,
+        frontends: frontends,
+        backends: backends,
+        routes: routes,
+        acls: acls
+    }
+}
+
+fn hex_val(c: int) -> int {
+    if c >= 48 {
+        if c <= 57 {
+            return c - 48
+        }
+    }
+    if c >= 65 {
+        if c <= 70 {
+            return c - 55
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return c - 87
+        }
+    }
+    return -1
+}
+
+fn url_decode(s: string) -> string {
+    let data = bytes(s)
+    let mut b = str_builder()
+    let mut i = 0
+    while i < len(data) {
+        let c = int(data[i])
+        if c == 37 {
+            if i + 2 < len(data) {
+                let hi = hex_val(int(data[i + 1]))
+                let lo = hex_val(int(data[i + 2]))
+                if hi >= 0 {
+                    if lo >= 0 {
+                        builder_write_byte(b, byte((hi * 16) + lo))
+                        i = i + 3
+                        continue
+                    }
+                }
+            }
+        }
+        if c == 43 {
+            builder_write(b, " ")
+        } else {
+            builder_write_byte(b, data[i])
+        }
+        i = i + 1
+    }
+    return builder_string(b)
+}
+
+fn query_value(path: string, key: string) -> string {
+    let q = query_of(path)
+    if str_eq(q, "") {
+        return ""
+    }
+    let raw = substr(q, 1, str_len(q))
+    let parts = str_split(raw, "&")
+    let mut i = 0
+    while i < len(parts) {
+        let cut = str_cut(parts[i], "=")
+        if len(cut) >= 2 {
+            if str_eq(url_decode(cut[0]), key) {
+                return url_decode(cut[1])
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn is_ident_char(c: int) -> int {
+    if c >= 48 {
+        if c <= 57 {
+            return 1
+        }
+    }
+    if c >= 65 {
+        if c <= 90 {
+            return 1
+        }
+    }
+    if c >= 97 {
+        if c <= 122 {
+            return 1
+        }
+    }
+    if c == 45 {
+        return 1
+    }
+    if c == 46 {
+        return 1
+    }
+    if c == 95 {
+        return 1
+    }
+    return 0
+}
+
+fn valid_admin_name(s: string) -> int {
+    if str_eq(s, "") {
+        return 0
+    }
+    if str_len(s) > 96 {
+        return 0
+    }
+    let data = bytes(s)
+    let mut i = 0
+    while i < len(data) {
+        if is_ident_char(int(data[i])) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn valid_domain(s: string) -> int {
+    if valid_admin_name(s) == 0 {
+        return 0
+    }
+    if str_contains(s, "..") {
+        return 0
+    }
+    if str_has_prefix(s, ".") {
+        return 0
+    }
+    if str_has_suffix(s, ".") {
+        return 0
+    }
+    return 1
+}
+
+fn valid_abs_path(s: string) -> int {
+    if str_eq(s, "") {
+        return 1
+    }
+    if not path_is_abs(s) {
+        return 0
+    }
+    if str_contains(s, "\n") {
+        return 0
+    }
+    if str_contains(s, "\r") {
+        return 0
+    }
+    return 1
+}
+
+fn find_backend_idx_admin(backends: []Backend, name: string) -> int {
+    let mut i = 0
+    while i < len(backends) {
+        if str_eq(backends[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn find_frontend_idx_admin(frontends: []Frontend, name: string) -> int {
+    let mut i = 0
+    while i < len(frontends) {
+        if str_eq(frontends[i].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn upsert_host_route(routes: []Route, frontend: string, domain: string, backend: string) -> []Route {
+    let mut out = routes
+    let mut i = 0
+    while i < len(out) {
+        if str_eq(out[i].frontend, frontend) {
+            if str_eq(out[i].kind, "host") {
+                if str_eq(out[i].value, domain) {
+                    let mut r = out[i]
+                    r.backend = backend
+                    out[i] = r
+                    return out
+                }
+            }
+        }
+        i = i + 1
+    }
+    return append(out, route_new(frontend, "host", domain, backend))
+}
+
+fn ensure_backend(backends: []Backend, name: string) -> []Backend {
+    if find_backend_idx_admin(backends, name) >= 0 {
+        return backends
+    }
+    return append(backends, backend_new(name))
+}
+
+fn upsert_backend_server(servers: []Server, backend: string, name: string, addr: string) -> []Server {
+    let hp = parse_host_port(addr)
+    let port = to_int(hp.port)
+    let idx = find_server_idx(servers, backend, name)
+    if idx >= 0 {
+        let mut out = servers
+        let mut s = out[idx]
+        s.host = hp.host
+        s.port = port
+        s.alive = 1
+        s.drain = 0
+        out[idx] = s
+        return out
+    }
+    return append(servers, server_new(name, hp.host, port, 1, 1, backend))
+}
+
+fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"vhosts\":[")
+    let mut first = 1
+    let mut i = 0
+    while i < len(routes) {
+        let r = routes[i]
+        if str_eq(r.kind, "host") {
+            if first == 0 {
+                builder_write(b, ",")
+            }
+            first = 0
+            builder_write(b, "{\"frontend\":\"")
+            builder_write(b, json_escape(r.frontend))
+            builder_write(b, "\",\"domain\":\"")
+            builder_write(b, json_escape(r.value))
+            builder_write(b, "\",\"backend\":\"")
+            builder_write(b, json_escape(r.backend))
+            builder_write(b, "\",\"servers\":[")
+            let mut sf = 1
+            let mut si = 0
+            while si < len(servers) {
+                let s = servers[si]
+                if str_eq(s.backend, r.backend) {
+                    if sf == 0 {
+                        builder_write(b, ",")
+                    }
+                    sf = 0
+                    builder_write(b, "{\"name\":\"")
+                    builder_write(b, json_escape(s.name))
+                    builder_write(b, "\",\"addr\":\"")
+                    builder_write(b, json_escape(join_host_port(s.host, s.port)))
+                    builder_write(b, "\",\"alive\":")
+                    builder_write(b, int_to_string(s.alive))
+                    builder_write(b, ",\"drain\":")
+                    builder_write(b, int_to_string(s.drain))
+                    builder_write(b, "}")
+                }
+                si = si + 1
+            }
+            builder_write(b, "]}")
+        }
+        i = i + 1
+    }
+    builder_write(b, "],\"frontends\":[")
+    let mut fi = 0
+    while fi < len(frontends) {
+        if fi > 0 {
+            builder_write(b, ",")
+        }
+        let fe = frontends[fi]
+        builder_write(b, "{\"name\":\"")
+        builder_write(b, json_escape(fe.name))
+        builder_write(b, "\",\"mode\":\"")
+        builder_write(b, json_escape(fe.mode))
+        builder_write(b, "\",\"port\":")
+        builder_write(b, int_to_string(fe.bind_port))
+        builder_write(b, ",\"tls_cert\":\"")
+        builder_write(b, json_escape(fe.tls_cert))
+        builder_write(b, "\",\"tls_key\":\"")
+        builder_write(b, json_escape(fe.tls_key))
+        builder_write(b, "\"}")
+        fi = fi + 1
+    }
+    builder_write(b, "],\"managed_file\":\"leba.vhosts.conf\"}\n")
+    return builder_string(b)
+}
+
+fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> string {
+    let mut b = str_builder()
+    builder_write(b, "# Generated by Leba admin. Keep this file included from leba.conf.\n")
+    let mut fi = 0
+    while fi < len(frontends) {
+        let fe = frontends[fi]
+        let mut wrote = 0
+        let mut ri = 0
+        while ri < len(routes) {
+            if str_eq(routes[ri].frontend, fe.name) {
+                if str_eq(routes[ri].kind, "host") {
+                    if wrote == 0 {
+                        builder_write(b, "\nfrontend ")
+                        builder_write(b, fe.name)
+                        builder_write(b, "\n")
+                        if not str_eq(fe.tls_cert, "") {
+                            builder_write(b, "  tls_cert ")
+                            builder_write(b, fe.tls_cert)
+                            builder_write(b, "\n")
+                        }
+                        if not str_eq(fe.tls_key, "") {
+                            builder_write(b, "  tls_key ")
+                            builder_write(b, fe.tls_key)
+                            builder_write(b, "\n")
+                        }
+                        wrote = 1
+                    }
+                    builder_write(b, "  route host ")
+                    builder_write(b, routes[ri].value)
+                    builder_write(b, " -> ")
+                    builder_write(b, routes[ri].backend)
+                    builder_write(b, "\n")
+                }
+            }
+            ri = ri + 1
+        }
+        fi = fi + 1
+    }
+    let mut bi = 0
+    while bi < len(backends) {
+        let be = backends[bi]
+        let mut used = 0
+        let mut ri2 = 0
+        while ri2 < len(routes) {
+            if str_eq(routes[ri2].kind, "host") {
+                if str_eq(routes[ri2].backend, be.name) {
+                    used = 1
+                }
+            }
+            ri2 = ri2 + 1
+        }
+        if used == 1 {
+            builder_write(b, "\nbackend ")
+            builder_write(b, be.name)
+            builder_write(b, "\n  balance ")
+            builder_write(b, be.balance)
+            builder_write(b, "\n")
+            let mut si = 0
+            while si < len(servers) {
+                let s = servers[si]
+                if str_eq(s.backend, be.name) {
+                    builder_write(b, "  server ")
+                    builder_write(b, s.name)
+                    builder_write(b, " ")
+                    builder_write(b, join_host_port(s.host, s.port))
+                    builder_write(b, " weight ")
+                    builder_write(b, int_to_string(s.weight))
+                    builder_write(b, " check ")
+                    if s.check == 1 {
+                        builder_write(b, "on")
+                    } else {
+                        builder_write(b, "off")
+                    }
+                    if s.maxconn > 0 {
+                        builder_write(b, " maxconn ")
+                        builder_write(b, int_to_string(s.maxconn))
+                    }
+                    builder_write(b, "\n")
+                }
+                si = si + 1
+            }
+        }
+        bi = bi + 1
+    }
+    return builder_string(b)
+}
+
+fn ensure_managed_include(config_path: string) -> int {
+    if str_eq(config_path, "") {
+        return 1
+    }
+    let raw = read_file(config_path)
+    if str_eq(raw, "") {
+        return 0
+    }
+    if str_contains(raw, "include leba.vhosts.conf") {
+        return 1
+    }
+    let mut b = str_builder()
+    builder_write(b, raw)
+    if not str_has_suffix(raw, "\n") {
+        builder_write(b, "\n")
+    }
+    builder_write(b, "\n# Admin-managed virtual hosts.\ninclude leba.vhosts.conf\n")
+    if write_file(config_path, builder_string(b)) == 0 {
+        return 1
+    }
+    return 0
+}
+
+fn save_managed_vhosts(config_path: string, config_dir: string, frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> int {
+    let full = resolve_servers_path(config_dir, "leba.vhosts.conf")
+    let ok = write_file(full, render_managed_vhosts(frontends, backends, servers, routes))
+    if ok != 0 {
+        return 0
+    }
+    return ensure_managed_include(config_path)
+}
+
+fn find_server_idx(servers: []Server, backend: string, name: string) -> int {
+    let mut i = 0
+    while i < len(servers) {
+        if str_eq(servers[i].backend, backend) {
+            if str_eq(servers[i].name, name) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn servers_json(servers: []Server) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"servers\":[")
+    let mut i = 0
+    while i < len(servers) {
+        if i > 0 {
+            builder_write(b, ",")
+        }
+        let s = servers[i]
+        builder_write(b, "{\"backend\":\"")
+        builder_write(b, json_escape(s.backend))
+        builder_write(b, "\",\"name\":\"")
+        builder_write(b, json_escape(s.name))
+        builder_write(b, "\",\"addr\":\"")
+        builder_write(b, json_escape(join_host_port(s.host, s.port)))
+        builder_write(b, "\",\"alive\":")
+        builder_write(b, int_to_string(s.alive))
+        builder_write(b, ",\"drain\":")
+        builder_write(b, int_to_string(s.drain))
+        builder_write(b, ",\"conns\":")
+        builder_write(b, int_to_string(s.conns))
+        builder_write(b, ",\"weight\":")
+        builder_write(b, int_to_string(s.weight))
+        builder_write(b, ",\"total_req\":")
+        builder_write(b, int_to_string(s.total_req))
+        builder_write(b, "}")
+        i = i + 1
+    }
+    builder_write(b, "]}\n")
+    return builder_string(b)
+}
+
+fn admin_help_json() -> string {
+    return "{\"endpoints\":[\"/admin/servers\",\"/admin/reload-servers\",\"/admin/drain/{backend}/{server}\",\"/admin/ready/{backend}/{server}\",\"/admin/disable/{backend}/{server}\",\"/admin/enable/{backend}/{server}\",\"/readyz\",\"/livez\",\"/health\",\"/stats\",\"/metrics\"],\"note\":\"Use POST for reload-servers/drain/ready/disable/enable\"}\n"
+}
+
+fn any_ready(servers: []Server) -> int {
+    let mut i = 0
+    while i < len(servers) {
+        if servers[i].alive == 1 {
+            if servers[i].drain == 0 {
+                return 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn set_server_drain(servers: []Server, idx: int, drain: int) -> []Server {
+    if idx < 0 {
+        return servers
+    }
+    let mut out = servers
+    let mut s = out[idx]
+    s.drain = drain
+    out[idx] = s
+    return out
+}
+
+fn set_server_alive(servers: []Server, idx: int, alive: int) -> []Server {
+    if idx < 0 {
+        return servers
+    }
+    let mut out = servers
+    let mut s = out[idx]
+    s.alive = alive
+    if alive == 1 {
+        s.fails = 0
+    }
+    out[idx] = s
+    return out
+}
+
+// Returns handled=1 if path was an admin/ops path
+fn handle_admin(
+    method: string,
+    path: string,
+    servers: []Server,
+    backends: []Backend,
+    config_dir: string
+) -> AdminResult {
+    // /livez
+    if str_eq(path, "/livez") {
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: "{\"live\":true}\n",
+            servers: servers
+        }
+    }
+    // /readyz
+    if str_eq(path, "/readyz") {
+        if any_ready(servers) == 1 {
+            return AdminResult {
+                handled: 1,
+                status: 200,
+                body: "{\"ready\":true}\n",
+                servers: servers
+            }
+        }
+        return AdminResult {
+            handled: 1,
+            status: 503,
+            body: "{\"ready\":false}\n",
+            servers: servers
+        }
+    }
+
+    if str_eq(path, "/admin") {
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: admin_help_json(),
+            servers: servers
+        }
+    }
+    if str_eq(path, "/admin/") {
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: admin_help_json(),
+            servers: servers
+        }
+    }
+    if str_eq(path, "/admin/servers") {
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: servers_json(servers),
+            servers: servers
+        }
+    }
+    if str_eq(path, "/admin/reload-servers") {
+        if not str_eq(method, "POST") {
+            log_warn_event("admin_method_not_allowed", "action=reload-servers status=405")
+            return AdminResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers
+            }
+        }
+        let rr = reload_servers_files(backends, servers, config_dir)
+        if rr.ok == 0 {
+            let mut fail = str_builder()
+            builder_write(fail, "action=reload-servers status=400 error=\"")
+            builder_write(fail, json_escape(rr.error))
+            builder_write(fail, "\"")
+            log_warn_event("admin_reload_servers_failed", builder_string(fail))
+            let mut body0 = str_builder()
+            builder_write(body0, "{\"error\":\"")
+            builder_write(body0, json_escape(rr.error))
+            builder_write(body0, "\"}\n")
+            return AdminResult {
+                handled: 1,
+                status: 400,
+                body: builder_string(body0),
+                servers: servers
+            }
+        }
+        let mut ok = str_builder()
+        builder_write(ok, "{\"ok\":true,\"action\":\"reload-servers\",\"loaded\":")
+        builder_write(ok, int_to_string(rr.loaded))
+        builder_write(ok, ",\"servers\":")
+        builder_write(ok, int_to_string(len(rr.servers)))
+        builder_write(ok, "}\n")
+        let mut log = str_builder()
+        builder_write(log, "action=reload-servers status=200 loaded=")
+        builder_write(log, int_to_string(rr.loaded))
+        builder_write(log, " servers=")
+        builder_write(log, int_to_string(len(rr.servers)))
+        log_info_event("admin_action", builder_string(log))
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: builder_string(ok),
+            servers: rr.servers
+        }
+    }
+
+    // /admin/{action}/{backend}/{server}
+    let p1 = path_part(path, 1)
+    let p2 = path_part(path, 2)
+    let p3 = path_part(path, 3)
+    let p4 = path_part(path, 4)
+    if not str_eq(p1, "admin") {
+        return AdminResult {
+            handled: 0,
+            status: 0,
+            body: "",
+            servers: servers
+        }
+    }
+    if str_eq(p2, "") {
+        return AdminResult {
+            handled: 1,
+            status: 200,
+            body: admin_help_json(),
+            servers: servers
+        }
+    }
+
+    if not str_eq(method, "POST") {
+        let mut bad_method = str_builder()
+        builder_write(bad_method, "action=")
+        builder_write(bad_method, p2)
+        builder_write(bad_method, " status=405")
+        log_warn_event("admin_method_not_allowed", builder_string(bad_method))
+        return AdminResult {
+            handled: 1,
+            status: 405,
+            body: "{\"error\":\"method not allowed\"}\n",
+            servers: servers
+        }
+    }
+
+    // actions that need backend+server
+    if str_eq(p3, "") {
+        log_warn_event("admin_bad_request", "reason=missing_backend_or_server status=400")
+        return AdminResult {
+            handled: 1,
+            status: 400,
+            body: "{\"error\":\"need /admin/{action}/{backend}/{server}\"}\n",
+            servers: servers
+        }
+    }
+    if str_eq(p4, "") {
+        log_warn_event("admin_bad_request", "reason=missing_backend_or_server status=400")
+        return AdminResult {
+            handled: 1,
+            status: 400,
+            body: "{\"error\":\"need /admin/{action}/{backend}/{server}\"}\n",
+            servers: servers
+        }
+    }
+
+    let idx = find_server_idx(servers, p3, p4)
+    if idx < 0 {
+        let mut nf = str_builder()
+        builder_write(nf, "backend=")
+        builder_write(nf, p3)
+        builder_write(nf, " server=")
+        builder_write(nf, p4)
+        builder_write(nf, " status=404")
+        log_warn_event("admin_server_not_found", builder_string(nf))
+        return AdminResult {
+            handled: 1,
+            status: 404,
+            body: "{\"error\":\"server not found\"}\n",
+            servers: servers
+        }
+    }
+
+    let mut out = servers
+    let mut msg = ""
+    if str_eq(p2, "drain") {
+        out = set_server_drain(out, idx, 1)
+        msg = "{\"ok\":true,\"action\":\"drain\",\"backend\":\""
+    } else {
+        if str_eq(p2, "ready") {
+            out = set_server_drain(out, idx, 0)
+            out = set_server_alive(out, idx, 1)
+            msg = "{\"ok\":true,\"action\":\"ready\",\"backend\":\""
+        } else {
+            if str_eq(p2, "disable") {
+                out = set_server_alive(out, idx, 0)
+                msg = "{\"ok\":true,\"action\":\"disable\",\"backend\":\""
+            } else {
+                if str_eq(p2, "enable") {
+                    out = set_server_alive(out, idx, 1)
+                    out = set_server_drain(out, idx, 0)
+                    msg = "{\"ok\":true,\"action\":\"enable\",\"backend\":\""
+                } else {
+                    let mut unk = str_builder()
+                    builder_write(unk, "action=")
+                    builder_write(unk, p2)
+                    builder_write(unk, " backend=")
+                    builder_write(unk, p3)
+                    builder_write(unk, " server=")
+                    builder_write(unk, p4)
+                    builder_write(unk, " status=404")
+                    log_warn_event("admin_unknown_action", builder_string(unk))
+                    return AdminResult {
+                        handled: 1,
+                        status: 404,
+                        body: "{\"error\":\"unknown action\"}\n",
+                        servers: servers
+                    }
+                }
+            }
+        }
+    }
+
+    let mut body = str_builder()
+    builder_write(body, msg)
+    builder_write(body, json_escape(p3))
+    builder_write(body, "\",\"server\":\"")
+    builder_write(body, json_escape(p4))
+    builder_write(body, "\"}\n")
+
+    let mut log = str_builder()
+    builder_write(log, "action=")
+    builder_write(log, p2)
+    builder_write(log, " backend=")
+    builder_write(log, p3)
+    builder_write(log, " server=")
+    builder_write(log, p4)
+    builder_write(log, " status=200")
+    log_info_event("admin_action", builder_string(log))
+
+    return AdminResult {
+        handled: 1,
+        status: 200,
+        body: builder_string(body),
+        servers: out
+    }
+}
+
+fn handle_admin_state(
+    method: string,
+    path: string,
+    full_path: string,
+    servers: []Server,
+    frontends: []Frontend,
+    backends: []Backend,
+    routes: []Route,
+    acls: []AclRule,
+    config_path: string,
+    config_dir: string
+) -> AdminStateResult {
+    if str_eq(path, "/admin/vhosts") {
+        if not str_eq(method, "GET") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: admin_vhosts_json(frontends, backends, servers, routes),
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/vhost-create") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let backend = query_value(full_path, "backend")
+        let server = query_value(full_path, "server")
+        let addr = query_value(full_path, "addr")
+        let cert = query_value(full_path, "cert")
+        let key = query_value(full_path, "key")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_domain(domain) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_admin_name(backend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_admin_name(server) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let hp = parse_host_port(addr)
+        if str_eq(hp.host, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server address\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if to_int(hp.port) <= 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server port\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_abs_path(cert) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_abs_path(key) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let fi = find_frontend_idx_admin(frontends, frontend)
+        if fi < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found; create a listener in leba.conf and restart\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut out_frontends = frontends
+        let mut fe = out_frontends[fi]
+        if not str_eq(cert, "") {
+            fe.tls_cert = cert
+        }
+        if not str_eq(key, "") {
+            fe.tls_key = key
+        }
+        out_frontends[fi] = fe
+        let out_backends = ensure_backend(backends, backend)
+        let out_routes = upsert_host_route(routes, frontend, domain, backend)
+        let out_servers = upsert_backend_server(servers, backend, server, addr)
+        if save_managed_vhosts(config_path, config_dir, out_frontends, out_backends, out_servers, out_routes) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut body = str_builder()
+        builder_write(body, "{\"ok\":true,\"action\":\"vhost-create\",\"frontend\":\"")
+        builder_write(body, json_escape(frontend))
+        builder_write(body, "\",\"domain\":\"")
+        builder_write(body, json_escape(domain))
+        builder_write(body, "\",\"backend\":\"")
+        builder_write(body, json_escape(backend))
+        builder_write(body, "\",\"server\":\"")
+        builder_write(body, json_escape(server))
+        builder_write(body, "\",\"addr\":\"")
+        builder_write(body, json_escape(addr))
+        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"restart_required_for_cert\":")
+        if not str_eq(cert, "") {
+            builder_write(body, "true")
+        } else {
+            if not str_eq(key, "") {
+                builder_write(body, "true")
+            } else {
+                builder_write(body, "false")
+            }
+        }
+        builder_write(body, "}\n")
+        log_info_event("admin_action", "action=vhost-create status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: builder_string(body),
+            servers: out_servers,
+            frontends: out_frontends,
+            backends: out_backends,
+            routes: out_routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/vhost-cert") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let cert = query_value(full_path, "cert")
+        let key = query_value(full_path, "key")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_abs_path(cert) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_abs_path(key) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let fi = find_frontend_idx_admin(frontends, frontend)
+        if fi < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut out_frontends = frontends
+        let mut fe = out_frontends[fi]
+        fe.tls_cert = cert
+        fe.tls_key = key
+        out_frontends[fi] = fe
+        if save_managed_vhosts(config_path, config_dir, out_frontends, backends, servers, routes) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"vhost-cert\",\"managed_file\":\"leba.vhosts.conf\",\"restart_required\":true}\n",
+            servers: servers,
+            frontends: out_frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    let ar = handle_admin(method, path, servers, backends, config_dir)
+    return admin_state_from_result(ar, frontends, backends, routes, acls)
+}

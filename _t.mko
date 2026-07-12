@@ -1,0 +1,21 @@
+// Adversarial core tests (config, ACL, LB, doctor, admin, rate, health)
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/doctor.mko"
+pull . "./src/admin.mko"
+
+fn TestIpHashStable() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut be = backend_new("api")
+    be.balance = "ip_hash"
+    assert_eq(pick_server(servers, be, "10.0.0.5", "", ""), pick_server(servers, be, "10.0.0.5", "", ""))
+}
+
+

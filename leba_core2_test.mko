@@ -1,0 +1,712 @@
+// Adversarial core tests part 2 — rate, doctor, admin, health, explain
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/trace.mko"
+pull . "./src/doctor.mko"
+pull . "./src/admin.mko"
+pull . "./src/proxy.mko"
+pull . "./src/runtime.mko"
+pull . "./src/cli.mko"
+
+fn TestIpHashStable() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut be = backend_new("api")
+    be.balance = "ip_hash"
+    assert_eq(pick_server(servers, be, "10.0.0.5", "", ""), pick_server(servers, be, "10.0.0.5", "", ""))
+}
+
+fn TestRoundRobinAdvances() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut be = backend_new("api")
+    be.balance = "round_robin"
+    be.rr_idx = 0
+    let i0 = pick_server(servers, be, "c", "", "")
+    be = next_rr(be)
+    let i1 = pick_server(servers, be, "c", "", "")
+    be = next_rr(be)
+    let i2 = pick_server(servers, be, "c", "", "")
+    assert_eq(i0, 0)
+    assert_eq(i1, 1)
+    assert_eq(i2, 0)
+}
+
+fn TestServerEligible() {
+    let mut s = server_new("a", "h", 1, 1, 1, "b")
+    assert_eq(server_eligible(s), 1)
+    s.drain = 1
+    assert_eq(server_eligible(s), 0)
+    s.drain = 0
+    s.alive = 0
+    assert_eq(server_eligible(s), 0)
+    s.alive = 1
+    s.maxconn = 2
+    s.conns = 2
+    assert_eq(server_eligible(s), 0)
+    s.conns = 1
+    assert_eq(server_eligible(s), 1)
+}
+
+fn TestAllDrainedFailsClosed() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.drain = 1
+    servers[0] = s0
+    let mut s1 = servers[1]
+    s1.drain = 1
+    servers[1] = s1
+    let be = backend_new("api")
+    assert_eq(pick_server(servers, be, "c", "", ""), -1)
+}
+
+fn TestMaxconnSaturationHelpers() {
+    let mut servers = make([]Server, 0, 3)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    servers = append(servers, server_new("w", "127.0.0.1", 3, 100, 1, "web"))
+    let mut s0 = servers[0]
+    s0.conns = 1
+    servers[0] = s0
+    let mut s1 = servers[1]
+    s1.conns = 2
+    servers[1] = s1
+    let mut s2 = servers[2]
+    s2.conns = 4
+    servers[2] = s2
+
+    let mut be = backend_new("api")
+    be.maxconn = 3
+    assert_eq(backend_conn_count(servers, "api"), 3)
+    assert_eq(backend_at_maxconn(servers, be), 1)
+    be.maxconn = 4
+    assert_eq(backend_at_maxconn(servers, be), 0)
+
+    let mut fe = frontend_new("web")
+    fe.maxconn = 7
+    assert_eq(total_conn_count(servers), 7)
+    assert_eq(frontend_at_maxconn(servers, fe), 1)
+    fe.maxconn = 8
+    assert_eq(frontend_at_maxconn(servers, fe), 0)
+}
+
+fn TestPickSkipsServerAtMaxconn() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    let mut s0 = servers[0]
+    s0.maxconn = 1
+    s0.conns = 1
+    servers[0] = s0
+    let mut be = backend_new("api")
+    be.balance = "round_robin"
+    assert_eq(pick_server(servers, be, "c", "", ""), 1)
+    assert_eq(pick_server(servers, be, "c", "LEBAID", "a"), 1)
+}
+
+fn TestRateWouldDeny() {
+    let mut b = rate_new("web", 2)
+    b.tokens = 0
+    b.last_ms = now_ms()
+    assert_eq(rate_would_deny(b), 1)
+    b.tokens = 2
+    assert_eq(rate_would_deny(b), 0)
+}
+
+fn TestRateTakeDecrements() {
+    let mut b = rate_new("web", 5)
+    b.tokens = 3
+    b.last_ms = now_ms()
+    let a = rate_take(b)
+    assert_eq(a.tokens, 2)
+}
+
+fn TestRatePartialSecondRefill() {
+    let mut b = rate_new("web", 10)
+    b.tokens = 0
+    b.last_ms = now_ms() - 600
+    assert_eq(rate_would_deny(b), 0)
+    let a = rate_take(b)
+    assert(a.tokens >= 4)
+    assert(a.tokens <= 6)
+}
+
+fn TestRateCarriesFractionalTime() {
+    let mut b = rate_new("web", 3)
+    b.tokens = 0
+    b.last_ms = now_ms() - 500
+    let a = rate_refill(b)
+    assert_eq(a.tokens, 1)
+    let elapsed_left = now_ms() - a.last_ms
+    assert(elapsed_left >= 100)
+}
+
+fn TestRateDisabledNeverDenies() {
+    let mut b = rate_new("web", 1)
+    b.rate_per_sec = 0
+    b.tokens = 0
+    assert_eq(rate_would_deny(b), 0)
+}
+
+fn TestRateFind() {
+    let mut fes = make([]Frontend, 0, 2)
+    let mut f = frontend_new("a")
+    f.rate_limit = 10
+    fes = append(fes, f)
+    let mut f2 = frontend_new("b")
+    f2.rate_limit = 0
+    fes = append(fes, f2)
+    let buckets = rate_init_all(fes)
+    assert_eq(len(buckets), 1)
+    assert(rate_find(buckets, "a") >= 0)
+    assert_eq(rate_find(buckets, "b"), -1)
+}
+
+fn TestDoctorFailsMissingBackend() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  route default -> missing\nbackend empty\n  balance round_robin\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(rep.errors >= 2)
+}
+
+fn TestDoctorAllowsWelcomeOnlyHttpFrontend() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+    assert(str_contains(rep.text, "welcome page"))
+}
+
+fn TestDoctorPassHealthy() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  default_backend api\nbackend api\n  balance least_conn\n  server s1 127.0.0.1:9 weight 1 check\n  server s2 127.0.0.1:10 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestDoctorPortConflict() {
+    let raw = "frontend a\n  bind 8080\n  mode http\n  default_backend api\nfrontend b\n  bind 8080\n  mode stats\nbackend api\n  server s1 127.0.0.1:9 weight 1 check\n  server s2 127.0.0.1:10 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "port"))
+}
+
+fn TestDoctorEmptyPathPrefixRoute() {
+    let mut w = parse_config_text("frontend web\n  bind 1\n  mode http\n  route default -> api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n")
+    w.routes = append(w.routes, route_new("web", "path_prefix", "", "evil"))
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+}
+
+fn TestDoctorUnknownBalance() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  balance not_real\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "balance"))
+}
+
+fn TestDoctorWarnsStatsAuthPlaceholders() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend stats\n  bind 2\n  mode stats\n  auth CHANGE_ME_ADMIN:CHANGE_ME_PASSWORD:admin\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+    assert(str_contains(rep.text, "placeholder/demo credentials"))
+}
+
+fn TestDoctorWarnsStatsWithoutAuth() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend stats\n  bind 2\n  mode stats\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+    assert(str_contains(rep.text, "stats frontend has no auth"))
+}
+
+fn TestDoctorRejectsUnknownAdminRole() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend stats\n  bind 2\n  mode stats\n  admin_user alice secret root\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "unknown role"))
+}
+
+fn TestAdminUsersParseRoles() {
+    let raw = "frontend stats\n  bind 2\n  mode stats\n  auth admin:secret:admin\n  admin_user viewer viewpass viewer\n  admin_user ops opspass operator\n"
+    let w = parse_config_text(raw)
+    assert_eq(len(w.admin_users), 3)
+    assert_eq_str(w.admin_users[0].pass, "secret")
+    assert_eq_str(w.admin_users[0].role, "admin")
+    assert_eq_str(w.admin_users[1].user, "viewer")
+    assert_eq_str(w.admin_users[1].role, "viewer")
+    assert_eq_str(w.admin_users[2].role, "operator")
+}
+
+fn TestAdminUsersParseHashesAndFile() {
+    let users_path = "/tmp/leba_admin_users_file.txt"
+    let _ = write_file(users_path, "fileops sha256:abc123 operator\n")
+    let raw = "frontend stats\n  bind 2\n  mode stats\n  auth_hash admin abcdef admin\n  admin_user_hash viewer 123456 viewer\n  admin_users_file /tmp/leba_admin_users_file.txt\n"
+    let config_path = "/tmp/leba_admin_users_config.conf"
+    let _ = write_file(config_path, raw)
+    let w = parse_config_file(config_path)
+    assert_eq(w.ok, 1)
+    assert_eq(len(w.admin_users), 3)
+    assert_eq_str(w.admin_users[0].pass_hash, "abcdef")
+    assert_eq_str(w.admin_users[1].role, "viewer")
+    assert_eq_str(w.admin_users[2].user, "fileops")
+    assert_eq_str(w.admin_users[2].pass_hash, "abc123")
+    let _ = remove_file(users_path)
+    let _ = remove_file(config_path)
+}
+
+fn TestDoctorAcceptsArgon2idAdminHashShape() {
+    let raw = "frontend stats\n  bind 2\n  mode stats\n  admin_user_hash ops $argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$c29tZWhhc2g admin\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestDoctorTcpFrontendRequiresBackend() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend db\n  bind 13306\n  mode tcp\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "tcp frontend"))
+}
+
+fn TestDoctorAllowsTcpFrontendWithBackend() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend db\n  bind 13306\n  mode tcp\n  default_backend db\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\nbackend db\n  server db1 127.0.0.1:5432 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestFrontendProtocolsParse() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  protocols http/1.1\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq_str(w.frontends[0].protocols, "http/1.1")
+}
+
+fn TestDoctorRejectsUnsupportedProtocolAcceptPaths() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  protocols http/1.1,h2,h3\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "unsupported protocols"))
+}
+
+fn TestDoctorRejectsTlsWithUnreadableFiles() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  tls_cert /tmp/nope.crt\n  tls_key /tmp/nope.key\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "tls_cert not readable"))
+}
+
+fn TestDoctorAllowsReadableTlsH2Config() {
+    let cert_path = "/tmp/leba_test_tls.crt"
+    let key_path = "/tmp/leba_test_tls.key"
+    let _ = write_file(cert_path, "cert")
+    let _ = write_file(key_path, "key")
+    let raw = "frontend web\n  bind 1\n  mode http\n  tls_cert /tmp/leba_test_tls.crt\n  tls_key /tmp/leba_test_tls.key\n  protocols http/1.1,h2\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    if tls_server_available() == 1 {
+        assert_eq(rep.ok, 1)
+    }
+    let _ = remove_file(cert_path)
+    let _ = remove_file(key_path)
+}
+
+fn TestDoctorAllowsSipUdpMode() {
+    let raw = "frontend sip_udp\n  bind 5060\n  mode udp\n  default_backend sip\nbackend sip\n  balance sip_call_id\n  server a 127.0.0.1:5060 weight 1 check\n  server b 127.0.0.1:5061 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestDoctorRejectsGenericUdpMode() {
+    let raw = "frontend udp\n  bind 5060\n  mode udp\n  default_backend generic\nbackend generic\n  balance round_robin\n  server a 127.0.0.1:5060 weight 1 check\n  server b 127.0.0.1:5061 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "UDP support is currently limited"))
+}
+
+fn TestDoctorAllowsManySipUdpFrontends() {
+    let raw = "frontend sip_udp_a\n  bind 5060\n  mode udp\n  default_backend sip\nfrontend sip_udp_b\n  bind 5061\n  mode udp\n  default_backend sip\nbackend sip\n  balance sip_call_id\n  server a 127.0.0.1:5060 weight 1 check\n  server b 127.0.0.1:5061 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestDoctorAllowsManyTcpFrontends() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend db1\n  bind 13306\n  mode tcp\n  default_backend db\nfrontend db2\n  bind 13307\n  mode tcp\n  default_backend db\nfrontend db3\n  bind 13308\n  mode tcp\n  default_backend db\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\nbackend db\n  server db1 127.0.0.1:5432 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestDoctorReportsServersFileParseFailure() {
+    let config_path = "/tmp/leba_missing_servers_file.conf"
+    let _ = write_file(config_path, "frontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  servers_file /tmp/leba_no_such_servers_file.txt\n")
+    let w = parse_config_file(config_path)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "servers_file unreadable"))
+    let _ = remove_file(config_path)
+}
+
+fn TestExplainDeny() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  deny path_prefix /secret\n  route default -> api\nbackend api\n  server s1 127.0.0.1:9 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let ex = explain_request(w, "", "GET", "/secret/x", "h")
+    assert_eq(ex.denied, 1)
+    assert_eq(ex.ok, 0)
+}
+
+fn TestExplainRoute() {
+    let raw = "frontend web\n  bind 8080\n  mode http\n  route path_prefix /api -> api\n  route default -> web\nbackend api\n  server a 127.0.0.1:1 weight 1 check\nbackend web\n  server w 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let ex = explain_request(w, "", "GET", "/api/z", "h")
+    assert_eq(ex.ok, 1)
+    assert_eq_str(ex.backend, "api")
+}
+
+fn TestExplainUnknownBackend() {
+    let raw = "frontend web\n  bind 1\n  mode http\n  route default -> missing\nbackend other\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let ex = explain_request(w, "", "GET", "/", "h")
+    assert_eq(ex.ok, 0)
+}
+
+fn TestPathPartSplit() {
+    assert_eq_str(path_part("/admin/drain/api/api1", 1), "admin")
+    assert_eq_str(path_part("/admin/drain/api/api1", 2), "drain")
+    assert_eq_str(path_part("/admin/drain/api/api1", 3), "api")
+    assert_eq_str(path_part("/admin/drain/api/api1", 4), "api1")
+    assert_eq_str(path_part("/admin/drain/api/api1", 99), "")
+}
+
+fn TestAdminDrainReady() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("api1", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("api2", "127.0.0.1", 2, 100, 1, "api"))
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("POST", "/admin/drain/api/api1", servers, backends, "")
+    assert_eq(r.handled, 1)
+    assert_eq(r.status, 200)
+    assert_eq(r.servers[0].drain, 1)
+    let r2 = handle_admin("POST", "/admin/ready/api/api1", r.servers, backends, "")
+    assert_eq(r2.servers[0].drain, 0)
+    assert_eq(r2.servers[0].alive, 1)
+}
+
+fn TestAdminDisableEnable() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s", "h", 1, 1, 1, "b"))
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("POST", "/admin/disable/b/s", servers, backends, "")
+    assert_eq(r.servers[0].alive, 0)
+    let r2 = handle_admin("POST", "/admin/enable/b/s", r.servers, backends, "")
+    assert_eq(r2.servers[0].alive, 1)
+}
+
+fn TestAdminNotFoundServer() {
+    let servers = make([]Server, 0, 0)
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("POST", "/admin/drain/api/nope", servers, backends, "")
+    assert_eq(r.handled, 1)
+    assert_eq(r.status, 404)
+}
+
+fn TestAdminUnknownAction() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s", "h", 1, 1, 1, "b"))
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("POST", "/admin/explode/b/s", servers, backends, "")
+    assert_eq(r.handled, 1)
+    assert_eq(r.status, 404)
+}
+
+fn TestAdminNonAdminPathNotHandled() {
+    let servers = make([]Server, 0, 0)
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("GET", "/stats", servers, backends, "")
+    assert_eq(r.handled, 0)
+}
+
+fn TestAdminMutationsRequirePost() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s", "h", 1, 1, 1, "b"))
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("GET", "/admin/drain/b/s", servers, backends, "")
+    assert_eq(r.handled, 1)
+    assert_eq(r.status, 405)
+    assert_eq(r.servers[0].drain, 0)
+}
+
+fn TestAdminReloadServersFile() {
+    let servers_path = "/tmp/leba_reload_servers_file.txt"
+    let _ = write_file(servers_path, "keep 127.0.0.1:11 weight 2\nnew 127.0.0.1:12 weight 3\n")
+    let mut backends = make([]Backend, 0, 1)
+    let mut be = backend_new("api")
+    be.servers_file = servers_path
+    backends = append(backends, be)
+    let mut servers = make([]Server, 0, 2)
+    let mut keep = server_new("keep", "127.0.0.1", 10, 1, 1, "api")
+    keep.total_req = 9
+    keep.drain = 1
+    servers = append(servers, keep)
+    let mut old = server_new("old", "127.0.0.1", 13, 1, 1, "api")
+    old.conns = 2
+    servers = append(servers, old)
+    let r = handle_admin("POST", "/admin/reload-servers", servers, backends, "")
+    assert_eq(r.handled, 1)
+    assert_eq(r.status, 200)
+    assert_eq(len(r.servers), 3)
+    assert_eq_str(r.servers[0].name, "keep")
+    assert_eq(r.servers[0].total_req, 9)
+    assert_eq(r.servers[0].drain, 1)
+    assert_eq_str(r.servers[1].name, "new")
+    assert_eq_str(r.servers[2].name, "old")
+    assert_eq(r.servers[2].drain, 1)
+    let r2 = handle_admin("GET", "/admin/reload-servers", servers, backends, "")
+    assert_eq(r2.status, 405)
+    let _ = remove_file(servers_path)
+}
+
+fn TestReadyzLogic() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("a", "h", 1, 1, 1, "b"))
+    let mut s0 = servers[0]
+    s0.drain = 1
+    servers[0] = s0
+    assert_eq(any_ready(servers), 0)
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("GET", "/readyz", servers, backends, "")
+    assert_eq(r.status, 503)
+    servers = set_server_drain(servers, 0, 0)
+    let r2 = handle_admin("GET", "/readyz", servers, backends, "")
+    assert_eq(r2.status, 200)
+}
+
+fn TestLivezAlwaysOk() {
+    let servers = make([]Server, 0, 0)
+    let backends = make([]Backend, 0, 0)
+    let r = handle_admin("GET", "/livez", servers, backends, "")
+    assert_eq(r.status, 200)
+    assert_eq(r.handled, 1)
+}
+
+fn TestServersJsonEscapes() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s\"x", "h", 1, 1, 1, "b"))
+    let j = servers_json(servers)
+    assert(str_contains(j, "\\\""))
+    assert(str_contains(j, "\"servers\""))
+}
+
+fn TestAccessLogLineFormat() {
+    let line = access_log_line("GET", "/x", 200, "api", "s1", 12, 99, "id1", "", "")
+    assert(str_contains(line, "[access]"))
+    assert(str_contains(line, "id=id1"))
+    assert(str_contains(line, "status=200"))
+    assert(str_contains(line, "be=api"))
+    assert(str_contains(line, "t=12ms"))
+}
+
+fn TestTraceparentValidationAndExtract() {
+    let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    assert_eq(traceparent_valid(tp), 1)
+    assert_eq_str(traceparent_or_new(tp), tp)
+    assert_eq_str(traceparent_trace_id(tp), "4bf92f3577b34da6a3ce929d0e0e4736")
+    assert_eq_str(traceparent_span_id(tp), "00f067aa0ba902b7")
+}
+
+fn TestTraceparentRejectsInvalidAndGenerates() {
+    assert_eq(traceparent_valid("not-a-trace"), 0)
+    assert_eq(traceparent_valid("00-00000000000000000000000000000000-00f067aa0ba902b7-01"), 0)
+    let tp = traceparent_or_new("")
+    assert_eq(traceparent_valid(tp), 1)
+    assert_eq(str_len(traceparent_trace_id(tp)), 32)
+    assert_eq(str_len(traceparent_span_id(tp)), 16)
+}
+
+fn TestAccessLogIncludesTrace() {
+    let line = access_log_line(
+        "GET",
+        "/x",
+        200,
+        "api",
+        "s1",
+        12,
+        99,
+        "id1",
+        "4bf92f3577b34da6a3ce929d0e0e4736",
+        "00f067aa0ba902b7"
+    )
+    assert(str_contains(line, "trace=4bf92f3577b34da6a3ce929d0e0e4736"))
+    assert(str_contains(line, "span=00f067aa0ba902b7"))
+}
+
+fn TestRawRequestParserNormalizesAndExtractsHeaders() {
+    let raw = "GET   http://example.com:8080/api/v1?q=1   HTTP/1.1\r\nhOsT: edge.example.com\r\nCOOKIE: a=1; LEBAID=s2\r\nTraceParent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n\r\n"
+    let r = parse_raw_request(raw)
+    assert_eq(r.ok, 1)
+    assert_eq_str(r.method, "GET")
+    assert_eq_str(r.path, "/api/v1?q=1")
+    assert_eq_str(r.host, "edge.example.com")
+    assert_eq_str(cookie_get(r.cookie, "LEBAID"), "s2")
+    assert_eq_str(r.traceparent, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+}
+
+fn TestRawRequestParserBodyAndMalformedEdges() {
+    let post = "POST /submit HTTP/1.1\r\nHost: h\r\nContent-Length: 7\r\n\r\npayload"
+    let r = parse_raw_request(post)
+    assert_eq(r.ok, 1)
+    assert_eq_str(r.path, "/submit")
+    assert_eq_str(r.body, "payload")
+
+    assert_eq(parse_raw_request("GET /incomplete HTTP/1.1\r\nHost: h\r\n").ok, 0)
+    assert_eq(parse_raw_request("GET noslash HTTP/1.1\r\nHost: h\r\n\r\n").ok, 0)
+    assert_eq(parse_raw_request("GET /missing-version\r\nHost: h\r\n\r\n").ok, 0)
+}
+
+fn TestWelcomePageShape() {
+    let html = leba_welcome_html()
+    assert(str_contains(html, "<title>LEBA</title>"))
+    assert(str_contains(html, "No backend is configured"))
+    assert_eq(leba_should_welcome("/"), 1)
+    assert_eq(leba_should_welcome("/index.html"), 1)
+    assert_eq(leba_should_welcome("/login"), 0)
+}
+
+fn TestUpstreamHttpRequestForwardsTraceparent() {
+    let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    let req = upstream_http_request_text("POST", "/submit", "payload", "127.0.0.1", 19001, tp)
+    assert(str_contains(req, "POST /submit HTTP/1.0\r\n"))
+    assert(str_contains(req, "Host: 127.0.0.1:19001\r\n"))
+    assert(str_contains(req, "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n"))
+    assert(str_contains(req, "Content-Length: 7\r\n"))
+    assert(str_contains(req, "\r\n\r\npayload"))
+}
+
+fn TestRawUpstreamResponseParsing() {
+    let raw = "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\n\r\nhello"
+    assert_eq(raw_response_status(raw), 201)
+    assert_eq_str(raw_response_body(raw), "hello")
+    assert_eq(raw_response_status(""), 0)
+    assert_eq_str(raw_http_reason(413), "Payload Too Large")
+}
+
+fn TestSipCallIdExtraction() {
+    let msg = "INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/TCP client;branch=z9hG4bK\r\nCall-ID: abc-123@example.com\r\nCSeq: 1 INVITE\r\n\r\n"
+    assert_eq_str(sip_call_id(msg), "abc-123@example.com")
+    let compact = "INVITE sip:bob@example.com SIP/2.0\r\ni: compact-42\r\n\r\n"
+    assert_eq_str(sip_call_id(compact), "compact-42")
+}
+
+fn TestSipCallIdBalanceIsStable() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("s1", "h", 1, 1, 1, "sip"))
+    servers = append(servers, server_new("s2", "h", 2, 1, 1, "sip"))
+    let mut be = backend_new("sip")
+    be.balance = "sip_call_id"
+    let a = pick_server(servers, be, "call-abc", "", "")
+    let b = pick_server(servers, be, "call-abc", "", "")
+    assert_eq(a, b)
+}
+
+fn TestHealthFallAndRise() {
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s", "h", 1, 1, 1, "b"))
+    servers = apply_probe_result(servers, 0, 0, 2, 2)
+    assert_eq(servers[0].alive, 1)
+    servers = apply_probe_result(servers, 0, 0, 2, 2)
+    assert_eq(servers[0].alive, 0)
+    servers = apply_probe_result(servers, 0, 1, 2, 2)
+    assert_eq(servers[0].alive, 0)
+    servers = apply_probe_result(servers, 0, 1, 2, 2)
+    assert_eq(servers[0].alive, 1)
+}
+
+fn TestSampleConfigDoctor() {
+    let w = parse_config_file("configs/leba.conf")
+    if w.ok == 0 {
+        assert(true)
+        return
+    }
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+    assert(len(w.frontends) >= 1)
+}
+
+fn TestPackDoneRoundTrip() {
+    let v = pack_done(1, 502, 3, 99)
+    assert_eq(unpack_done_err(v), 1)
+    assert_eq(unpack_done_status(v), 502)
+    assert_eq(unpack_done_si(v), 3)
+    assert_eq(unpack_done_bytes(v), 99)
+    assert_eq(unpack_done_retries(v), 0)
+    let v2 = pack_done(0, 200, 0, 0)
+    assert_eq(unpack_done_err(v2), 0)
+    assert_eq(unpack_done_status(v2), 200)
+    assert_eq(unpack_done_si(v2), 0)
+}
+
+fn TestPackDoneRetryRoundTripAndStats() {
+    let v = pack_done_retry(0, 200, 1, 123, 2)
+    assert_eq(unpack_done_err(v), 0)
+    assert_eq(unpack_done_status(v), 200)
+    assert_eq(unpack_done_si(v), 1)
+    assert_eq(unpack_done_bytes(v), 123)
+    assert_eq(unpack_done_retries(v), 2)
+    let servers = make([]Server, 0, 0)
+    let st = apply_done(v, servers, stats_new())
+    assert_eq(st.retries, 2)
+}
+
+fn TestWorkersDefaultAndConfig() {
+    let d = defaults_new()
+    assert(d.workers >= 1)
+    let raw = "defaults\n  workers 16\nfrontend web\n  bind 1\n  mode http\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.defaults.workers, 16)
+}
+
+fn TestCliHttpRequestIncludesBasicAuth() {
+    let req = cli_http_request_text("GET", "/stats", "127.0.0.1", "admin:leba")
+    assert(str_contains(req, "GET /stats HTTP/1.0"))
+    assert(str_contains(req, "Authorization: Basic "))
+    assert(str_contains(req, base64_encode("admin:leba")))
+}
+
+fn TestCliHttpBodyAndAdminPath() {
+    let raw = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}\n"
+    assert_eq_str(cli_http_body(raw), "{\"ok\":true}\n")
+    assert_eq_str(cli_admin_path("drain", "api", "api1"), "/admin/drain/api/api1")
+}
+
+fn TestCliHashPasswordShape() {
+    let h = admin_kdf_hash("secret", "salt-1234567890", 3)
+    assert_eq(str_len(h), 64)
+}
+
+fn TestCliAddressNormalizationForNat() {
+    assert_eq_str(cli_clean_addr("http://edge.example.com:18404/admin/servers"), "edge.example.com:18404")
+    assert_eq_str(cli_addr_host("http://edge.example.com:18404/admin/servers"), "edge.example.com")
+    assert_eq(cli_addr_port("http://edge.example.com:18404/admin/servers"), 18404)
+    assert_eq_str(cli_addr_host("edge.example.com"), "edge.example.com")
+    assert_eq(cli_addr_port("edge.example.com"), 18404)
+}

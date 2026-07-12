@@ -1,0 +1,863 @@
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/trace.mko"
+pull . "./src/stats.mko"
+pull . "./src/proxy.mko"
+pull . "./src/doctor.mko"
+pull . "./src/admin.mko"
+pull . "./src/webadmin.mko"
+pull . "./src/runtime.mko"
+pull . "./src/cli.mko"
+
+fn frontend_mode_index(frontends: []Frontend, mode: string, ordinal: int) -> int {
+    let mut seen = 0
+    let mut i = 0
+    while i < len(frontends) {
+        if str_eq(frontends[i].mode, mode) {
+            if seen == ordinal {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn main() {
+    let mut path = "configs/leba.conf"
+    let mut max_req = 0
+    if argc() > 1 {
+        if str_eq(arg_get(1), "version") {
+            print("leba 0.4.0")
+            print("concurrency: crew worker pool")
+            return
+        }
+        if str_eq(arg_get(1), "doctor") {
+            if argc() < 3 {
+                print("usage: leba doctor <config>")
+                exit(2)
+            }
+            let rep0 = doctor_world(parse_config_file(arg_get(2)))
+            print(rep0.text)
+            if rep0.ok == 0 {
+                exit(1)
+            }
+            return
+        }
+        if str_eq(arg_get(1), "check") {
+            if argc() < 3 {
+                print("usage: leba check <config>")
+                exit(2)
+            }
+            let rep1 = doctor_world(parse_config_file(arg_get(2)))
+            print(rep1.text)
+            if rep1.ok == 0 {
+                exit(1)
+            }
+            return
+        }
+        if str_eq(arg_get(1), "explain") {
+            if argc() < 5 {
+                print("usage: leba explain <config> METHOD PATH [HOST]")
+                exit(2)
+            }
+            let w0 = parse_config_file(arg_get(2))
+            let mut host = "localhost"
+            if argc() > 5 {
+                host = arg_get(5)
+            }
+            print(explain_request(w0, "", arg_get(3), arg_get(4), host).text)
+            return
+        }
+        if str_eq(arg_get(1), "admin") {
+            print(cli_admin_main())
+            return
+        }
+        if str_eq(arg_get(1), "-f") {
+            if argc() > 2 {
+                path = arg_get(2)
+            }
+        }
+        if argc() > 4 {
+            if str_eq(arg_get(3), "-n") {
+                max_req = to_int(arg_get(4))
+            }
+        }
+    }
+    let mut load_log = str_builder()
+    builder_write(load_log, "path=")
+    builder_write(load_log, path)
+    log_info_event("config_load", builder_string(load_log))
+    let w = parse_config_file(path)
+    if w.ok == 0 {
+        let mut parse_log = str_builder()
+        builder_write(parse_log, "path=")
+        builder_write(parse_log, path)
+        builder_write(parse_log, " error=\"")
+        builder_write(parse_log, w.error)
+        builder_write(parse_log, "\"")
+        log_error_event("config_parse_failed", builder_string(parse_log))
+        print(w.error)
+        exit(1)
+        return
+    }
+    let rep = doctor_world(w)
+    if rep.ok == 0 {
+        let mut doctor_fail_log = str_builder()
+        builder_write(doctor_fail_log, "path=")
+        builder_write(doctor_fail_log, path)
+        builder_write(doctor_fail_log, " errors=")
+        builder_write(doctor_fail_log, int_to_string(rep.errors))
+        builder_write(doctor_fail_log, " warnings=")
+        builder_write(doctor_fail_log, int_to_string(rep.warnings))
+        log_error_event("doctor_failed", builder_string(doctor_fail_log))
+        print(rep.text)
+        exit(1)
+        return
+    }
+    let mut doctor_ok_log = str_builder()
+    builder_write(doctor_ok_log, "path=")
+    builder_write(doctor_ok_log, path)
+    builder_write(doctor_ok_log, " warnings=")
+    builder_write(doctor_ok_log, int_to_string(rep.warnings))
+    log_info_event("doctor_passed", builder_string(doctor_ok_log))
+    let mut servers = w.servers
+    let mut backends = w.backends
+    let mut frontends = w.frontends
+    let mut routes = w.routes
+    let mut acls = w.acls
+    let config_dir = path_dir(path)
+    let mut server_watch = watch_new()
+    let mut has_server_watch = 0
+    if watch_available() == 1 {
+        let mut wi = 0
+        while wi < len(backends) {
+            if not str_eq(backends[wi].servers_file, "") {
+                let watch_path = resolve_servers_path(config_dir, backends[wi].servers_file)
+                if watch_add(server_watch, watch_path) == 0 {
+                    has_server_watch = 1
+                    let mut wlog = str_builder()
+                    builder_write(wlog, "backend=")
+                    builder_write(wlog, backends[wi].name)
+                    builder_write(wlog, " path=")
+                    builder_write(wlog, watch_path)
+                    log_info_event("servers_file_watch_enabled", builder_string(wlog))
+                } else {
+                    let mut wfail = str_builder()
+                    builder_write(wfail, "backend=")
+                    builder_write(wfail, backends[wi].name)
+                    builder_write(wfail, " path=")
+                    builder_write(wfail, watch_path)
+                    log_warn_event("servers_file_watch_failed", builder_string(wfail))
+                }
+            }
+            wi = wi + 1
+        }
+    }
+    let _ = signal_ignore("PIPE")
+    let _ = signal_watch("TERM")
+    let _ = signal_watch("INT")
+    let _ = signal_watch("HUP")
+    let mut buckets = rate_init_all(frontends)
+    let mut st = stats_new()
+    let d = w.defaults
+    let mut workers = d.workers
+    if workers < 1 {
+        workers = 4
+    }
+    if workers > 64 {
+        workers = 64
+    }
+    let stats_idx = frontend_mode_index(frontends, "stats", 0)
+    let mut http_fes = make([]Frontend, 0, 8)
+    let mut tcp_fes = make([]Frontend, 0, 8)
+    let mut udp_fes = make([]Frontend, 0, 8)
+    let mut ti_scan = 0
+    while ti_scan < len(frontends) {
+        if str_eq(frontends[ti_scan].mode, "http") {
+            http_fes = append(http_fes, frontends[ti_scan])
+        }
+        if str_eq(frontends[ti_scan].mode, "tcp") {
+            tcp_fes = append(tcp_fes, frontends[ti_scan])
+        }
+        if str_eq(frontends[ti_scan].mode, "udp") {
+            udp_fes = append(udp_fes, frontends[ti_scan])
+        }
+        ti_scan = ti_scan + 1
+    }
+    if len(http_fes) == 0 {
+        if len(tcp_fes) == 0 {
+            if len(udp_fes) == 0 {
+                log_error_event("runtime_config_failed", "reason=no_http_tcp_or_udp_frontend")
+                print("no http, tcp, or udp frontend defined")
+                exit(1)
+                return
+            }
+        }
+    }
+
+    let slots = chan_new(workers)
+    let done = chan_new(workers * 2)
+    fill_slots(slots, workers)
+    let mut stats_fe = frontend_new("stats")
+    let mut http_listeners = make([]HttpListener, 0, len(http_fes))
+    let mut hi_bind = 0
+    while hi_bind < len(http_fes) {
+        let mut hfe = http_fes[hi_bind]
+        let mut h_tls = 0
+        let mut h_tls_srv = tls_server_new("", "")
+        if str_len(hfe.tls_cert) > 0 {
+            h_tls = 1
+            h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
+        }
+        let hfd = tcp_listen_addr(hfe.bind_host, hfe.bind_port)
+        http_listeners = append(http_listeners, HttpListener {
+            frontend: hfe,
+            fd: hfd,
+            tls: h_tls,
+            tls_srv: h_tls_srv
+        })
+        hi_bind = hi_bind + 1
+    }
+    if stats_idx >= 0 {
+        stats_fe = frontends[stats_idx]
+    }
+    let stats_fd = http_bind_addr(stats_fe.bind_host, w.stats_port)
+    let mut tcp_fds = make([]int, 0, len(tcp_fes))
+    let mut ti_bind = 0
+    while ti_bind < len(tcp_fes) {
+        tcp_fds = append(tcp_fds, tcp_listen_addr(tcp_fes[ti_bind].bind_host, tcp_fes[ti_bind].bind_port))
+        ti_bind = ti_bind + 1
+    }
+    let mut udp_listeners = make([]UdpListener, 0, len(udp_fes))
+    let mut ui_bind = 0
+    while ui_bind < len(udp_fes) {
+        let usock = game_udp_bind_addr(udp_fes[ui_bind].bind_host, udp_fes[ui_bind].bind_port)
+        udp_listeners = append(udp_listeners, UdpListener {
+            frontend: udp_fes[ui_bind],
+            sock: usock,
+            fd: game_udp_fd(usock)
+        })
+        ui_bind = ui_bind + 1
+    }
+    let mut hi_check = 0
+    while hi_check < len(http_listeners) {
+        if http_listeners[hi_check].fd < 0 {
+            let mut bind_fail = str_builder()
+            builder_write(bind_fail, "frontend=")
+            builder_write(bind_fail, http_listeners[hi_check].frontend.name)
+            builder_write(bind_fail, " bind=")
+            builder_write(bind_fail, http_listeners[hi_check].frontend.bind_host)
+            builder_write(bind_fail, ":")
+            builder_write(bind_fail, int_to_string(http_listeners[hi_check].frontend.bind_port))
+            log_error_event("listener_bind_failed", builder_string(bind_fail))
+            let mut hi_close_fail = 0
+            while hi_close_fail < len(http_listeners) {
+                if http_listeners[hi_close_fail].fd >= 0 {
+                    let _ = tcp_close(http_listeners[hi_close_fail].fd)
+                }
+                if http_listeners[hi_close_fail].tls == 1 {
+                    let _ = tls_server_free(http_listeners[hi_close_fail].tls_srv)
+                }
+                hi_close_fail = hi_close_fail + 1
+            }
+            exit(1)
+            return
+        }
+        hi_check = hi_check + 1
+    }
+    if stats_fd < 0 {
+        let mut stats_fail = str_builder()
+        builder_write(stats_fail, "frontend=stats bind=")
+        builder_write(stats_fail, stats_fe.bind_host)
+        builder_write(stats_fail, ":")
+        builder_write(stats_fail, int_to_string(w.stats_port))
+        log_error_event("listener_bind_failed", builder_string(stats_fail))
+        let mut hi_close0 = 0
+        while hi_close0 < len(http_listeners) {
+            if http_listeners[hi_close0].fd >= 0 {
+                let _ = tcp_close(http_listeners[hi_close0].fd)
+            }
+            if http_listeners[hi_close0].tls == 1 {
+                let _ = tls_server_free(http_listeners[hi_close0].tls_srv)
+            }
+            hi_close0 = hi_close0 + 1
+        }
+        let mut ti_close0 = 0
+        while ti_close0 < len(tcp_fds) {
+            let _ = tcp_close(tcp_fds[ti_close0])
+            ti_close0 = ti_close0 + 1
+        }
+        let mut ui_close0 = 0
+        while ui_close0 < len(udp_listeners) {
+            game_udp_close(udp_listeners[ui_close0].sock)
+            ui_close0 = ui_close0 + 1
+        }
+        exit(1)
+        return
+    }
+    let mut ti_check = 0
+    while ti_check < len(tcp_fds) {
+        if tcp_fds[ti_check] < 0 {
+            let mut tcp_fail = str_builder()
+            builder_write(tcp_fail, "frontend=")
+            builder_write(tcp_fail, tcp_fes[ti_check].name)
+            builder_write(tcp_fail, " port=")
+            builder_write(tcp_fail, int_to_string(tcp_fes[ti_check].bind_port))
+            log_error_event("listener_bind_failed", builder_string(tcp_fail))
+            let mut hi_close1_http = 0
+            while hi_close1_http < len(http_listeners) {
+                if http_listeners[hi_close1_http].fd >= 0 {
+                    let _ = tcp_close(http_listeners[hi_close1_http].fd)
+                }
+                if http_listeners[hi_close1_http].tls == 1 {
+                    let _ = tls_server_free(http_listeners[hi_close1_http].tls_srv)
+                }
+                hi_close1_http = hi_close1_http + 1
+            }
+            let _ = http_close_listener(stats_fd)
+            let mut ti_close1 = 0
+            while ti_close1 < len(tcp_fds) {
+                if ti_close1 != ti_check {
+                    let _ = tcp_close(tcp_fds[ti_close1])
+                }
+                ti_close1 = ti_close1 + 1
+            }
+            exit(1)
+            return
+        }
+        ti_check = ti_check + 1
+    }
+    let mut ui_check = 0
+    while ui_check < len(udp_listeners) {
+        if udp_listeners[ui_check].fd < 0 {
+            let mut udp_fail = str_builder()
+            builder_write(udp_fail, "frontend=")
+            builder_write(udp_fail, udp_listeners[ui_check].frontend.name)
+            builder_write(udp_fail, " port=")
+            builder_write(udp_fail, int_to_string(udp_listeners[ui_check].frontend.bind_port))
+            log_error_event("listener_bind_failed", builder_string(udp_fail))
+            let mut hi_close_udp_http = 0
+            while hi_close_udp_http < len(http_listeners) {
+                if http_listeners[hi_close_udp_http].fd >= 0 {
+                    let _ = tcp_close(http_listeners[hi_close_udp_http].fd)
+                }
+                if http_listeners[hi_close_udp_http].tls == 1 {
+                    let _ = tls_server_free(http_listeners[hi_close_udp_http].tls_srv)
+                }
+                hi_close_udp_http = hi_close_udp_http + 1
+            }
+            let _ = http_close_listener(stats_fd)
+            let mut ti_close_udp_fail = 0
+            while ti_close_udp_fail < len(tcp_fds) {
+                let _ = tcp_close(tcp_fds[ti_close_udp_fail])
+                ti_close_udp_fail = ti_close_udp_fail + 1
+            }
+            let mut ui_close_udp_fail = 0
+            while ui_close_udp_fail < len(udp_listeners) {
+                if ui_close_udp_fail != ui_check {
+                    game_udp_close(udp_listeners[ui_close_udp_fail].sock)
+                }
+                ui_close_udp_fail = ui_close_udp_fail + 1
+            }
+            exit(1)
+            return
+        }
+        ui_check = ui_check + 1
+    }
+    let tcp_ev = evloop_new()
+    let mut hi_add = 0
+    while hi_add < len(http_listeners) {
+        let _ = evloop_add(tcp_ev, http_listeners[hi_add].fd, 1)
+        hi_add = hi_add + 1
+    }
+    let _ = evloop_add(tcp_ev, stats_fd, 1)
+    let mut ti_add = 0
+    while ti_add < len(tcp_fds) {
+        let _ = evloop_add(tcp_ev, tcp_fds[ti_add], 1)
+        ti_add = ti_add + 1
+    }
+    let mut ui_add = 0
+    while ui_add < len(udp_listeners) {
+        let _ = evloop_add(tcp_ev, udp_listeners[ui_add].fd, 1)
+        ui_add = ui_add + 1
+    }
+    let mut hi_log = 0
+    while hi_log < len(http_listeners) {
+        let mut http_bind_log = str_builder()
+        builder_write(http_bind_log, "frontend=")
+        builder_write(http_bind_log, http_listeners[hi_log].frontend.name)
+        builder_write(http_bind_log, " bind=")
+        builder_write(http_bind_log, http_listeners[hi_log].frontend.bind_host)
+        builder_write(http_bind_log, ":")
+        builder_write(http_bind_log, int_to_string(http_listeners[hi_log].frontend.bind_port))
+        log_info_event("listener_bound", builder_string(http_bind_log))
+        hi_log = hi_log + 1
+    }
+    let mut stats_bind_log = str_builder()
+    builder_write(stats_bind_log, "frontend=stats bind=")
+    builder_write(stats_bind_log, stats_fe.bind_host)
+    builder_write(stats_bind_log, ":")
+    builder_write(stats_bind_log, int_to_string(w.stats_port))
+    log_info_event("listener_bound", builder_string(stats_bind_log))
+    let mut ti_log = 0
+    while ti_log < len(tcp_fes) {
+        let mut tcp_bind_log = str_builder()
+        builder_write(tcp_bind_log, "frontend=")
+        builder_write(tcp_bind_log, tcp_fes[ti_log].name)
+        builder_write(tcp_bind_log, " mode=tcp bind=")
+        builder_write(tcp_bind_log, tcp_fes[ti_log].bind_host)
+        builder_write(tcp_bind_log, ":")
+        builder_write(tcp_bind_log, int_to_string(tcp_fes[ti_log].bind_port))
+        log_info_event("listener_bound", builder_string(tcp_bind_log))
+        ti_log = ti_log + 1
+    }
+    let mut ui_log = 0
+    while ui_log < len(udp_listeners) {
+        let mut udp_bind_log = str_builder()
+        builder_write(udp_bind_log, "frontend=")
+        builder_write(udp_bind_log, udp_listeners[ui_log].frontend.name)
+        builder_write(udp_bind_log, " mode=udp bind=")
+        builder_write(udp_bind_log, udp_listeners[ui_log].frontend.bind_host)
+        builder_write(udp_bind_log, ":")
+        builder_write(udp_bind_log, int_to_string(udp_listeners[ui_log].frontend.bind_port))
+        log_info_event("listener_bound", builder_string(udp_bind_log))
+        ui_log = ui_log + 1
+    }
+    if max_req > 0 {
+        let mut run_log = str_builder()
+        builder_write(run_log, "mode=bounded max_req=")
+        builder_write(run_log, int_to_string(max_req))
+        builder_write(run_log, " workers=")
+        builder_write(run_log, int_to_string(workers))
+        log_info_event("runtime_start", builder_string(run_log))
+    } else {
+        let mut run_log2 = str_builder()
+        builder_write(run_log2, "mode=forever workers=")
+        builder_write(run_log2, int_to_string(workers))
+        log_info_event("runtime_start", builder_string(run_log2))
+    }
+    let mut completed = 0
+    let mut inflight = 0
+    let mut udp_flows = make([]UdpFlow, 0, 64)
+    let mut pending_clients = make([]PendingClient, 0, workers * 16)
+    let pending_limit = workers * 64
+    crew pool {
+        while max_req <= 0 or completed < max_req {
+            if signal_fired("TERM") == 1 {
+                log_info_event("runtime_signal", "signal=TERM action=shutdown")
+                completed = max_req
+                if max_req <= 0 {
+                    max_req = 1
+                    completed = 1
+                }
+                continue
+            }
+            if signal_fired("INT") == 1 {
+                log_info_event("runtime_signal", "signal=INT action=shutdown")
+                completed = max_req
+                if max_req <= 0 {
+                    max_req = 1
+                    completed = 1
+                }
+                continue
+            }
+            let mut reload_reason = ""
+            if signal_fired("HUP") == 1 {
+                reload_reason = "signal=HUP"
+            }
+            if has_server_watch == 1 {
+                let changed = watch_poll(server_watch, 0)
+                if not str_eq(changed, "") {
+                    let mut reason = str_builder()
+                    builder_write(reason, "watch_path=")
+                    builder_write(reason, changed)
+                    reload_reason = builder_string(reason)
+                }
+            }
+            if not str_eq(reload_reason, "") {
+                let rr = reload_servers_files(backends, servers, config_dir)
+                if rr.ok == 1 {
+                    servers = rr.servers
+                    let mut rlog = str_builder()
+                    builder_write(rlog, reload_reason)
+                    builder_write(rlog, " loaded=")
+                    builder_write(rlog, int_to_string(rr.loaded))
+                    builder_write(rlog, " servers=")
+                    builder_write(rlog, int_to_string(len(servers)))
+                    log_info_event("servers_file_reloaded", builder_string(rlog))
+                } else {
+                    let mut rfail = str_builder()
+                    builder_write(rfail, reload_reason)
+                    builder_write(rfail, " error=\"")
+                    builder_write(rfail, json_escape(rr.error))
+                    builder_write(rfail, "\"")
+                    log_warn_event("servers_file_reload_failed", builder_string(rfail))
+                }
+            }
+            if inflight > 0 {
+                if chan_len(done) > 0 {
+                    let v = done.recv()
+                    servers = apply_done_servers(v, servers)
+                    st = apply_done(v, servers, st)
+                    inflight = inflight - 1
+                    completed = completed + 1
+                }
+            }
+            if max_req > 0 {
+                if completed >= max_req {
+                    continue
+                }
+            }
+            if len(pending_clients) > 0 {
+                let mut next_pending = make([]PendingClient, 0, len(pending_clients))
+                let mut pi = 0
+                let nowp = now_ms()
+                while pi < len(pending_clients) {
+                    let pc = pending_clients[pi]
+                    if nowp > pc.deadline_ms {
+                        log_warn_event("client_timeout", "stage=request_read status=408")
+                        let _ = tcp_close(pc.fd)
+                    } else {
+                        if pc.kind == 2 {
+                            if chan_len(slots) <= 0 {
+                                next_pending = append(next_pending, pc)
+                                pi = pi + 1
+                                continue
+                            }
+                        }
+                        if io_read_ready(pc.fd, 0) > 0 {
+                            let raw_chunk = tcp_read(pc.fd)
+                            let mut rb = str_builder()
+                            builder_write(rb, pc.buffer)
+                            builder_write(rb, raw_chunk)
+                            let raw_pending = builder_string(rb)
+                            let mut req_limit = 65536
+                            if pc.kind == 2 {
+                                if pc.frontend_idx >= 0 {
+                                    if pc.frontend_idx < len(http_listeners) {
+                                        req_limit = http_listeners[pc.frontend_idx].frontend.request_body_limit_bytes
+                                        if req_limit <= 0 {
+                                            req_limit = 1048576
+                                        }
+                                    }
+                                }
+                            }
+                            if raw_request_complete(raw_pending, req_limit) == 0 {
+                                if str_len(raw_pending) > req_limit {
+                                    log_warn_event("client_rejected", "stage=request_read reason=request_too_large")
+                                    let _ = tcp_close(pc.fd)
+                                } else {
+                                    let mut keep_pc = pc
+                                    keep_pc.buffer = raw_pending
+                                    next_pending = append(next_pending, keep_pc)
+                                }
+                                pi = pi + 1
+                                continue
+                            }
+                            if pc.kind == 1 {
+                                let srp = handle_stats_raw_conn(pc.fd, raw_pending, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, path, config_dir)
+                                frontends = srp.frontends
+                                backends = srp.backends
+                                servers = srp.servers
+                                routes = srp.routes
+                                acls = srp.acls
+                                let _ = tcp_close(pc.fd)
+                                completed = completed + 1
+                            } else {
+                                if pc.frontend_idx >= 0 {
+                                    if pc.frontend_idx < len(http_listeners) {
+                                        let ph = http_listeners[pc.frontend_idx]
+                                        let raw_reqp = parse_raw_request(raw_pending)
+                                        let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets)
+                                        servers = dp.servers
+                                        backends = dp.backends
+                                        buckets = dp.buckets
+                                        if dp.need_worker == 0 {
+                                            let _ = tcp_close(pc.fd)
+                                            if dp.bytes_in > 0 {
+                                                completed = completed + 1
+                                            }
+                                        } else {
+                                            let _ = slots.recv()
+                                            inflight = inflight + 1
+                                            st.active_conns = st.active_conns + 1
+                                            let _ = pool.kick(worker_raw_upstream(
+                                                dp.c, dp.method, dp.path, dp.body, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
+                                                dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, slots, done
+                                            ))
+                                        }
+                                    } else {
+                                        let _ = tcp_close(pc.fd)
+                                    }
+                                } else {
+                                    let _ = tcp_close(pc.fd)
+                                }
+                            }
+                        } else {
+                            next_pending = append(next_pending, pc)
+                        }
+                    }
+                    pi = pi + 1
+                }
+                pending_clients = next_pending
+            }
+            let ready = evloop_wait(tcp_ev, 5)
+            let mut ei = 0
+            while ei < ready {
+                if max_req > 0 {
+                    if completed >= max_req {
+                        ei = ready
+                        continue
+                    }
+                }
+                let rfd = evloop_event_fd(tcp_ev, ei)
+                if rfd == stats_fd {
+                    let sc = tcp_accept_nb(stats_fd)
+                    if sc >= 0 {
+                        if len(pending_clients) >= pending_limit {
+                            log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=stats")
+                            let _ = tcp_close(sc)
+                        } else {
+                            let _ = tcp_set_timeout(sc, 1000)
+                            let _ = io_set_nonblocking(sc, 1)
+                            pending_clients = append(pending_clients, PendingClient {
+                                fd: sc,
+                                kind: 1,
+                                frontend_idx: -1,
+                                deadline_ms: now_ms() + 3000,
+                                buffer: ""
+                            })
+                        }
+                    }
+                }
+                let mut hi_match = 0
+                while hi_match < len(http_listeners) {
+                    if rfd == http_listeners[hi_match].fd {
+                        let h = http_listeners[hi_match]
+                        let mut http_accepts = 0
+                        let mut http_accept_limit = 64
+                        if h.tls == 1 {
+                            http_accept_limit = 1
+                        }
+                        while http_accepts < http_accept_limit {
+                            if chan_len(slots) <= 0 {
+                                http_accepts = http_accept_limit
+                            } else {
+                                let c = tcp_accept_nb(http_listeners[hi_match].fd)
+                                if c < 0 {
+                                    http_accepts = http_accept_limit
+                                } else {
+                                    let _ = tcp_set_timeout(c, 1000)
+                                    if h.tls == 1 {
+                                    let tconn = tls_accept(h.tls_srv, c)
+                                    let proto = tls_conn_alpn(tconn)
+                                    let mut tr = ProxyResult {
+                                        err: 1,
+                                        bytes_out: 0,
+                                        denied: 0,
+                                        rate_limited: 0,
+                                        retries: 0,
+                                        server_idx: -1,
+                                        bytes_in: 0,
+                                        servers: servers,
+                                        backends: backends,
+                                        buckets: buckets
+                                    }
+                                    if str_eq(proto, "h2") {
+                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets)
+                                    } else {
+                                        let raw_req = parse_raw_request(tls_read(tconn, 65536))
+                                        tr = handle_tls_proxy_request(tconn, raw_req, h.frontend, routes, acls, backends, servers, buckets, 0)
+                                    }
+                                    servers = tr.servers
+                                    backends = tr.backends
+                                    buckets = tr.buckets
+                                    st.total_req = st.total_req + 1
+                                    st.total_bytes_out = st.total_bytes_out + tr.bytes_out
+                                    st.retries = st.retries + tr.retries
+                                    if tr.err != 0 {
+                                        st.total_err = st.total_err + 1
+                                    }
+                                    if tr.denied == 1 {
+                                        st.denied = st.denied + 1
+                                    }
+                                    if tr.rate_limited == 1 {
+                                        st.rate_limited = st.rate_limited + 1
+                                    }
+                                    st.last_req_ms = now_ms()
+                                    let _ = tls_conn_close(tconn)
+                                    completed = completed + 1
+                                    } else {
+                                        if len(pending_clients) >= pending_limit {
+                                            log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")
+                                            let _ = tcp_close(c)
+                                        } else {
+                                            let _ = io_set_nonblocking(c, 1)
+                                            pending_clients = append(pending_clients, PendingClient {
+                                                fd: c,
+                                                kind: 2,
+                                                frontend_idx: hi_match,
+                                                deadline_ms: now_ms() + 3000,
+                                                buffer: ""
+                                            })
+                                        }
+                                    }
+                                    http_accepts = http_accepts + 1
+                                }
+                            }
+                        }
+                        hi_match = len(http_listeners)
+                    } else {
+                        hi_match = hi_match + 1
+                    }
+                }
+                let mut ti_match = 0
+                while ti_match < len(tcp_fds) {
+                    if rfd == tcp_fds[ti_match] {
+                        let mut tcp_accepts = 0
+                        while tcp_accepts < 64 {
+                            if chan_len(slots) <= 0 {
+                                tcp_accepts = 64
+                            } else {
+                                let tc = tcp_accept_nb(tcp_fds[ti_match])
+                                if tc < 0 {
+                                    tcp_accepts = 64
+                                } else {
+                                let _ = tcp_set_timeout(tc, 1000)
+                                let td = prepare_tcp_dispatch(tc, tcp_fes[ti_match], backends, servers)
+                                servers = td.servers
+                                backends = td.backends
+                                if td.need_worker == 0 {
+                                    completed = completed + 1
+                                } else {
+                                    let _ = slots.recv()
+                                    inflight = inflight + 1
+                                    st.active_conns = st.active_conns + 1
+                                            let _ = pool.kick(worker_tcp_upstream(
+                                                td.c, tcp_fes[ti_match].name, td.up_host, td.up_port, td.timeout_ms,
+                                                td.body, td.server_idx, td.access_log, slots, done
+                                            ))
+                                }
+                                    tcp_accepts = tcp_accepts + 1
+                                }
+                            }
+                        }
+                        ti_match = len(tcp_fds)
+                    } else {
+                        ti_match = ti_match + 1
+                    }
+                }
+                let mut ui_match = 0
+                while ui_match < len(udp_listeners) {
+                    if rfd == udp_listeners[ui_match].fd {
+                        let data = game_udp_recv(udp_listeners[ui_match].sock)
+                        let peer = game_udp_sender(udp_listeners[ui_match].sock)
+                        if not str_eq(data, "") {
+                            let fe = udp_listeners[ui_match].frontend
+                            let call_id = sip_call_id(data)
+                            let bi = find_backend(backends, fe.backend)
+                            if bi >= 0 {
+                                let mut is_client = 1
+                                let known_flow_idx = udp_flow_find(udp_flows, fe.name, fe.backend, call_id)
+                                if known_flow_idx >= 0 {
+                                    let known_flow = udp_flows[known_flow_idx]
+                                    if known_flow.client_peer != peer {
+                                        if known_flow.server_peer < 0 {
+                                            is_client = 0
+                                        } else {
+                                            if known_flow.server_peer == peer {
+                                                is_client = 0
+                                            }
+                                        }
+                                    }
+                                }
+                                if is_client == 0 {
+                                    let fidx2 = udp_flow_find(udp_flows, fe.name, fe.backend, call_id)
+                                    if fidx2 >= 0 {
+                                        udp_flows = udp_flow_mark_server_peer(udp_flows, fe.name, fe.backend, call_id, peer)
+                                        let flow = udp_flows[fidx2]
+                                        let _ = game_udp_send(udp_listeners[ui_match].sock, flow.client_peer, data)
+                                        completed = completed + 1
+                                        st.total_req = st.total_req + 1
+                                        st.total_bytes_out = st.total_bytes_out + str_len(data)
+                                    }
+                                } else {
+                                    let mut be = backends[bi]
+                                    let si = pick_server(servers, be, call_id, "", "")
+                                    be = next_rr(be)
+                                    backends[bi] = be
+                                    if si >= 0 {
+                                        let s = servers[si]
+                                        let _ = game_udp_send_to(udp_listeners[ui_match].sock, s.host, s.port, data)
+                                        udp_flows = udp_flow_upsert(udp_flows, fe.name, fe.backend, call_id, peer, si)
+                                        servers = mark_server_req(servers, si, str_len(data), 0)
+                                    } else {
+                                        st.total_err = st.total_err + 1
+                                    }
+                                    completed = completed + 1
+                                    st.total_req = st.total_req + 1
+                                }
+                            } else {
+                                completed = completed + 1
+                                st.total_req = st.total_req + 1
+                                st.total_err = st.total_err + 1
+                            }
+                        }
+                        ui_match = len(udp_listeners)
+                    } else {
+                        ui_match = ui_match + 1
+                    }
+                }
+                ei = ei + 1
+            }
+        }
+        while inflight > 0 {
+            let v = done.recv()
+            servers = apply_done_servers(v, servers)
+            st = apply_done(v, servers, st)
+            inflight = inflight - 1
+        }
+        let mut pc_close = 0
+        while pc_close < len(pending_clients) {
+            let _ = tcp_close(pending_clients[pc_close].fd)
+            pc_close = pc_close + 1
+        }
+    }
+    let _ = evloop_close(tcp_ev)
+    let mut hi_close2 = 0
+    while hi_close2 < len(http_listeners) {
+        if http_listeners[hi_close2].fd >= 0 {
+            let _ = tcp_close(http_listeners[hi_close2].fd)
+        }
+        if http_listeners[hi_close2].tls == 1 {
+            let _ = tls_server_free(http_listeners[hi_close2].tls_srv)
+        }
+        hi_close2 = hi_close2 + 1
+    }
+    let mut ti_close2 = 0
+    while ti_close2 < len(tcp_fds) {
+        let _ = tcp_close(tcp_fds[ti_close2])
+        ti_close2 = ti_close2 + 1
+    }
+    let mut ui_close2 = 0
+    while ui_close2 < len(udp_listeners) {
+        game_udp_close(udp_listeners[ui_close2].sock)
+        ui_close2 = ui_close2 + 1
+    }
+    if has_server_watch == 1 {
+        let _ = watch_close(server_watch)
+    }
+    let _ = http_close_listener(stats_fd)
+    let mut stop_log = str_builder()
+    builder_write(stop_log, "completed=")
+    builder_write(stop_log, int_to_string(completed))
+    log_info_event("runtime_stop", builder_string(stop_log))
+    print("ok")
+}

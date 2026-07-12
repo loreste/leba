@@ -1,0 +1,294 @@
+// Web admin + stats JSON surface tests
+pull "crypto"
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/admin.mko"
+pull . "./src/stats.mko"
+pull . "./src/webadmin.mko"
+
+fn TestStatsJsonShape() {
+    let st = stats_new()
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 8080
+    fe.mode = "http"
+    fe.rate_limit = 10
+    fes = append(fes, fe)
+    let mut bes = make([]Backend, 0, 1)
+    let mut be = backend_new("api")
+    be.maxconn = 9
+    bes = append(bes, be)
+    let mut servers = make([]Server, 0, 1)
+    let mut s0 = server_new("s1", "127.0.0.1", 9, 1, 1, "api")
+    s0.maxconn = 4
+    servers = append(servers, s0)
+    let mut routes = make([]Route, 0, 1)
+    routes = append(routes, route_new("web", "default", "", "api"))
+    let acls = make([]AclRule, 0, 0)
+    let j = stats_json(st, fes, bes, servers, routes, acls)
+    assert(str_contains(j, "\"version\""))
+    assert(str_contains(j, "\"frontends\""))
+    assert(str_contains(j, "\"bind_host\""))
+    assert(str_contains(j, "\"routes\""))
+    assert(str_contains(j, "\"acls\""))
+    assert(str_contains(j, "\"servers\""))
+    assert(str_contains(j, "0.4.0"))
+    assert(str_contains(j, "rate_limit"))
+    assert(str_contains(j, "request_body_limit_bytes"))
+    assert(str_contains(j, "health_interval_ms"))
+    assert(str_contains(j, "servers_file"))
+    assert(str_contains(j, "\"maxconn\":9"))
+    assert(str_contains(j, "\"maxconn\":4"))
+}
+
+fn TestWebadminHtmlComplete() {
+    let html = webadmin_html()
+    assert(str_len(html) > 5000)
+    assert(str_contains(html, "Leba Admin"))
+    assert(str_contains(html, "function refresh"))
+    assert(str_contains(html, "nav('servers')"))
+    assert(str_contains(html, "nav('explain')"))
+    assert(str_contains(html, "/admin/drain/"))
+    assert(str_contains(html, "Drain"))
+    assert(str_contains(html, "Ready"))
+    assert(str_contains(html, "Explain"))
+    assert(str_contains(html, "/stats"))
+    assert(str_contains(html, "Control plane"))
+    assert(str_contains(html, "Disable"))
+    assert(str_contains(html, "Enable"))
+    assert(str_contains(html, "sessionStorage"))
+    assert(str_contains(html, "lebaAuth"))
+    assert(str_contains(html, "Logout"))
+    assert(str_contains(html, "reloadServers"))
+    assert(str_contains(html, "/admin/reload-servers"))
+    assert(str_contains(html, "nav('vhosts')"))
+    assert(str_contains(html, "/admin/vhost-create"))
+    assert(str_contains(html, "/admin/vhost-cert"))
+    assert(str_contains(html, "saveVhost"))
+}
+
+fn TestWebadminHasNoAutoMetaRefresh() {
+    // SPA uses JS poll; meta refresh would fight interactive admin
+    let html = webadmin_html()
+    assert(not str_contains(html, "http-equiv=refresh"))
+}
+
+fn TestStatsJsonEscapesQuotesInNames() {
+    let st = stats_new()
+    let fes = make([]Frontend, 0, 0)
+    let bes = make([]Backend, 0, 0)
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("q\"q", "h", 1, 1, 1, "b"))
+    let routes = make([]Route, 0, 0)
+    let acls = make([]AclRule, 0, 0)
+    let j = stats_json(st, fes, bes, servers, routes, acls)
+    assert(str_contains(j, "\\\""))
+}
+
+fn TestMetricsTextShape() {
+    let mut st = stats_new()
+    st.total_req = 7
+    st.total_err = 1
+    st.denied = 2
+    st.rate_limited = 3
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 8080
+    fe.mode = "http"
+    fes = append(fes, fe)
+    let mut bes = make([]Backend, 0, 1)
+    let mut be = backend_new("api")
+    be.maxconn = 3
+    bes = append(bes, be)
+    let mut servers = make([]Server, 0, 1)
+    let mut s = server_new("s1", "127.0.0.1", 9, 1, 1, "api")
+    s.total_req = 4
+    s.total_err = 1
+    s.total_bytes = 99
+    s.conns = 2
+    s.maxconn = 5
+    servers = append(servers, s)
+    let m = metrics_text(st, fes, bes, servers)
+    assert(str_contains(m, "# TYPE leba_requests_total counter"))
+    assert(str_contains(m, "leba_requests_total 7"))
+    assert(str_contains(m, "leba_denied_total 2"))
+    assert(str_contains(m, "leba_rate_limited_total 3"))
+    assert(str_contains(m, "leba_frontend_info{frontend=\"web\",mode=\"http\",bind_host=\"\",port=\"8080\"} 1"))
+    assert(str_contains(m, "leba_backend_up_servers{backend=\"api\"} 1"))
+    assert(str_contains(m, "leba_backend_connections{backend=\"api\"} 2"))
+    assert(str_contains(m, "leba_backend_maxconn{backend=\"api\"} 3"))
+    assert(str_contains(m, "leba_server_maxconn{backend=\"api\",server=\"s1\"} 5"))
+    assert(str_contains(m, "leba_server_requests_total{backend=\"api\",server=\"s1\"} 4"))
+}
+
+fn TestMetricsEscapesLabels() {
+    let st = stats_new()
+    let mut fes = make([]Frontend, 0, 1)
+    fes = append(fes, frontend_new("we\"b"))
+    let bes = make([]Backend, 0, 0)
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("s\\1", "h", 1, 1, 1, "b"))
+    let m = metrics_text(st, fes, bes, servers)
+    assert(str_contains(m, "frontend=\"we\\\"b\""))
+    assert(str_contains(m, "server=\"s\\\\1\""))
+}
+
+fn TestAdminBasicAuthHelpers() {
+    assert_eq(admin_auth_required("", ""), 0)
+    assert_eq(admin_auth_ok("", "", ""), 1)
+    assert_eq(admin_auth_required("admin", "leba"), 1)
+    let h = basic_auth_header("admin", "leba")
+    assert(str_contains(h, "Basic "))
+    assert_eq(admin_auth_ok(h, "admin", "leba"), 1)
+    assert_eq(admin_auth_ok("Basic nope", "admin", "leba"), 0)
+}
+
+fn TestAdminRbacHelpers() {
+    let mut users = make([]AdminUser, 0, 2)
+    users = append(users, admin_user_new("view", "pw", "viewer"))
+    users = append(users, admin_user_new("ops", "pw", "operator"))
+    assert_eq_str(admin_auth_role(basic_auth_header("view", "pw"), users, "", ""), "viewer")
+    assert_eq_str(admin_auth_role(basic_auth_header("ops", "pw"), users, "", ""), "operator")
+    assert_eq_str(admin_auth_role("Basic nope", users, "", ""), "")
+    assert_eq(admin_role_allows("viewer", "viewer"), 1)
+    assert_eq(admin_role_allows("viewer", "operator"), 0)
+    assert_eq(admin_role_allows("operator", "operator"), 1)
+    assert_eq(admin_role_allows("admin", "operator"), 1)
+    assert_eq_str(admin_path_required_role("GET", "/stats"), "viewer")
+    assert_eq_str(admin_path_required_role("POST", "/admin/drain/api/api1"), "operator")
+    assert_eq_str(admin_path_required_role("POST", "/admin/vhost-create"), "operator")
+    assert_eq(admin_path_mutates_state("/admin/vhost-create"), 1)
+}
+
+fn TestAdminVhostCreateMutatesAndPersists() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 8080
+    fe.mode = "http"
+    fes = append(fes, fe)
+    let bes = make([]Backend, 0, 0)
+    let servers = make([]Server, 0, 0)
+    let routes = make([]Route, 0, 0)
+    let acls = make([]AclRule, 0, 0)
+
+    let mut pb = str_builder()
+    builder_write(pb, "/tmp/leba-admin-vhost-")
+    builder_write(pb, int_to_string(now_ms()))
+    builder_write(pb, ".conf")
+    let cfg = builder_string(pb)
+    let _ = write_file(cfg, "frontend web\n  bind :8080\n  mode http\n")
+
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/vhost-create",
+        "/admin/vhost-create?frontend=web&domain=example.com&backend=example&server=app1&addr=127.0.0.1%3A9000&cert=%2Ftmp%2Ffullchain.pem&key=%2Ftmp%2Fprivkey.pem",
+        servers,
+        fes,
+        bes,
+        routes,
+        acls,
+        cfg,
+        "/tmp"
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 200)
+    assert_eq(len(ar.backends), 1)
+    assert_eq(len(ar.servers), 1)
+    assert_eq(len(ar.routes), 1)
+    assert_eq_str(ar.routes[0].kind, "host")
+    assert_eq_str(ar.routes[0].value, "example.com")
+    assert_eq_str(ar.servers[0].host, "127.0.0.1")
+    assert_eq(ar.servers[0].port, 9000)
+    assert_eq_str(ar.frontends[0].tls_cert, "/tmp/fullchain.pem")
+    assert(str_contains(read_file(cfg), "include leba.vhosts.conf"))
+    assert(str_contains(read_file("/tmp/leba.vhosts.conf"), "route host example.com -> example"))
+
+    let w = parse_config_file(cfg)
+    assert_eq(w.ok, 1)
+    assert_eq(len(w.routes), 1)
+    assert_eq(len(w.servers), 1)
+    assert_eq_str(w.routes[0].backend, "example")
+}
+
+fn TestAdminVhostRejectsBadInput() {
+    let mut fes = make([]Frontend, 0, 1)
+    fes = append(fes, frontend_new("web"))
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/vhost-create",
+        "/admin/vhost-create?frontend=web&domain=bad%2Fhost&backend=be&server=s1&addr=127.0.0.1%3A9000",
+        make([]Server, 0, 0),
+        fes,
+        make([]Backend, 0, 0),
+        make([]Route, 0, 0),
+        make([]AclRule, 0, 0),
+        "/tmp/leba-admin-bad.conf",
+        "/tmp"
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 400)
+    assert_eq(len(ar.routes), 0)
+}
+
+fn TestAdminVhostsJson() {
+    let mut fes = make([]Frontend, 0, 1)
+    fes = append(fes, frontend_new("web"))
+    let mut bes = make([]Backend, 0, 1)
+    bes = append(bes, backend_new("api"))
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("api1", "127.0.0.1", 8080, 1, 1, "api"))
+    let mut routes = make([]Route, 0, 1)
+    routes = append(routes, route_new("web", "host", "example.com", "api"))
+    let ar = handle_admin_state("GET", "/admin/vhosts", "/admin/vhosts", servers, fes, bes, routes, make([]AclRule, 0, 0), "", "/tmp")
+    assert_eq(ar.status, 200)
+    assert(str_contains(ar.body, "\"domain\":\"example.com\""))
+    assert(str_contains(ar.body, "\"managed_file\":\"leba.vhosts.conf\""))
+}
+
+fn TestAdminHashAuth() {
+    let mut users = make([]AdminUser, 0, 1)
+    let mut hb = str_builder()
+    builder_write(hb, "leba-kdf-v1:3:abcd1234abcd1234:")
+    builder_write(hb, admin_kdf_hash("secret", "abcd1234abcd1234", 3))
+    users = append(users, admin_user_hash_new("ops", builder_string(hb), "operator"))
+    assert_eq_str(admin_auth_role(basic_auth_header("ops", "secret"), users, "", ""), "operator")
+    assert_eq_str(admin_auth_role(basic_auth_header("ops", "wrong"), users, "", ""), "")
+    assert_eq_str(admin_hash_kind("leba-kdf-v1:3:abcd1234abcd1234:abc"), "leba-kdf-v1")
+    assert_eq(admin_password_matches("secret", sha256("secret")), 1)
+}
+
+fn TestAdminArgon2idHashAuthWhenAvailable() {
+    if crypto.password_hashing_ok() == 0 {
+        return
+    }
+    let h = crypto.password_hash("secret")
+    let mut users = make([]AdminUser, 0, 1)
+    users = append(users, admin_user_hash_new("ops", h, "operator"))
+    assert_eq_str(admin_hash_kind(h), "argon2id")
+    assert_eq(admin_password_matches("secret", h), 1)
+    assert_eq(admin_password_matches("wrong", h), 0)
+    assert_eq_str(admin_auth_role(basic_auth_header("ops", "secret"), users, "", ""), "operator")
+}
+
+fn TestAdminAuditDetailShape() {
+    let line = admin_audit_detail("rid1", "ops", "operator", "POST", "/admin/drain/api/api1", 200, "handled")
+    assert(str_contains(line, "id=rid1"))
+    assert(str_contains(line, "user=\"ops\""))
+    assert(str_contains(line, "role=\"operator\""))
+    assert(str_contains(line, "method=POST"))
+    assert(str_contains(line, "path=\"/admin/drain/api/api1\""))
+    assert(str_contains(line, "status=200"))
+    assert(str_contains(line, "outcome=handled"))
+}
+
+fn TestAdminPathMutatesState() {
+    assert_eq(admin_path_mutates_state("/admin/drain/api/api1"), 1)
+    assert_eq(admin_path_mutates_state("/admin/reload-servers"), 1)
+    assert_eq(admin_path_mutates_state("/admin/servers"), 0)
+    assert_eq(admin_path_mutates_state("/stats"), 0)
+}

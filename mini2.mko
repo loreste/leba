@@ -1,0 +1,91 @@
+pull . "./src/util.mko"
+pull . "./src/types.mko"
+pull . "./src/config.mko"
+pull . "./src/acl.mko"
+pull . "./src/balance.mko"
+pull . "./src/health.mko"
+pull . "./src/rate.mko"
+pull . "./src/trace.mko"
+pull . "./src/stats.mko"
+pull . "./src/proxy.mko"
+pull . "./src/doctor.mko"
+pull . "./src/admin.mko"
+pull . "./src/webadmin.mko"
+pull . "./src/runtime.mko"
+
+fn main() {
+    let w = parse_config_file("configs/leba.conf")
+    let mut servers = w.servers
+    let mut backends = w.backends
+    let frontends = w.frontends
+    let routes = w.routes
+    let acls = w.acls
+    let mut buckets = rate_init_all(frontends)
+    let mut st = stats_new()
+    let workers = 4
+    let slots = chan_new(workers)
+    let done = chan_new(workers * 2)
+    fill_slots(slots, workers)
+    let http_fd = http_bind(w.frontends[0].bind_port)
+    let stats_fd = http_bind(w.stats_port)
+    let http_fe = w.frontends[0]
+    let mut completed = 0
+    let mut inflight = 0
+    let max_req = 1000000000
+    crew pool {
+        while completed < max_req {
+            if inflight > 0 {
+                if chan_len(done) > 0 {
+                    let v = done.recv()
+                    servers = apply_done_servers(v, servers)
+                    st = apply_done(v, servers, st)
+                    inflight = inflight - 1
+                    completed = completed + 1
+                }
+            }
+            if completed >= max_req {
+                continue
+            }
+            let which = io_native_poll2(http_fd, stats_fd, 30)
+            if which == 1 {
+                let sc = http_accept(stats_fd)
+                if sc >= 0 {
+                    servers = handle_stats_conn(sc, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass)
+                    let _ = http_close(sc)
+                }
+            } else {
+                if which == 0 {
+                    if chan_len(slots) > 0 {
+                        let c = http_accept(http_fd)
+                        if c >= 0 {
+                            let d = prepare_dispatch(c, http_fe, routes, acls, backends, servers, buckets)
+                            servers = d.servers
+                            backends = d.backends
+                            buckets = d.buckets
+                            if d.need_worker == 0 {
+                                let _ = http_close(c)
+                                completed = completed + 1
+                            } else {
+                                let _ = slots.recv()
+                                inflight = inflight + 1
+                                let _ = pool.kick(worker_upstream(
+                                    d.c, d.method, d.path, d.body, d.trace_id, d.span_id, d.up_host, d.up_port,
+                                    d.timeout_ms, d.retries, d.server_idx, d.access_log, slots, done
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while inflight > 0 {
+            let v = done.recv()
+            servers = apply_done_servers(v, servers)
+            st = apply_done(v, servers, st)
+            inflight = inflight - 1
+        }
+    }
+    let _ = http_close_listener(http_fd)
+    let _ = http_close_listener(stats_fd)
+    print("ok")
+}

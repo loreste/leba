@@ -1,0 +1,293 @@
+// Core domain types for Leba.
+pack types
+
+// --- servers & backends ----------------------------------------------------
+
+struct Server {
+    name: string
+    host: string
+    port: int
+    weight: int
+    maxconn: int
+    check: int
+    alive: int
+    drain: int
+    fails: int
+    rises: int
+    conns: int
+    total_req: int
+    total_err: int
+    total_bytes: int
+    last_check_ms: int
+    pool: int
+    backend: string
+}
+
+struct Backend {
+    name: string
+    balance: string
+    servers_file: string
+    health_path: string
+    health_interval_ms: int
+    health_timeout_ms: int
+    health_rise: int
+    health_fall: int
+    connect_timeout_ms: int
+    maxconn: int
+    retries: int
+    rr_idx: int
+}
+
+// --- routing & ACL ---------------------------------------------------------
+
+struct Route {
+    frontend: string
+    kind: string
+    value: string
+    backend: string
+}
+
+struct AclRule {
+    frontend: string
+    action: string
+    kind: string
+    value: string
+}
+
+struct AdminUser {
+    user: string
+    pass: string
+    pass_hash: string
+    role: string
+}
+
+struct UdpFlow {
+    frontend: string
+    backend: string
+    call_id: string
+    client_peer: int
+    server_peer: int
+    server_idx: int
+    last_seen_ms: int
+}
+
+// --- frontends -------------------------------------------------------------
+
+struct Frontend {
+    name: string
+    bind_host: string
+    bind_port: int
+    mode: string
+    maxconn: int
+    tls_cert: string
+    tls_key: string
+    protocols: string
+    sticky_cookie: string
+    rate_limit: int
+    request_body_limit_bytes: int
+    backend: string
+    xff: int
+    access_log: int
+}
+
+struct UdpListener {
+    frontend: Frontend
+    sock: GameUDP
+    fd: int
+}
+
+struct HttpListener {
+    frontend: Frontend
+    fd: int
+    tls: int
+    tls_srv: TlsServer
+}
+
+struct PendingClient {
+    fd: int
+    kind: int
+    frontend_idx: int
+    deadline_ms: int
+    buffer: string
+}
+
+// --- global defaults & live stats ------------------------------------------
+
+struct Defaults {
+    timeout_client_ms: int
+    timeout_server_ms: int
+    timeout_connect_ms: int
+    maxconn: int
+    retries: int
+    workers: int
+    request_body_limit_bytes: int
+}
+
+struct LiveStats {
+    started_ms: int
+    total_req: int
+    total_err: int
+    total_bytes_in: int
+    total_bytes_out: int
+    active_conns: int
+    denied: int
+    rate_limited: int
+    retries: int
+    last_req_ms: int
+    last_latency_ms: int
+    max_latency_ms: int
+}
+
+struct Config {
+    ok: int
+    error: string
+    defaults: Defaults
+    stats_port: int
+    stats_user: string
+    stats_pass: string
+}
+
+fn defaults_new() -> Defaults {
+    return Defaults {
+        timeout_client_ms: 30000,
+        timeout_server_ms: 30000,
+        timeout_connect_ms: 5000,
+        maxconn: 10000,
+        retries: 1,
+        workers: 32,
+        request_body_limit_bytes: 1048576
+    }
+}
+
+fn stats_new() -> LiveStats {
+    return LiveStats {
+        started_ms: now_ms(),
+        total_req: 0,
+        total_err: 0,
+        total_bytes_in: 0,
+        total_bytes_out: 0,
+        active_conns: 0,
+        denied: 0,
+        rate_limited: 0,
+        retries: 0,
+        last_req_ms: 0,
+        last_latency_ms: 0,
+        max_latency_ms: 0
+    }
+}
+
+fn server_new(name: string, host: string, port: int, weight: int, check: int, backend: string) -> Server {
+    return Server {
+        name: name,
+        host: host,
+        port: port,
+        weight: weight,
+        maxconn: 0,
+        check: check,
+        alive: 1,
+        drain: 0,
+        fails: 0,
+        rises: 0,
+        conns: 0,
+        total_req: 0,
+        total_err: 0,
+        total_bytes: 0,
+        last_check_ms: 0,
+        pool: -1,
+        backend: backend
+    }
+}
+
+fn backend_new(name: string) -> Backend {
+    return Backend {
+        name: name,
+        balance: "round_robin",
+        servers_file: "",
+        health_path: "/health",
+        health_interval_ms: 2000,
+        health_timeout_ms: 1000,
+        health_rise: 2,
+        health_fall: 3,
+        connect_timeout_ms: 5000,
+        maxconn: 0,
+        retries: 1,
+        rr_idx: 0
+    }
+}
+
+fn frontend_new(name: string) -> Frontend {
+    return Frontend {
+        name: name,
+        bind_host: "",
+        bind_port: 0,
+        mode: "http",
+        maxconn: 0,
+        tls_cert: "",
+        tls_key: "",
+        protocols: "http/1.1",
+        sticky_cookie: "",
+        rate_limit: 0,
+        request_body_limit_bytes: 0,
+        backend: "",
+        xff: 1,
+        access_log: 1
+    }
+}
+
+fn route_new(frontend: string, kind: string, value: string, backend: string) -> Route {
+    return Route {
+        frontend: frontend,
+        kind: kind,
+        value: value,
+        backend: backend
+    }
+}
+
+fn acl_new(frontend: string, action: string, kind: string, value: string) -> AclRule {
+    return AclRule {
+        frontend: frontend,
+        action: action,
+        kind: kind,
+        value: value
+    }
+}
+
+fn admin_user_new(user: string, pass: string, role: string) -> AdminUser {
+    return AdminUser {
+        user: user,
+        pass: pass,
+        pass_hash: "",
+        role: role
+    }
+}
+
+fn admin_user_hash_new(user: string, pass_hash: string, role: string) -> AdminUser {
+    return AdminUser {
+        user: user,
+        pass: "",
+        pass_hash: pass_hash,
+        role: role
+    }
+}
+
+fn config_err(msg: string) -> Config {
+    return Config {
+        ok: 0,
+        error: msg,
+        defaults: defaults_new(),
+        stats_port: 0,
+        stats_user: "",
+        stats_pass: ""
+    }
+}
+
+fn config_ok(d: Defaults, stats_port: int, user: string, pass: string) -> Config {
+    return Config {
+        ok: 1,
+        error: "",
+        defaults: d,
+        stats_port: stats_port,
+        stats_user: user,
+        stats_pass: pass
+    }
+}

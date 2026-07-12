@@ -1,0 +1,909 @@
+pull "crypto"
+
+// Live stats JSON + complete web admin SPA
+pack stats
+
+fn server_json(s: Server) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{")
+    builder_write(b, "\"name\":\"")
+    builder_write(b, json_escape(s.name))
+    builder_write(b, "\",\"backend\":\"")
+    builder_write(b, json_escape(s.backend))
+    builder_write(b, "\",\"host\":\"")
+    builder_write(b, json_escape(s.host))
+    builder_write(b, "\",\"port\":")
+    builder_write(b, int_to_string(s.port))
+    builder_write(b, ",\"weight\":")
+    builder_write(b, int_to_string(s.weight))
+    builder_write(b, ",\"maxconn\":")
+    builder_write(b, int_to_string(s.maxconn))
+    builder_write(b, ",\"alive\":")
+    builder_write(b, int_to_string(s.alive))
+    builder_write(b, ",\"drain\":")
+    builder_write(b, int_to_string(s.drain))
+    builder_write(b, ",\"conns\":")
+    builder_write(b, int_to_string(s.conns))
+    builder_write(b, ",\"total_req\":")
+    builder_write(b, int_to_string(s.total_req))
+    builder_write(b, ",\"total_err\":")
+    builder_write(b, int_to_string(s.total_err))
+    builder_write(b, ",\"total_bytes\":")
+    builder_write(b, int_to_string(s.total_bytes))
+    builder_write(b, "}")
+    return builder_string(b)
+}
+
+fn backend_json(be: Backend, servers: []Server) -> string {
+    let up = backend_up_count(servers, be.name)
+    let mut total = 0
+    let mut i = 0
+    while i < len(servers) {
+        if str_eq(servers[i].backend, be.name) {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    let mut b = str_builder()
+    builder_write(b, "{")
+    builder_write(b, "\"name\":\"")
+    builder_write(b, json_escape(be.name))
+    builder_write(b, "\",\"balance\":\"")
+    builder_write(b, json_escape(be.balance))
+    builder_write(b, "\",\"servers_file\":\"")
+    builder_write(b, json_escape(be.servers_file))
+    builder_write(b, "\",\"servers\":")
+    builder_write(b, int_to_string(total))
+    builder_write(b, ",\"up\":")
+    builder_write(b, int_to_string(up))
+    builder_write(b, ",\"health_path\":\"")
+    builder_write(b, json_escape(be.health_path))
+    builder_write(b, "\",\"health_interval_ms\":")
+    builder_write(b, int_to_string(be.health_interval_ms))
+    builder_write(b, ",\"retries\":")
+    builder_write(b, int_to_string(be.retries))
+    builder_write(b, ",\"connect_timeout_ms\":")
+    builder_write(b, int_to_string(be.connect_timeout_ms))
+    builder_write(b, ",\"maxconn\":")
+    builder_write(b, int_to_string(be.maxconn))
+    builder_write(b, "}")
+    return builder_string(b)
+}
+
+fn route_json(r: Route) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"frontend\":\"")
+    builder_write(b, json_escape(r.frontend))
+    builder_write(b, "\",\"kind\":\"")
+    builder_write(b, json_escape(r.kind))
+    builder_write(b, "\",\"value\":\"")
+    builder_write(b, json_escape(r.value))
+    builder_write(b, "\",\"backend\":\"")
+    builder_write(b, json_escape(r.backend))
+    builder_write(b, "\"}")
+    return builder_string(b)
+}
+
+fn acl_json(a: AclRule) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"frontend\":\"")
+    builder_write(b, json_escape(a.frontend))
+    builder_write(b, "\",\"action\":\"")
+    builder_write(b, json_escape(a.action))
+    builder_write(b, "\",\"kind\":\"")
+    builder_write(b, json_escape(a.kind))
+    builder_write(b, "\",\"value\":\"")
+    builder_write(b, json_escape(a.value))
+    builder_write(b, "\"}")
+    return builder_string(b)
+}
+
+fn prom_escape(s: string) -> string {
+    let mut b = str_builder()
+    let data = bytes(s)
+    let mut i = 0
+    while i < len(data) {
+        let c = int(data[i])
+        if c == 34 {
+            builder_write(b, "\\\"")
+        } else {
+            if c == 92 {
+                builder_write(b, "\\\\")
+            } else {
+                if c == 10 {
+                    builder_write(b, "\\n")
+                } else {
+                    builder_write_byte(b, data[i])
+                }
+            }
+        }
+        i = i + 1
+    }
+    return builder_string(b)
+}
+
+fn prom_line0(b: StrBuilder, name: string, value: int) {
+    builder_write(b, name)
+    builder_write(b, " ")
+    builder_write(b, int_to_string(value))
+    builder_write(b, "\n")
+}
+
+fn metrics_text(
+    st: LiveStats,
+    frontends: []Frontend,
+    backends: []Backend,
+    servers: []Server
+) -> string {
+    let uptime = now_ms() - st.started_ms
+    let mut b = str_builder()
+    builder_write(b, "# HELP leba_uptime_ms Process uptime in milliseconds.\n")
+    builder_write(b, "# TYPE leba_uptime_ms gauge\n")
+    prom_line0(b, "leba_uptime_ms", uptime)
+    builder_write(b, "# HELP leba_requests_total Total proxied requests.\n")
+    builder_write(b, "# TYPE leba_requests_total counter\n")
+    prom_line0(b, "leba_requests_total", st.total_req)
+    builder_write(b, "# HELP leba_errors_total Total proxy errors.\n")
+    builder_write(b, "# TYPE leba_errors_total counter\n")
+    prom_line0(b, "leba_errors_total", st.total_err)
+    builder_write(b, "# HELP leba_active_connections Current active connections.\n")
+    builder_write(b, "# TYPE leba_active_connections gauge\n")
+    prom_line0(b, "leba_active_connections", st.active_conns)
+    builder_write(b, "# HELP leba_denied_total Requests denied by ACLs.\n")
+    builder_write(b, "# TYPE leba_denied_total counter\n")
+    prom_line0(b, "leba_denied_total", st.denied)
+    builder_write(b, "# HELP leba_rate_limited_total Requests rejected by rate limiting.\n")
+    builder_write(b, "# TYPE leba_rate_limited_total counter\n")
+    prom_line0(b, "leba_rate_limited_total", st.rate_limited)
+    builder_write(b, "# HELP leba_retries_total Upstream retry attempts.\n")
+    builder_write(b, "# TYPE leba_retries_total counter\n")
+    prom_line0(b, "leba_retries_total", st.retries)
+    builder_write(b, "# HELP leba_bytes_in_total Request bytes received.\n")
+    builder_write(b, "# TYPE leba_bytes_in_total counter\n")
+    prom_line0(b, "leba_bytes_in_total", st.total_bytes_in)
+    builder_write(b, "# HELP leba_bytes_out_total Response bytes sent.\n")
+    builder_write(b, "# TYPE leba_bytes_out_total counter\n")
+    prom_line0(b, "leba_bytes_out_total", st.total_bytes_out)
+    builder_write(b, "# HELP leba_latency_ms Last and max observed proxy latency.\n")
+    builder_write(b, "# TYPE leba_latency_ms gauge\n")
+    builder_write(b, "leba_latency_ms{kind=\"last\"} ")
+    builder_write(b, int_to_string(st.last_latency_ms))
+    builder_write(b, "\n")
+    builder_write(b, "leba_latency_ms{kind=\"max\"} ")
+    builder_write(b, int_to_string(st.max_latency_ms))
+    builder_write(b, "\n")
+
+    builder_write(b, "# HELP leba_frontend_info Configured frontend information.\n")
+    builder_write(b, "# TYPE leba_frontend_info gauge\n")
+    let mut fi = 0
+    while fi < len(frontends) {
+        let fe = frontends[fi]
+        builder_write(b, "leba_frontend_info{frontend=\"")
+        builder_write(b, prom_escape(fe.name))
+        builder_write(b, "\",mode=\"")
+        builder_write(b, prom_escape(fe.mode))
+        builder_write(b, "\",bind_host=\"")
+        builder_write(b, prom_escape(fe.bind_host))
+        builder_write(b, "\",port=\"")
+        builder_write(b, int_to_string(fe.bind_port))
+        builder_write(b, "\"} 1\n")
+        fi = fi + 1
+    }
+
+    builder_write(b, "# HELP leba_backend_servers Number of configured servers per backend.\n")
+    builder_write(b, "# TYPE leba_backend_servers gauge\n")
+    builder_write(b, "# HELP leba_backend_up_servers Number of ready servers per backend.\n")
+    builder_write(b, "# TYPE leba_backend_up_servers gauge\n")
+    builder_write(b, "# HELP leba_backend_connections Current connection count per backend.\n")
+    builder_write(b, "# TYPE leba_backend_connections gauge\n")
+    builder_write(b, "# HELP leba_backend_maxconn Configured backend connection limit, or zero when unlimited.\n")
+    builder_write(b, "# TYPE leba_backend_maxconn gauge\n")
+    let mut bi = 0
+    while bi < len(backends) {
+        let be = backends[bi]
+        let mut total = 0
+        let mut si = 0
+        while si < len(servers) {
+            if str_eq(servers[si].backend, be.name) {
+                total = total + 1
+            }
+            si = si + 1
+        }
+        builder_write(b, "leba_backend_servers{backend=\"")
+        builder_write(b, prom_escape(be.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(total))
+        builder_write(b, "\n")
+        builder_write(b, "leba_backend_up_servers{backend=\"")
+        builder_write(b, prom_escape(be.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(backend_up_count(servers, be.name)))
+        builder_write(b, "\n")
+        builder_write(b, "leba_backend_connections{backend=\"")
+        builder_write(b, prom_escape(be.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(backend_conn_count(servers, be.name)))
+        builder_write(b, "\n")
+        builder_write(b, "leba_backend_maxconn{backend=\"")
+        builder_write(b, prom_escape(be.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(be.maxconn))
+        builder_write(b, "\n")
+        bi = bi + 1
+    }
+
+    builder_write(b, "# HELP leba_server_up Server is alive and not draining.\n")
+    builder_write(b, "# TYPE leba_server_up gauge\n")
+    builder_write(b, "# HELP leba_server_connections Current server connection count.\n")
+    builder_write(b, "# TYPE leba_server_connections gauge\n")
+    builder_write(b, "# HELP leba_server_maxconn Configured server connection limit, or zero when unlimited.\n")
+    builder_write(b, "# TYPE leba_server_maxconn gauge\n")
+    builder_write(b, "# HELP leba_server_requests_total Requests sent to a server.\n")
+    builder_write(b, "# TYPE leba_server_requests_total counter\n")
+    builder_write(b, "# HELP leba_server_errors_total Errors from a server.\n")
+    builder_write(b, "# TYPE leba_server_errors_total counter\n")
+    builder_write(b, "# HELP leba_server_bytes_total Bytes received from a server.\n")
+    builder_write(b, "# TYPE leba_server_bytes_total counter\n")
+    let mut si2 = 0
+    while si2 < len(servers) {
+        let s = servers[si2]
+        let mut up = 0
+        if server_eligible(s) == 1 {
+            up = 1
+        }
+        builder_write(b, "leba_server_up{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(up))
+        builder_write(b, "\n")
+        builder_write(b, "leba_server_connections{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(s.conns))
+        builder_write(b, "\n")
+        builder_write(b, "leba_server_maxconn{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(s.maxconn))
+        builder_write(b, "\n")
+        builder_write(b, "leba_server_requests_total{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(s.total_req))
+        builder_write(b, "\n")
+        builder_write(b, "leba_server_errors_total{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(s.total_err))
+        builder_write(b, "\n")
+        builder_write(b, "leba_server_bytes_total{backend=\"")
+        builder_write(b, prom_escape(s.backend))
+        builder_write(b, "\",server=\"")
+        builder_write(b, prom_escape(s.name))
+        builder_write(b, "\"} ")
+        builder_write(b, int_to_string(s.total_bytes))
+        builder_write(b, "\n")
+        si2 = si2 + 1
+    }
+    return builder_string(b)
+}
+
+fn stats_json(
+    st: LiveStats,
+    frontends: []Frontend,
+    backends: []Backend,
+    servers: []Server,
+    routes: []Route,
+    acls: []AclRule
+) -> string {
+    let uptime = now_ms() - st.started_ms
+    let mut b = str_builder()
+    builder_write(b, "{")
+    builder_write(b, "\"name\":\"leba\",")
+    builder_write(b, "\"version\":\"0.4.0\",")
+    builder_write(b, "\"uptime_ms\":")
+    builder_write(b, int_to_string(uptime))
+    builder_write(b, ",\"total_req\":")
+    builder_write(b, int_to_string(st.total_req))
+    builder_write(b, ",\"total_err\":")
+    builder_write(b, int_to_string(st.total_err))
+    builder_write(b, ",\"active_conns\":")
+    builder_write(b, int_to_string(st.active_conns))
+    builder_write(b, ",\"denied\":")
+    builder_write(b, int_to_string(st.denied))
+    builder_write(b, ",\"rate_limited\":")
+    builder_write(b, int_to_string(st.rate_limited))
+    builder_write(b, ",\"retries\":")
+    builder_write(b, int_to_string(st.retries))
+    builder_write(b, ",\"last_latency_ms\":")
+    builder_write(b, int_to_string(st.last_latency_ms))
+    builder_write(b, ",\"max_latency_ms\":")
+    builder_write(b, int_to_string(st.max_latency_ms))
+    builder_write(b, ",\"bytes_in\":")
+    builder_write(b, int_to_string(st.total_bytes_in))
+    builder_write(b, ",\"bytes_out\":")
+    builder_write(b, int_to_string(st.total_bytes_out))
+    builder_write(b, ",\"frontends\":[")
+    let mut fi = 0
+    while fi < len(frontends) {
+        if fi > 0 {
+            builder_write(b, ",")
+        }
+        let fe = frontends[fi]
+        builder_write(b, "{\"name\":\"")
+        builder_write(b, json_escape(fe.name))
+        builder_write(b, "\",\"bind_host\":\"")
+        builder_write(b, json_escape(fe.bind_host))
+        builder_write(b, "\",\"port\":")
+        builder_write(b, int_to_string(fe.bind_port))
+        builder_write(b, ",\"mode\":\"")
+        builder_write(b, json_escape(fe.mode))
+        builder_write(b, "\",\"maxconn\":")
+        builder_write(b, int_to_string(fe.maxconn))
+        builder_write(b, ",\"rate_limit\":")
+        builder_write(b, int_to_string(fe.rate_limit))
+        builder_write(b, ",\"request_body_limit_bytes\":")
+        builder_write(b, int_to_string(fe.request_body_limit_bytes))
+        builder_write(b, ",\"sticky_cookie\":\"")
+        builder_write(b, json_escape(fe.sticky_cookie))
+        builder_write(b, "\",\"backend\":\"")
+        builder_write(b, json_escape(fe.backend))
+        builder_write(b, "\",\"tls_cert\":\"")
+        builder_write(b, json_escape(fe.tls_cert))
+        builder_write(b, "\",\"access_log\":")
+        builder_write(b, int_to_string(fe.access_log))
+        builder_write(b, "}")
+        fi = fi + 1
+    }
+    builder_write(b, "],\"backends\":[")
+    let mut bi = 0
+    while bi < len(backends) {
+        if bi > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, backend_json(backends[bi], servers))
+        bi = bi + 1
+    }
+    builder_write(b, "],\"servers\":[")
+    let mut si = 0
+    while si < len(servers) {
+        if si > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, server_json(servers[si]))
+        si = si + 1
+    }
+    builder_write(b, "],\"routes\":[")
+    let mut ri = 0
+    while ri < len(routes) {
+        if ri > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, route_json(routes[ri]))
+        ri = ri + 1
+    }
+    builder_write(b, "],\"acls\":[")
+    let mut ai = 0
+    while ai < len(acls) {
+        if ai > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, acl_json(acls[ai]))
+        ai = ai + 1
+    }
+    builder_write(b, "]}\n")
+    return builder_string(b)
+}
+
+fn basic_auth_header(user: string, pass: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, "Basic ")
+    builder_write(b, base64_encode(join_user_pass(user, pass)))
+    return builder_string(b)
+}
+
+fn basic_auth_payload(auth_header: string) -> string {
+    if str_has_prefix(auth_header, "Basic ") {
+        return base64_decode(substr(auth_header, 6, str_len(auth_header)))
+    }
+    return ""
+}
+
+fn basic_auth_user(payload: string) -> string {
+    let cut = str_cut(payload, ":")
+    if len(cut) >= 1 {
+        return cut[0]
+    }
+    return ""
+}
+
+fn basic_auth_pass(payload: string) -> string {
+    let cut = str_cut(payload, ":")
+    if len(cut) >= 2 {
+        return cut[1]
+    }
+    return ""
+}
+
+fn admin_auth_required(user: string, pass: string) -> int {
+    if str_eq(user, "") {
+        return 0
+    }
+    if str_eq(pass, "") {
+        return 0
+    }
+    return 1
+}
+
+fn admin_auth_ok(auth_header: string, user: string, pass: string) -> int {
+    if admin_auth_required(user, pass) == 0 {
+        return 1
+    }
+    if str_eq(auth_header, basic_auth_header(user, pass)) {
+        return 1
+    }
+    return 0
+}
+
+fn admin_role_known(role: string) -> int {
+    if str_eq(role, "viewer") {
+        return 1
+    }
+    if str_eq(role, "operator") {
+        return 1
+    }
+    if str_eq(role, "admin") {
+        return 1
+    }
+    return 0
+}
+
+fn admin_hash_kind(pass_hash: string) -> string {
+    if str_has_prefix(pass_hash, "$argon2id$") {
+        return "argon2id"
+    }
+    if str_has_prefix(pass_hash, "leba-kdf-v1:") {
+        return "leba-kdf-v1"
+    }
+    if str_has_prefix(pass_hash, "sha256:") {
+        return "sha256"
+    }
+    if str_len(pass_hash) == 64 {
+        return "sha256"
+    }
+    return ""
+}
+
+fn admin_password_matches(pass: string, stored: string) -> int {
+    if str_has_prefix(stored, "$argon2id$") {
+        return crypto.password_verify(stored, pass)
+    }
+    if str_has_prefix(stored, "leba-kdf-v1:") {
+        let parts = str_split(stored, ":")
+        if len(parts) != 4 {
+            return 0
+        }
+        let iter = to_int(parts[1])
+        let calc = admin_kdf_hash(pass, parts[2], iter)
+        return crypto_eq(calc, parts[3])
+    }
+    if crypto_eq(sha256(pass), admin_hash_value(stored)) == 1 {
+        return 1
+    }
+    return 0
+}
+
+fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: string, fallback_pass: string) -> string {
+    let payload = basic_auth_payload(auth_header)
+    let auth_user = basic_auth_user(payload)
+    let auth_pass = basic_auth_pass(payload)
+    let mut i = 0
+    while i < len(users) {
+        let u = users[i]
+        if str_eq(auth_user, u.user) {
+            let mut ok = 0
+            if not str_eq(u.pass_hash, "") {
+                if admin_password_matches(auth_pass, u.pass_hash) == 1 {
+                    ok = 1
+                }
+            } else {
+                if str_eq(auth_header, basic_auth_header(u.user, u.pass)) {
+                    ok = 1
+                }
+            }
+            if ok == 1 {
+                if admin_role_known(u.role) == 1 {
+                    return u.role
+                }
+                return "viewer"
+            }
+        }
+        i = i + 1
+    }
+    if len(users) > 0 {
+        return ""
+    }
+    if admin_auth_ok(auth_header, fallback_user, fallback_pass) == 1 {
+        if admin_auth_required(fallback_user, fallback_pass) == 0 {
+            return "admin"
+        }
+        return "admin"
+    }
+    return ""
+}
+
+fn admin_role_allows(role: string, need: string) -> int {
+    if str_eq(role, "admin") {
+        return 1
+    }
+    if str_eq(need, "viewer") {
+        if str_eq(role, "viewer") {
+            return 1
+        }
+        if str_eq(role, "operator") {
+            return 1
+        }
+    }
+    if str_eq(need, "operator") {
+        if str_eq(role, "operator") {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn admin_path_required_role(method: string, path: string) -> string {
+    if str_eq(path, "/admin/reload-servers") {
+        return "operator"
+    }
+    if str_has_prefix(path, "/admin/drain/") {
+        return "operator"
+    }
+    if str_has_prefix(path, "/admin/ready/") {
+        return "operator"
+    }
+    if str_has_prefix(path, "/admin/disable/") {
+        return "operator"
+    }
+    if str_has_prefix(path, "/admin/enable/") {
+        return "operator"
+    }
+    if str_eq(method, "POST") {
+        if str_has_prefix(path, "/admin/") {
+            return "operator"
+        }
+    }
+    return "viewer"
+}
+
+fn admin_path_mutates_state(path: string) -> int {
+    if str_eq(path, "/admin/reload-servers") {
+        return 1
+    }
+    if str_has_prefix(path, "/admin/drain/") {
+        return 1
+    }
+    if str_has_prefix(path, "/admin/ready/") {
+        return 1
+    }
+    if str_has_prefix(path, "/admin/disable/") {
+        return 1
+    }
+    if str_has_prefix(path, "/admin/enable/") {
+        return 1
+    }
+    if str_eq(path, "/admin/vhost-create") {
+        return 1
+    }
+    if str_eq(path, "/admin/vhost-cert") {
+        return 1
+    }
+    return 0
+}
+
+struct StatsConnResult {
+    frontends: []Frontend
+    backends: []Backend
+    servers: []Server
+    routes: []Route
+    acls: []AclRule
+}
+
+fn stats_conn_result(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route, acls: []AclRule) -> StatsConnResult {
+    return StatsConnResult {
+        frontends: frontends,
+        backends: backends,
+        servers: servers,
+        routes: routes,
+        acls: acls
+    }
+}
+
+fn stats_http_reason(status: int) -> string {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 400 {
+        return "Bad Request"
+    }
+    if status == 401 {
+        return "Unauthorized"
+    }
+    if status == 403 {
+        return "Forbidden"
+    }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 405 {
+        return "Method Not Allowed"
+    }
+    if status == 500 {
+        return "Internal Server Error"
+    }
+    if status == 503 {
+        return "Service Unavailable"
+    }
+    return "OK"
+}
+
+fn stats_raw_respond_ct(fd: int, method: string, status: int, content_type: string, body: string) -> int {
+    let mut b = str_builder()
+    builder_write(b, "HTTP/1.1 ")
+    builder_write(b, int_to_string(status))
+    builder_write(b, " ")
+    builder_write(b, stats_http_reason(status))
+    builder_write(b, "\r\nContent-Type: ")
+    builder_write(b, content_type)
+    builder_write(b, "\r\nContent-Length: ")
+    builder_write(b, int_to_string(str_len(body)))
+    builder_write(b, "\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return tcp_write(fd, builder_string(b))
+}
+
+fn stats_raw_respond_json(fd: int, method: string, status: int, body: string) -> int {
+    return stats_raw_respond_ct(fd, method, status, "application/json; charset=utf-8", body)
+}
+
+fn handle_stats_raw_conn(
+    fd: int,
+    raw: string,
+    st: LiveStats,
+    frontends: []Frontend,
+    backends: []Backend,
+    servers: []Server,
+    routes: []Route,
+    acls: []AclRule,
+    stats_user: string,
+    stats_pass: string,
+    admin_users: []AdminUser,
+    state_file: string,
+    config_path: string,
+    config_dir: string
+) -> StatsConnResult {
+    let parsed = http_parse(raw)
+    let method = http_parsed_method(parsed)
+    let path = http_parsed_path(parsed)
+    let ponly = path_only(path)
+    let req_id = admin_audit_id()
+    let auth_hdr = http_parsed_header(parsed, "Authorization")
+    let auth_payload = basic_auth_payload(auth_hdr)
+    let auth_user = basic_auth_user(auth_payload)
+
+    if http_parsed_ok(parsed) == 0 {
+        let _ = stats_raw_respond_json(fd, "GET", 400, "{\"error\":\"bad request\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/health") {
+        let _ = stats_raw_respond_json(fd, method, 200, "{\"ok\":true,\"service\":\"leba\",\"admin\":true}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/livez") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+    if str_eq(ponly, "/readyz") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+
+    let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
+    if str_eq(role, "") {
+        log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
+        let _ = stats_raw_respond_json(fd, method, 401, "{\"error\":\"unauthorized\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/") {
+        let body = webadmin_html()
+        let _ = stats_raw_respond_ct(fd, method, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/admin/ui") {
+        let body = webadmin_html()
+        let _ = stats_raw_respond_ct(fd, method, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    let need = admin_path_required_role(method, ponly)
+    if admin_role_allows(role, need) == 0 {
+        log_admin_audit(req_id, auth_user, role, method, ponly, 403, "forbidden")
+        let _ = stats_raw_respond_json(fd, method, 403, "{\"error\":\"forbidden\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let ar = handle_admin_state(method, ponly, path, servers, frontends, backends, routes, acls, config_path, config_dir)
+    if ar.handled == 1 {
+        if ar.status == 200 {
+            if admin_path_mutates_state(ponly) == 1 {
+                let _ = save_runtime_state_file(state_file, config_dir, ar.servers)
+            }
+        }
+        let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
+        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+    }
+
+    if str_eq(ponly, "/stats") {
+        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let _ = stats_raw_respond_json(fd, method, 200, body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/metrics") {
+        let body = metrics_text(st, frontends, backends, servers)
+        let _ = stats_raw_respond_ct(fd, method, 200, "text/plain; version=0.0.4; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let _ = stats_raw_respond_ct(fd, method, 404, "text/plain; charset=utf-8", "not found\n")
+    log_admin_audit(req_id, auth_user, role, method, ponly, 404, "not_found")
+    return stats_conn_result(frontends, backends, servers, routes, acls)
+}
+
+fn admin_audit_id() -> string {
+    let mut b = str_builder()
+    builder_write(b, int_to_string(now_ms()))
+    builder_write(b, "-")
+    builder_write(b, int_to_string(rand_intn(1000000)))
+    return builder_string(b)
+}
+
+fn admin_audit_detail(req_id: string, user: string, role: string, method: string, path: string, status: int, outcome: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, "id=")
+    builder_write(b, req_id)
+    builder_write(b, " user=\"")
+    builder_write(b, json_escape(user))
+    builder_write(b, "\" role=\"")
+    builder_write(b, json_escape(role))
+    builder_write(b, "\" method=")
+    builder_write(b, method)
+    builder_write(b, " path=\"")
+    builder_write(b, json_escape(path))
+    builder_write(b, "\" status=")
+    builder_write(b, int_to_string(status))
+    builder_write(b, " outcome=")
+    builder_write(b, outcome)
+    return builder_string(b)
+}
+
+fn log_admin_audit(req_id: string, user: string, role: string, method: string, path: string, status: int, outcome: string) {
+    let detail = admin_audit_detail(req_id, user, role, method, path, status, outcome)
+    if status >= 400 {
+        log_warn_event("admin_audit", detail)
+    } else {
+        log_info_event("admin_audit", detail)
+    }
+}
+
+// Returns updated runtime state (admin can drain/enable and manage vhosts)
+fn handle_stats_conn(
+    c: int,
+    st: LiveStats,
+    frontends: []Frontend,
+    backends: []Backend,
+    servers: []Server,
+    routes: []Route,
+    acls: []AclRule,
+    stats_user: string,
+    stats_pass: string,
+    admin_users: []AdminUser,
+    state_file: string,
+    config_path: string,
+    config_dir: string
+) -> StatsConnResult {
+    let path = http_path(c)
+    let method = http_method(c)
+    let ponly = path_only(path)
+    let req_id = admin_audit_id()
+    let auth_payload = basic_auth_payload(http_header(c, "Authorization"))
+    let auth_user = basic_auth_user(auth_payload)
+
+    if str_eq(ponly, "/health") {
+        let _ = http_respond_json(c, 200, "{\"ok\":true,\"service\":\"leba\",\"admin\":true}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/livez") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = http_respond_json(c, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+    if str_eq(ponly, "/readyz") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = http_respond_json(c, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+
+    let role = admin_auth_role(http_header(c, "Authorization"), admin_users, stats_user, stats_pass)
+    if str_eq(role, "") {
+        log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
+        let _ = http_respond_json(c, 401, "{\"error\":\"unauthorized\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/") {
+        let body = webadmin_html()
+        let _ = http_respond_ct(c, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/admin/ui") {
+        let body = webadmin_html()
+        let _ = http_respond_ct(c, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    // Runtime control plane
+    let need = admin_path_required_role(method, ponly)
+    if admin_role_allows(role, need) == 0 {
+        log_admin_audit(req_id, auth_user, role, method, ponly, 403, "forbidden")
+        let _ = http_respond_json(c, 403, "{\"error\":\"forbidden\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let ar = handle_admin_state(method, ponly, path, servers, frontends, backends, routes, acls, config_path, config_dir)
+    if ar.handled == 1 {
+        if ar.status == 200 {
+            if admin_path_mutates_state(ponly) == 1 {
+                let _ = save_runtime_state_file(state_file, config_dir, ar.servers)
+            }
+        }
+        let _ = http_respond_json(c, ar.status, ar.body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
+        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+    }
+
+    if str_eq(ponly, "/stats") {
+        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let _ = http_respond_json(c, 200, body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/metrics") {
+        let body = metrics_text(st, frontends, backends, servers)
+        let _ = http_respond_ct(c, 200, "text/plain; version=0.0.4; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let _ = http_respond(c, 404, "not found\n")
+    log_admin_audit(req_id, auth_user, role, method, ponly, 404, "not_found")
+    return stats_conn_result(frontends, backends, servers, routes, acls)
+}

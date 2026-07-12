@@ -1,0 +1,202 @@
+pull "crypto"
+
+// Operator CLI helpers for the runtime admin API.
+pack cli
+
+fn cli_usage() -> string {
+    return "usage:\n  leba admin servers [host:port] [user:pass]\n  leba admin stats [host:port] [user:pass]\n  leba admin metrics [host:port] [user:pass]\n  leba admin readyz [host:port]\n  leba admin livez [host:port]\n  leba admin reload-servers [host:port] [user:pass]\n  leba admin drain BACKEND SERVER [host:port] [user:pass]\n  leba admin ready BACKEND SERVER [host:port] [user:pass]\n  leba admin disable BACKEND SERVER [host:port] [user:pass]\n  leba admin enable BACKEND SERVER [host:port] [user:pass]\n  leba admin hash-password PASSWORD [ITERATIONS]\n  leba admin hash-password-legacy PASSWORD [ITERATIONS]\n\nenv defaults:\n  LEBA_ADMIN_ADDR=public.example.com:18404\n  LEBA_ADMIN_AUTH=user:strong-password\n"
+}
+
+fn cli_legacy_password_hash(pass: string, iterations: int) -> string {
+    let mut iter = iterations
+    if iter < 1 {
+        iter = 20000
+    }
+    let salt = hex_encode(random_bytes(16))
+    let mut b = str_builder()
+    builder_write(b, "leba-kdf-v1:")
+    builder_write(b, int_to_string(iter))
+    builder_write(b, ":")
+    builder_write(b, salt)
+    builder_write(b, ":")
+    builder_write(b, admin_kdf_hash(pass, salt, iter))
+    builder_write(b, "\n")
+    return builder_string(b)
+}
+
+fn cli_arg_or(idx: int, fallback: string) -> string {
+    if argc() > idx {
+        return arg_get(idx)
+    }
+    return fallback
+}
+
+fn cli_default_addr() -> string {
+    let v = env_get("LEBA_ADMIN_ADDR")
+    if not str_eq(v, "") {
+        return v
+    }
+    return "127.0.0.1:18404"
+}
+
+fn cli_default_auth() -> string {
+    return env_get("LEBA_ADMIN_AUTH")
+}
+
+fn cli_clean_addr(addr: string) -> string {
+    let mut a = addr
+    if str_has_prefix(a, "http://") {
+        a = substr(a, 7, str_len(a))
+    }
+    let slash = str_index(a, "/")
+    if slash >= 0 {
+        return substr(a, 0, slash)
+    }
+    return a
+}
+
+fn cli_addr_host(addr: string) -> string {
+    let clean = cli_clean_addr(addr)
+    let hp = parse_host_port(clean)
+    if str_eq(hp.port, "0") {
+        return clean
+    }
+    return hp.host
+}
+
+fn cli_addr_port(addr: string) -> int {
+    let clean = cli_clean_addr(addr)
+    let hp = parse_host_port(clean)
+    let p = to_int(hp.port)
+    if p <= 0 {
+        return 18404
+    }
+    return p
+}
+
+fn cli_http_request_text(method: string, path: string, host: string, auth: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, method)
+    builder_write(b, " ")
+    builder_write(b, path)
+    builder_write(b, " HTTP/1.0\r\nHost: ")
+    builder_write(b, host)
+    builder_write(b, "\r\nConnection: close\r\n")
+    if not str_eq(auth, "") {
+        builder_write(b, "Authorization: Basic ")
+        builder_write(b, base64_encode(auth))
+        builder_write(b, "\r\n")
+    }
+    builder_write(b, "\r\n")
+    return builder_string(b)
+}
+
+fn cli_http_body(raw: string) -> string {
+    let cut = str_index(raw, "\r\n\r\n")
+    if cut < 0 {
+        return raw
+    }
+    return substr(raw, cut + 4, str_len(raw))
+}
+
+fn cli_http_call(method: string, path: string, addr: string, auth: string) -> string {
+    let host = cli_addr_host(addr)
+    let port = cli_addr_port(addr)
+    let fd = tcp_connect(host, port)
+    if fd < 0 {
+        return "error: connect failed\n"
+    }
+    let req = cli_http_request_text(method, path, host, auth)
+    let n = tcp_write(fd, req)
+    if n < 0 {
+        let _ = tcp_close(fd)
+        return "error: write failed\n"
+    }
+    let raw = tcp_read(fd)
+    let _ = tcp_close(fd)
+    return cli_http_body(raw)
+}
+
+fn cli_admin_path(action: string, be: string, srv: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, "/admin/")
+    builder_write(b, action)
+    builder_write(b, "/")
+    builder_write(b, be)
+    builder_write(b, "/")
+    builder_write(b, srv)
+    return builder_string(b)
+}
+
+fn cli_admin_main() -> string {
+    if argc() < 3 {
+        return cli_usage()
+    }
+    let cmd = arg_get(2)
+    if str_eq(cmd, "servers") {
+        return cli_http_call("GET", "/admin/servers", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "stats") {
+        return cli_http_call("GET", "/stats", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "metrics") {
+        return cli_http_call("GET", "/metrics", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "readyz") {
+        return cli_http_call("GET", "/readyz", cli_arg_or(3, cli_default_addr()), "")
+    }
+    if str_eq(cmd, "livez") {
+        return cli_http_call("GET", "/livez", cli_arg_or(3, cli_default_addr()), "")
+    }
+    if str_eq(cmd, "hash-password") {
+        if argc() < 4 {
+            return cli_usage()
+        }
+        if crypto.password_hashing_ok() == 1 {
+            return crypto.password_hash(arg_get(3)) + "\n"
+        }
+        let mut iter = 20000
+        if argc() > 4 {
+            iter = to_int(arg_get(4))
+        }
+        return cli_legacy_password_hash(arg_get(3), iter)
+    }
+    if str_eq(cmd, "hash-password-legacy") {
+        if argc() < 4 {
+            return cli_usage()
+        }
+        let mut iter2 = 20000
+        if argc() > 4 {
+            iter2 = to_int(arg_get(4))
+        }
+        return cli_legacy_password_hash(arg_get(3), iter2)
+    }
+    if str_eq(cmd, "reload-servers") {
+        return cli_http_call("POST", "/admin/reload-servers", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "drain") {
+        if argc() < 5 {
+            return cli_usage()
+        }
+        return cli_http_call("POST", cli_admin_path("drain", arg_get(3), arg_get(4)), cli_arg_or(5, cli_default_addr()), cli_arg_or(6, cli_default_auth()))
+    }
+    if str_eq(cmd, "ready") {
+        if argc() < 5 {
+            return cli_usage()
+        }
+        return cli_http_call("POST", cli_admin_path("ready", arg_get(3), arg_get(4)), cli_arg_or(5, cli_default_addr()), cli_arg_or(6, cli_default_auth()))
+    }
+    if str_eq(cmd, "disable") {
+        if argc() < 5 {
+            return cli_usage()
+        }
+        return cli_http_call("POST", cli_admin_path("disable", arg_get(3), arg_get(4)), cli_arg_or(5, cli_default_addr()), cli_arg_or(6, cli_default_auth()))
+    }
+    if str_eq(cmd, "enable") {
+        if argc() < 5 {
+            return cli_usage()
+        }
+        return cli_http_call("POST", cli_admin_path("enable", arg_get(3), arg_get(4)), cli_arg_or(5, cli_default_addr()), cli_arg_or(6, cli_default_auth()))
+    }
+    return cli_usage()
+}

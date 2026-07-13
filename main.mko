@@ -641,7 +641,7 @@ fn main() {
                                             st.active_conns = st.active_conns + 1
                                             let _ = pool.kick(worker_raw_upstream(
                                                 dp.c, dp.method, dp.path, dp.body, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
-                                                dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, slots, done
+                                                dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.orig_host, slots, done
                                             ))
                                         }
                                     } else {

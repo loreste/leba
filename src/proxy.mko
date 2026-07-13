@@ -127,6 +127,7 @@ struct Dispatch {
     traceparent: string
     trace_id: string
     span_id: string
+    orig_host: string
     up_host: string
     up_port: int
     up_pool: int
@@ -1087,16 +1088,21 @@ fn forward_http(
     traceparent: string,
     host: string,
     port: int,
-    timeout_ms: int
+    timeout_ms: int,
+    orig_host: string
 ) -> FwdResult {
-    let mut headers = ""
+    let mut hb = str_builder()
+    if not str_eq(orig_host, "") {
+        builder_write(hb, "Host: ")
+        builder_write(hb, orig_host)
+        builder_write(hb, "\r\n")
+    }
     if not str_eq(traceparent, "") {
-        let mut hb = str_builder()
         builder_write(hb, "traceparent: ")
         builder_write(hb, traceparent)
         builder_write(hb, "\r\n")
-        headers = builder_string(hb)
     }
+    let headers = builder_string(hb)
     let fr = http_forward_full(host, port, method, path, headers, body, timeout_ms)
     let status = http_forward_status(fr)
     let resp = http_forward_body(fr)
@@ -1124,9 +1130,10 @@ fn forward_http_retries(
     host: string,
     port: int,
     timeout_ms: int,
-    retries: int
+    retries: int,
+    orig_host: string
 ) -> FwdResult {
-    let mut res = forward_http(method, path, body, traceparent, host, port, timeout_ms)
+    let mut res = forward_http(method, path, body, traceparent, host, port, timeout_ms, orig_host)
     let mut used = 0
     let mut limit = retries
     if limit < 0 {
@@ -1138,7 +1145,7 @@ fn forward_http_retries(
             return res
         }
         used = used + 1
-        res = forward_http(method, path, body, traceparent, host, port, timeout_ms)
+        res = forward_http(method, path, body, traceparent, host, port, timeout_ms, orig_host)
     }
     res.retries = used
     return res
@@ -1173,6 +1180,7 @@ fn prepare_dispatch(
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
+        orig_host: host,
         up_host: "",
         up_port: 0,
         up_pool: -1,
@@ -1343,6 +1351,7 @@ fn prepare_dispatch(
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
+        orig_host: host,
         up_host: s.host,
         up_port: s.port,
         up_pool: s.pool,
@@ -1392,6 +1401,7 @@ fn prepare_raw_dispatch(
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
+        orig_host: host,
         up_host: "",
         up_port: 0,
         up_pool: -1,
@@ -1579,6 +1589,7 @@ fn prepare_raw_dispatch(
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
+        orig_host: host,
         up_host: s.host,
         up_port: s.port,
         up_pool: s.pool,
@@ -1756,7 +1767,7 @@ fn handle_tls_proxy_request(
         timeout_ms = 5000
     }
     srv_list = server_conn_delta(srv_list, si, 1)
-    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries)
+    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries, host)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
     if res.ok == 1 {
@@ -2077,7 +2088,7 @@ fn handle_h3_proxy_request(
         timeout_ms = 5000
     }
     srv_list = server_conn_delta(srv_list, si, 1)
-    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries)
+    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries, host)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
     if res.ok == 1 {
@@ -2123,6 +2134,7 @@ fn worker_upstream(
     retries: int,
     server_idx: int,
     access_log: int,
+    orig_host: string,
     slots: chan[int],
     done: chan[int]
 ) -> int {
@@ -2138,14 +2150,18 @@ fn worker_upstream(
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
         if fd >= 0 {
-            let mut headers = ""
+            let mut hb = str_builder()
+            if not str_eq(orig_host, "") {
+                builder_write(hb, "Host: ")
+                builder_write(hb, orig_host)
+                builder_write(hb, "\r\n")
+            }
             if not str_eq(traceparent, "") {
-                let mut hb = str_builder()
                 builder_write(hb, "traceparent: ")
                 builder_write(hb, traceparent)
                 builder_write(hb, "\r\n")
-                headers = builder_string(hb)
             }
+            let headers = builder_string(hb)
             let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
             let bdy = http_forward_body(fr)
@@ -2163,7 +2179,7 @@ fn worker_upstream(
         }
     }
     if res.ok == 0 {
-        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries)
+        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries, orig_host)
     }
     let mut err = 0
     let mut st = res.status
@@ -2214,6 +2230,7 @@ fn worker_raw_upstream(
     retries: int,
     server_idx: int,
     access_log: int,
+    orig_host: string,
     slots: chan[int],
     done: chan[int]
 ) -> int {
@@ -2229,14 +2246,18 @@ fn worker_raw_upstream(
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
         if fd >= 0 {
-            let mut headers = ""
+            let mut hb = str_builder()
+            if not str_eq(orig_host, "") {
+                builder_write(hb, "Host: ")
+                builder_write(hb, orig_host)
+                builder_write(hb, "\r\n")
+            }
             if not str_eq(traceparent, "") {
-                let mut hb = str_builder()
                 builder_write(hb, "traceparent: ")
                 builder_write(hb, traceparent)
                 builder_write(hb, "\r\n")
-                headers = builder_string(hb)
             }
+            let headers = builder_string(hb)
             let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
             let bdy = http_forward_body(fr)
@@ -2254,7 +2275,7 @@ fn worker_raw_upstream(
         }
     }
     if res.ok == 0 {
-        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries)
+        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries, orig_host)
     }
     let mut err = 0
     let mut st = res.status
@@ -2303,6 +2324,7 @@ fn prepare_tcp_dispatch(
         traceparent: "",
         trace_id: "",
         span_id: "",
+        orig_host: "",
         up_host: "",
         up_port: 0,
         up_pool: -1,
@@ -2404,6 +2426,7 @@ fn prepare_tcp_dispatch(
         traceparent: "",
         trace_id: "",
         span_id: "",
+        orig_host: "",
         up_host: s.host,
         up_port: s.port,
         up_pool: s.pool,
@@ -2485,7 +2508,7 @@ fn proxy_http_once(
             buckets: d.buckets
         }
     }
-    let res = forward_http_retries(d.method, d.path, d.body, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries)
+    let res = forward_http_retries(d.method, d.path, d.body, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries, d.orig_host)
     let mut srv_list = d.servers
     srv_list = server_conn_delta(srv_list, d.server_idx, 0 - 1)
     if res.ok == 1 {

@@ -69,8 +69,8 @@ fn main() {
                                 let _ = slots.recv()
                                 inflight = inflight + 1
                                 let _ = pool.kick(worker_upstream(
-                                    d.c, d.method, d.path, d.body, d.trace_id, d.span_id, d.up_host, d.up_port,
-                                    d.timeout_ms, d.retries, d.server_idx, d.access_log, slots, done
+                                    d.c, d.method, d.path, d.body, d.traceparent, d.trace_id, d.span_id, d.up_host, d.up_port,
+                                    d.up_pool, d.timeout_ms, d.retries, d.server_idx, d.access_log, d.orig_host, slots, done
                                 ))
                             }
                         }

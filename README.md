@@ -26,7 +26,9 @@ Current focus areas:
 
 - HTTP reverse proxying for straightforward request/response traffic.
 - TLS termination for HTTP frontends.
-- Basic HTTP/2 ingress for simple request/response flows.
+- HTTP/2 ingress over TLS (ALPN `h2`) with stream multiplexing, request
+  bodies, and multi-request connections.
+- HTTP/3/QUIC ingress when Mako is built with quiche (`protocols …,h3`).
 - TCP forwarding for database-like services and other stream protocols.
 - SIP signaling forwarding over TCP or UDP with `Call-ID` affinity.
 - Routing by host, path, path prefix, method, and defaults.
@@ -62,8 +64,10 @@ Known limits:
 
 - Linux is the intended runtime target. macOS is used for development and
   testing.
-- HTTP/2 support is narrow and intended for simple request/response handling.
-- HTTP/3 ingress is not implemented.
+- HTTP/2 covers multiplexed request/response proxying; long-lived streaming and
+  server push are not goals.
+- HTTP/3 requires a quiche-linked Mako build (`MAKO_QUICHE_ROOT` or system
+  quiche). Upstream is still plain HTTP/1.1.
 - Config changes generally require restart. Some admin changes, such as server
   state and vhost route/backend updates, apply live.
 - Certificate path changes are saved by the admin UI/API, but replacing an

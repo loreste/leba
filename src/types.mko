@@ -88,6 +88,9 @@ struct Frontend {
     backend: string
     xff: int
     access_log: int
+    // 1 = answer with HTTP→HTTPS redirect (no backend). code defaults to 301.
+    redirect_https: int
+    redirect_code: int
 }
 
 struct UdpListener {
@@ -101,6 +104,15 @@ struct HttpListener {
     fd: int
     tls: int
     tls_srv: TlsServer
+    h3: int
+    h3_handle: int
+}
+
+struct H3Listener {
+    frontend: Frontend
+    handle: int
+    fd: int
+    frontend_idx: int
 }
 
 struct PendingClient {
@@ -230,7 +242,9 @@ fn frontend_new(name: string) -> Frontend {
         request_body_limit_bytes: 0,
         backend: "",
         xff: 1,
-        access_log: 1
+        access_log: 1,
+        redirect_https: 0,
+        redirect_code: 301
     }
 }
 

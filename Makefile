@@ -1,4 +1,6 @@
 MAKO ?= $(shell if [ -x /Users/loreste/mako/target/release/mako ]; then echo /Users/loreste/mako/target/release/mako; else command -v mako; fi)
+# Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
+export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
 .PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare
 

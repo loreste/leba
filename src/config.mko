@@ -18,7 +18,8 @@
 //     sticky cookie NAME
 //     tls_cert PATH
 //     tls_key PATH
-//     protocols http/1.1[,h2,h3]
+//     protocols http/1.1[,h2,h3]   # h2/h3 require TLS; h3 needs quiche-linked build
+//     redirect https [CODE]   # force HTTPS (301 default; 302/307/308 ok); no backend needed
 //     auth USER:PASS[:ROLE]   # stats admin; ROLE viewer|operator|admin
 //     admin_user USER PASS ROLE
 //     auth_hash USER HASH ROLE
@@ -872,6 +873,33 @@ fn parse_config_text(raw: string) -> World {
                                     fe.protocols = fields[1]
                                 }
                             } else {
+                            if str_eq(head, "redirect") {
+                                // redirect https
+                                // redirect https 308
+                                // redirect scheme https [code]
+                                if len(fields) >= 2 {
+                                    if str_eq(fields[1], "https") {
+                                        fe.redirect_https = 1
+                                        if len(fields) >= 3 {
+                                            fe.redirect_code = to_int(fields[2])
+                                        }
+                                    } else {
+                                        if str_eq(fields[1], "scheme") {
+                                            if len(fields) >= 3 {
+                                                if str_eq(fields[2], "https") {
+                                                    fe.redirect_https = 1
+                                                    if len(fields) >= 4 {
+                                                        fe.redirect_code = to_int(fields[3])
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if fe.redirect_code <= 0 {
+                                    fe.redirect_code = 301
+                                }
+                            } else {
                                 if str_eq(head, "sticky") {
                                     // sticky cookie NAME
                                     if len(fields) >= 3 {
@@ -1033,6 +1061,7 @@ fn parse_config_text(raw: string) -> World {
                         }
                     }
                 }
+            }
             }
             }
             }

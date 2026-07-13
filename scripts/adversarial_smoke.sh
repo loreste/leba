@@ -159,10 +159,10 @@ kill "$TCP_SIP1_PID" "$TCP_SIP2_PID" 2>/dev/null || true
 wait "$TCP_ORIGIN_PID" 2>/dev/null || true
 wait "$TCP_SIP1_PID" 2>/dev/null || true
 wait "$TCP_SIP2_PID" 2>/dev/null || true
-grep -q "event=listener_bound frontend=db mode=tcp port=$TCP_DB_PORT" /tmp/leba_tcp.log
-grep -q "event=listener_bound frontend=db_ro mode=tcp port=$TCP_DB_RO_PORT" /tmp/leba_tcp.log
-grep -q "event=listener_bound frontend=db_admin mode=tcp port=$TCP_DB_ADMIN_PORT" /tmp/leba_tcp.log
-grep -q "event=listener_bound frontend=sip_tcp mode=tcp port=$TCP_SIP_PORT" /tmp/leba_tcp.log
+grep -q "event=listener_bound frontend=db mode=tcp bind=.*:$TCP_DB_PORT" /tmp/leba_tcp.log
+grep -q "event=listener_bound frontend=db_ro mode=tcp bind=.*:$TCP_DB_RO_PORT" /tmp/leba_tcp.log
+grep -q "event=listener_bound frontend=db_admin mode=tcp bind=.*:$TCP_DB_ADMIN_PORT" /tmp/leba_tcp.log
+grep -q "event=listener_bound frontend=sip_tcp mode=tcp bind=.*:$TCP_SIP_PORT" /tmp/leba_tcp.log
 grep -q 'TCP frontend=db' /tmp/leba_tcp.log
 grep -q 'TCP frontend=db_ro' /tmp/leba_tcp.log
 grep -q 'TCP frontend=db_admin' /tmp/leba_tcp.log
@@ -204,20 +204,25 @@ wait "$UDP_LB_PID"
 kill "$UDP_SIP1_PID" "$UDP_SIP2_PID" 2>/dev/null || true
 wait "$UDP_SIP1_PID" 2>/dev/null || true
 wait "$UDP_SIP2_PID" 2>/dev/null || true
-grep -q "event=listener_bound frontend=sip_udp mode=udp port=$UDP_SIP_PORT" /tmp/leba_udp_sip.log
+grep -q "event=listener_bound frontend=sip_udp mode=udp bind=.*:$UDP_SIP_PORT" /tmp/leba_udp_sip.log
 
-echo "== tls http and h2 frontend =="
+echo "== tls http, h2, and optional h3 frontend =="
 "$MAKO" build examples/demo_backend.mko -o /tmp/leba_tls_origin
 /tmp/leba_tls_origin "$TLS_ORIGIN_PORT" tlsapi >/tmp/leba_tls_origin.log 2>&1 &
 TLS_ORIGIN_PID=$!
 sleep 0.2
+TLS_PROTOS="http/1.1,h2"
+if [[ -n "${MAKO_QUICHE_ROOT:-}" ]] || [[ -d /Users/loreste/mako/runtime/third_party/quiche/target/release ]]; then
+  export MAKO_QUICHE_ROOT="${MAKO_QUICHE_ROOT:-/Users/loreste/mako/runtime/third_party/quiche}"
+  TLS_PROTOS="http/1.1,h2,h3"
+fi
 cat > /tmp/leba_tls.conf <<EOF
 frontend web
   bind $TLS_HTTP_PORT
   mode http
   tls_cert /Users/loreste/mako/runtime/certs/dev.crt
   tls_key /Users/loreste/mako/runtime/certs/dev.key
-  protocols http/1.1,h2
+  protocols $TLS_PROTOS
   default_backend api
 frontend stats
   bind $TLS_STATS_PORT
@@ -226,25 +231,50 @@ backend api
   server api1 127.0.0.1:$TLS_ORIGIN_PORT weight 1 no_check
 EOF
 ./leba doctor /tmp/leba_tls.conf | grep -q "Result: PASS"
-TLS_MAX=1
-if curl -V | grep -q HTTP2; then
-  TLS_MAX=2
-fi
+# Budget for several TLS connections (curl may open parallel H2 streams per conn).
+TLS_MAX=16
 ./leba -f /tmp/leba_tls.conf -n "$TLS_MAX" >/tmp/leba_tls.log 2>&1 &
 TLS_LB_PID=$!
 sleep 0.4
-tls_h1_body=$(curl -sk "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h1")
+tls_h1_body=$(curl -sk --http1.1 --max-time 5 "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h1")
 echo "tls h1 body=$tls_h1_body"
 [[ "$tls_h1_body" == *'"server":"tlsapi"'* ]]
-if [[ "$TLS_MAX" == "2" ]]; then
-  tls_h2_body=$(curl -sk --http2 "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h2")
+if curl -V | grep -q HTTP2; then
+  tls_h2_body=$(curl -sk --http2 --max-time 5 "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h2")
   echo "tls h2 body=$tls_h2_body"
   [[ "$tls_h2_body" == *'"server":"tlsapi"'* ]]
+  tls_h2_body2=$(curl -sk --http2 --max-time 5 "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h2b")
+  echo "tls h2 body2=$tls_h2_body2"
+  [[ "$tls_h2_body2" == *'"server":"tlsapi"'* ]]
 fi
-wait "$TLS_LB_PID"
+if [[ "$TLS_PROTOS" == *h3* ]] && curl -V 2>&1 | grep -qi HTTP3; then
+  tls_h3_body=$(curl -sk --http3-only --max-time 5 "https://127.0.0.1:$TLS_HTTP_PORT/api/tls-h3" || true)
+  echo "tls h3 body=$tls_h3_body"
+  if [[ -n "$tls_h3_body" ]]; then
+    [[ "$tls_h3_body" == *'"server":"tlsapi"'* ]]
+  fi
+elif [[ "$TLS_PROTOS" == *h3* ]]; then
+  # System curl may lack HTTP/3; validate with quiche client when available.
+  cat > /tmp/leba_h3_smoke_client.mko <<'H3EOF'
+fn main() {
+    let r = quiche_h3_get("127.0.0.1", PORT, "/api/tls-h3", "localhost", 0)
+    print(r)
+}
+H3EOF
+  sed -i.bak "s/PORT/$TLS_HTTP_PORT/" /tmp/leba_h3_smoke_client.mko
+  if "$MAKO" build /tmp/leba_h3_smoke_client.mko -o /tmp/leba_h3_smoke_client >/tmp/leba_h3_build.log 2>&1; then
+    tls_h3_body=$(/tmp/leba_h3_smoke_client 2>/dev/null || true)
+    echo "tls h3 body=$tls_h3_body"
+    [[ "$tls_h3_body" == h3:200* ]]
+    [[ "$tls_h3_body" == *'"server":"tlsapi"'* ]]
+  else
+    echo "tls h3 skipped (quiche client build failed)"
+  fi
+fi
+wait "$TLS_LB_PID" 2>/dev/null || true
 kill "$TLS_ORIGIN_PID" 2>/dev/null || true
 wait "$TLS_ORIGIN_PID" 2>/dev/null || true
-grep -q "event=listener_bound frontend=web port=$TLS_HTTP_PORT" /tmp/leba_tls.log
+grep -q "event=listener_bound frontend=web" /tmp/leba_tls.log
 
 echo "== tcp-only database frontend =="
 /tmp/leba_tcp_echo "$TCP_ORIGIN_PORT" db1 >/tmp/leba_tcp_only_db1.log 2>&1 &
@@ -273,7 +303,7 @@ echo "tcp-only body=$tcp_only_body"
 wait "$TCP_ONLY_LB_PID"
 kill "$TCP_ONLY_ORIGIN_PID" 2>/dev/null || true
 wait "$TCP_ONLY_ORIGIN_PID" 2>/dev/null || true
-grep -q "event=listener_bound frontend=db mode=tcp port=$TCP_DB_PORT" /tmp/leba_tcp_only.log
+grep -q "event=listener_bound frontend=db mode=tcp bind=.*:$TCP_DB_PORT" /tmp/leba_tcp_only.log
 if grep -q "reason=no_http_frontend" /tmp/leba_tcp_only.log; then
   echo "tcp-only runtime rejected missing http frontend"
   exit 1

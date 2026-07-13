@@ -73,8 +73,8 @@ configured runtime state has eligible upstream capacity.
 - Config hot-reload is not implemented yet.
 - Runtime server state is persisted across restart when `state_file` is
   configured; otherwise it is in-memory only.
-- TLS and basic HTTP/2 ingress are implemented for simple request/response
-  proxying; deeper HTTP/2 streaming/multiplexing semantics and HTTP/3 are not.
+- TLS, HTTP/2 (multiplexed request/response), and HTTP/3/QUIC ingress (when
+  quiche is linked) are implemented; long-lived H2 streaming and RTP/media are not.
 - SIP-over-TCP and SIP-over-UDP Call-ID affinity are implemented for signaling;
   RTP/media relay is not implemented.
 - Service discovery is supported through `servers_file`; manual protected
@@ -90,8 +90,8 @@ configured runtime state has eligible upstream capacity.
 - [x] Watched `servers_file` reload.
 - [x] TLS termination for simple HTTP proxying.
 - [x] Basic HTTP/2 ingress over TLS/ALPN.
-- [ ] Broader HTTP/2 streaming/multiplexing coverage.
-- [ ] HTTP/3/QUIC ingress proxying.
+- [x] HTTP/2 multiplexing, request bodies, and multi-request connections.
+- [x] HTTP/3/QUIC ingress proxying (quiche-linked builds).
 - [x] SIP-over-TCP Call-ID affinity.
 - [x] SIP-over-UDP signaling proxying.
 - [ ] RTP/media relay.

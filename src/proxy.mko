@@ -6,6 +6,40 @@ struct FwdResult {
     ok: int
     bytes: int
     retries: int
+    content_type: string
+    // Extra upstream headers to pass through, each line as "\r\nName: value"
+    extra_headers: string
+}
+
+fn guess_content_type(body: string) -> string {
+    if str_len(body) == 0 {
+        return "text/plain; charset=utf-8"
+    }
+    if str_has_prefix(body, "<!DOCTYPE") {
+        return "text/html; charset=utf-8"
+    }
+    if str_has_prefix(body, "<!doctype") {
+        return "text/html; charset=utf-8"
+    }
+    if str_has_prefix(body, "<html") {
+        return "text/html; charset=utf-8"
+    }
+    if str_has_prefix(body, "<HTML") {
+        return "text/html; charset=utf-8"
+    }
+    if str_has_prefix(body, "<svg") {
+        return "image/svg+xml"
+    }
+    if str_has_prefix(body, "<?xml") {
+        return "application/xml; charset=utf-8"
+    }
+    if str_has_prefix(body, "{") {
+        return "application/json; charset=utf-8"
+    }
+    if str_has_prefix(body, "[") {
+        return "application/json; charset=utf-8"
+    }
+    return "text/plain; charset=utf-8"
 }
 
 struct ProxyResult {
@@ -197,17 +231,47 @@ fn raw_http_reason(status: int) -> string {
     if status == 200 {
         return "OK"
     }
+    if status == 204 {
+        return "No Content"
+    }
+    if status == 301 {
+        return "Moved Permanently"
+    }
+    if status == 302 {
+        return "Found"
+    }
+    if status == 303 {
+        return "See Other"
+    }
+    if status == 304 {
+        return "Not Modified"
+    }
+    if status == 307 {
+        return "Temporary Redirect"
+    }
+    if status == 308 {
+        return "Permanent Redirect"
+    }
     if status == 400 {
         return "Bad Request"
     }
-    if status == 413 {
-        return "Payload Too Large"
+    if status == 401 {
+        return "Unauthorized"
     }
     if status == 403 {
         return "Forbidden"
     }
+    if status == 404 {
+        return "Not Found"
+    }
+    if status == 413 {
+        return "Payload Too Large"
+    }
     if status == 429 {
         return "Too Many Requests"
+    }
+    if status == 500 {
+        return "Internal Server Error"
     }
     if status == 502 {
         return "Bad Gateway"
@@ -222,16 +286,80 @@ fn raw_http_respond(fd: int, status: int, body: string) -> int {
     return raw_http_respond_method(fd, "GET", status, body)
 }
 
+fn raw_http_reason_redirect(status: int) -> string {
+    if status == 301 {
+        return "Moved Permanently"
+    }
+    if status == 302 {
+        return "Found"
+    }
+    if status == 307 {
+        return "Temporary Redirect"
+    }
+    if status == 308 {
+        return "Permanent Redirect"
+    }
+    return "Moved Permanently"
+}
+
+// 301/308 to https://HOST/path (preserves path; empty host → localhost).
+fn raw_http_redirect_https(fd: int, method: string, host: string, path: string, code: int) -> int {
+    let mut st = code
+    if st < 300 {
+        st = 301
+    }
+    if st > 399 {
+        st = 301
+    }
+    let mut h = host
+    if str_eq(h, "") {
+        h = "localhost"
+    }
+    // Strip any accidental port 80 from Host for cleaner https URLs.
+    if str_has_suffix(h, ":80") {
+        h = substr(h, 0, str_len(h) - 3)
+    }
+    let mut p = path
+    if str_eq(p, "") {
+        p = "/"
+    }
+    let mut loc = str_builder()
+    builder_write(loc, "https://")
+    builder_write(loc, h)
+    builder_write(loc, p)
+    let location = builder_string(loc)
+
+    let mut b = str_builder()
+    builder_write(b, "HTTP/1.1 ")
+    builder_write(b, int_to_string(st))
+    builder_write(b, " ")
+    builder_write(b, raw_http_reason_redirect(st))
+    builder_write(b, "\r\nLocation: ")
+    builder_write(b, location)
+    builder_write(b, "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    let _ = method
+    return tcp_write(fd, builder_string(b))
+}
+
 fn raw_http_respond_ct_method(fd: int, method: string, status: int, content_type: string, body: string) -> int {
+    return raw_http_respond_full(fd, method, status, content_type, "", body)
+}
+
+fn raw_http_respond_full(fd: int, method: string, status: int, content_type: string, extra_headers: string, body: string) -> int {
     let mut b = str_builder()
     builder_write(b, "HTTP/1.1 ")
     builder_write(b, int_to_string(status))
     builder_write(b, " ")
     builder_write(b, raw_http_reason(status))
-    builder_write(b, "\r\nContent-Type: ")
-    builder_write(b, content_type)
+    if not str_eq(content_type, "") {
+        builder_write(b, "\r\nContent-Type: ")
+        builder_write(b, content_type)
+    }
     builder_write(b, "\r\nContent-Length: ")
     builder_write(b, int_to_string(str_len(body)))
+    if not str_eq(extra_headers, "") {
+        builder_write(b, extra_headers)
+    }
     builder_write(b, "\r\nConnection: close\r\n\r\n")
     if not str_eq(method, "HEAD") {
         builder_write(b, body)
@@ -244,15 +372,26 @@ fn raw_http_respond_method(fd: int, method: string, status: int, body: string) -
 }
 
 fn tls_http_respond_ct_method(conn: TlsConn, method: string, status: int, content_type: string, body: string) -> int {
+    return tls_http_respond_full(conn, method, status, content_type, "", body)
+}
+
+fn tls_http_respond_full(conn: TlsConn, method: string, status: int, content_type: string, extra_headers: string, body: string) -> int {
     let mut b = str_builder()
     builder_write(b, "HTTP/1.1 ")
     builder_write(b, int_to_string(status))
     builder_write(b, " ")
     builder_write(b, raw_http_reason(status))
-    builder_write(b, "\r\nContent-Type: ")
-    builder_write(b, content_type)
+    if not str_eq(content_type, "") {
+        builder_write(b, "\r\nContent-Type: ")
+        builder_write(b, content_type)
+    }
     builder_write(b, "\r\nContent-Length: ")
     builder_write(b, int_to_string(str_len(body)))
+    if not str_eq(extra_headers, "") {
+        builder_write(b, extra_headers)
+    }
+    // HSTS: browsers should only use HTTPS after first secure visit.
+    builder_write(b, "\r\nStrict-Transport-Security: max-age=31536000; includeSubDomains")
     builder_write(b, "\r\nConnection: close\r\n\r\n")
     if not str_eq(method, "HEAD") {
         builder_write(b, body)
@@ -298,29 +437,200 @@ fn h2_header_value(name: string) -> string {
     return ""
 }
 
-fn h2_raw_request(method: string, path: string, host: string) -> RawRequest {
+fn h2_header_value_ci(name: string) -> string {
+    let want = str_to_lower(name)
+    let mut i = 0
+    let n = hpack_decoded_count()
+    while i < n {
+        if str_eq(str_to_lower(hpack_decoded_name(i)), want) {
+            return hpack_decoded_value(i)
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+fn h2_raw_request(method: string, path: string, host: string, body: string, cookie: string, traceparent: string) -> RawRequest {
     let mut m = method
     if str_eq(m, "") {
         m = "GET"
     }
-    let mut p = path
-    if str_eq(p, "") {
-        p = "/"
-    }
+    // Never invent path="/" when HPACK decode fails — that maps every
+    // broken navigation onto the homepage (the "stuck on home" bug).
+    let p = path
     let mut h = host
     if str_eq(h, "") {
         h = "localhost"
     }
+    let mut ok = 1
+    if str_eq(p, "") {
+        ok = 0
+    }
     return RawRequest {
-        ok: 1,
+        ok: ok,
         method: m,
         path: p,
         host: h,
-        cookie: "",
-        traceparent: "",
-        body: "",
-        bytes_in: str_len(m) + str_len(p) + str_len(h)
+        cookie: cookie,
+        traceparent: traceparent,
+        body: body,
+        bytes_in: str_len(m) + str_len(p) + str_len(h) + str_len(body)
     }
+}
+
+fn h2_request_from_stream(stream: int) -> RawRequest {
+    let block = http2_conn_header_block(stream)
+    let n = hpack_decode_block(block)
+    if n < 0 {
+        return h2_raw_request("", "", "", "", "", "")
+    }
+    let method = h2_header_value(":method")
+    let path = h2_header_value(":path")
+    let mut host = h2_header_value(":authority")
+    if str_eq(host, "") {
+        host = h2_header_value_ci("host")
+    }
+    let cookie = h2_header_value_ci("cookie")
+    let traceparent = h2_header_value_ci("traceparent")
+    let body = http2_stream_body(stream)
+    return h2_raw_request(method, path, host, body, cookie, traceparent)
+}
+
+fn h2_stream_request_complete(stream: int) -> int {
+    if stream <= 0 {
+        return 0
+    }
+    if http2_stream_body_done(stream) == 1 {
+        return 1
+    }
+    if http2_stream_half_closed_remote(stream) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Build a single h2 frame: 3-byte length + type + flags + 4-byte stream ID + payload
+fn h2_build_frame(frame_type: int, flags: int, stream_id: int, payload: string) -> string {
+    let plen = str_len(payload)
+    let mut b = str_builder()
+    // Length: 3 bytes big-endian
+    builder_write_byte(b, byte(plen / 65536))
+    builder_write_byte(b, byte((plen / 256) % 256))
+    builder_write_byte(b, byte(plen % 256))
+    // Type
+    builder_write_byte(b, byte(frame_type))
+    // Flags
+    builder_write_byte(b, byte(flags))
+    // Stream ID: 4 bytes big-endian (top bit reserved = 0)
+    builder_write_byte(b, byte((stream_id / 16777216) % 128))
+    builder_write_byte(b, byte((stream_id / 65536) % 256))
+    builder_write_byte(b, byte((stream_id / 256) % 256))
+    builder_write_byte(b, byte(stream_id % 256))
+    // Payload
+    builder_write(b, payload)
+    return builder_string(b)
+}
+
+// HPACK encode :status header for common codes using static table
+fn h2_encode_status(status: int) -> string {
+    let mut b = str_builder()
+    if status == 200 {
+        builder_write_byte(b, byte(136)) // 0x88 = indexed, static table entry 8
+    } else if status == 204 {
+        builder_write_byte(b, byte(137)) // 0x89
+    } else if status == 206 {
+        builder_write_byte(b, byte(138)) // 0x8a
+    } else if status == 304 {
+        builder_write_byte(b, byte(139)) // 0x8b
+    } else if status == 400 {
+        builder_write_byte(b, byte(140)) // 0x8c
+    } else if status == 404 {
+        builder_write_byte(b, byte(141)) // 0x8d
+    } else if status == 500 {
+        builder_write_byte(b, byte(142)) // 0x8e
+    } else {
+        // Literal header with indexing, name index 8 (:status)
+        builder_write_byte(b, byte(72))  // 0x48 = literal indexed, name idx 8
+        let sv = int_to_string(status)
+        builder_write_byte(b, byte(str_len(sv))) // value length
+        builder_write(b, sv)
+    }
+    return builder_string(b)
+}
+
+// Literal without indexing, new name: 0x00 + name + value (len < 128 each).
+fn h2_encode_literal_header(name: string, value: string) -> string {
+    let mut b = str_builder()
+    builder_write_byte(b, byte(0))
+    let nlen = str_len(name)
+    let vlen = str_len(value)
+    builder_write_byte(b, byte(nlen))
+    builder_write(b, name)
+    builder_write_byte(b, byte(vlen))
+    builder_write(b, value)
+    return builder_string(b)
+}
+
+// Write a chunked h2 response - all frames in a single tls_write
+fn h2_write_chunked_response(conn: TlsConn, stream_id: int, status: int, body: string) -> int {
+    return h2_write_chunked_response_ct(conn, stream_id, status, "text/plain; charset=utf-8", body)
+}
+
+fn h2_write_chunked_response_ct(conn: TlsConn, stream_id: int, status: int, content_type: string, body: string) -> int {
+    return h2_write_chunked_response_full(conn, stream_id, status, content_type, "", body)
+}
+
+fn h2_write_chunked_response_full(conn: TlsConn, stream_id: int, status: int, content_type: string, extra_headers: string, body: string) -> int {
+    let max_frame = 16384
+    let blen = str_len(body)
+    let mut out = str_builder()
+
+    let mut hblock = str_builder()
+    builder_write(hblock, h2_encode_status(status))
+    let mut ct = content_type
+    if str_eq(ct, "") {
+        ct = guess_content_type(body)
+    }
+    // Keep HPACK string lengths under 127 for the simple encoder.
+    if str_len(ct) > 120 {
+        ct = "text/html; charset=utf-8"
+    }
+    if not str_eq(ct, "") {
+        builder_write(hblock, h2_encode_literal_header("content-type", ct))
+    }
+    builder_write(hblock, h2_encode_pass_headers(extra_headers))
+    // HSTS on HTTPS responses
+    builder_write(hblock, h2_encode_literal_header("strict-transport-security", "max-age=31536000; includeSubDomains"))
+    let hbytes = builder_string(hblock)
+
+    let mut hflags = 4
+    if blen == 0 {
+        hflags = 5
+    }
+    builder_write(out, h2_build_frame(1, hflags, stream_id, hbytes))
+
+    if blen == 0 {
+        let _ = tls_write(conn, builder_string(out))
+        return 1
+    }
+
+    let mut offset = 0
+    while offset < blen {
+        let mut chunk_len = blen - offset
+        if chunk_len > max_frame {
+            chunk_len = max_frame
+        }
+        let chunk = substr(body, offset, offset + chunk_len)
+        let mut dflags = 0
+        if offset + chunk_len >= blen {
+            dflags = 1
+        }
+        builder_write(out, h2_build_frame(0, dflags, stream_id, chunk))
+        offset = offset + chunk_len
+    }
+
+    let _ = tls_write(conn, builder_string(out))
+    return 1
 }
 
 fn raw_header(raw: string, name: string) -> string {
@@ -341,6 +651,150 @@ fn raw_header(raw: string, name: string) -> string {
         i = i + 1
     }
     return ""
+}
+
+fn content_type_from_header_block(headers: string) -> string {
+    if str_eq(headers, "") {
+        return ""
+    }
+    let mut raw = str_builder()
+    builder_write(raw, "HTTP/1.1 200 OK\r\n")
+    builder_write(raw, headers)
+    if not str_contains(headers, "\r\n\r\n") {
+        builder_write(raw, "\r\n")
+    }
+    return raw_header(builder_string(raw), "Content-Type")
+}
+
+fn resolve_content_type(headers: string, body: string) -> string {
+    let ct = content_type_from_header_block(headers)
+    if not str_eq(ct, "") {
+        return ct
+    }
+    return guess_content_type(body)
+}
+
+// Whitelist of upstream response headers safe/useful to forward.
+fn is_pass_header_name(name_lower: string) -> int {
+    if str_eq(name_lower, "location") {
+        return 1
+    }
+    if str_eq(name_lower, "set-cookie") {
+        return 1
+    }
+    if str_eq(name_lower, "cache-control") {
+        return 1
+    }
+    if str_eq(name_lower, "expires") {
+        return 1
+    }
+    if str_eq(name_lower, "etag") {
+        return 1
+    }
+    if str_eq(name_lower, "last-modified") {
+        return 1
+    }
+    if str_eq(name_lower, "vary") {
+        return 1
+    }
+    if str_eq(name_lower, "www-authenticate") {
+        return 1
+    }
+    if str_eq(name_lower, "content-disposition") {
+        return 1
+    }
+    if str_eq(name_lower, "content-language") {
+        return 1
+    }
+    if str_eq(name_lower, "retry-after") {
+        return 1
+    }
+    if str_eq(name_lower, "pragma") {
+        return 1
+    }
+    return 0
+}
+
+// Extract pass-through headers as "\r\nName: value" lines (H1-ready).
+fn extract_pass_headers(headers: string) -> string {
+    if str_eq(headers, "") {
+        return ""
+    }
+    let lines = str_split(headers, "\r\n")
+    let mut out = str_builder()
+    let mut i = 0
+    while i < len(lines) {
+        let line = str_trim_space(lines[i])
+        if not str_eq(line, "") {
+            let lower = str_to_lower(line)
+            let parts = str_split(line, ":")
+            if len(parts) >= 2 {
+                let name = str_trim_space(parts[0])
+                let name_l = str_to_lower(name)
+                if is_pass_header_name(name_l) == 1 {
+                    // Rejoin value in case it contained ':'
+                    let mut vb = str_builder()
+                    let mut pi = 1
+                    while pi < len(parts) {
+                        if pi > 1 {
+                            builder_write(vb, ":")
+                        }
+                        builder_write(vb, parts[pi])
+                        pi = pi + 1
+                    }
+                    let val = str_trim_space(builder_string(vb))
+                    builder_write(out, "\r\n")
+                    builder_write(out, name)
+                    builder_write(out, ": ")
+                    builder_write(out, val)
+                }
+            }
+            // silence unused
+            let _ = lower
+        }
+        i = i + 1
+    }
+    return builder_string(out)
+}
+
+// Encode pass-through headers for H2 HPACK (literal, name+value lengths < 128).
+fn h2_encode_pass_headers(extra_headers: string) -> string {
+    if str_eq(extra_headers, "") {
+        return ""
+    }
+    // extra_headers is "\r\nName: value\r\nName: value"
+    let lines = str_split(extra_headers, "\r\n")
+    let mut out = str_builder()
+    let mut i = 0
+    while i < len(lines) {
+        let line = str_trim_space(lines[i])
+        if not str_eq(line, "") {
+            let parts = str_split(line, ":")
+            if len(parts) >= 2 {
+                let name = str_to_lower(str_trim_space(parts[0]))
+                let mut vb = str_builder()
+                let mut pi = 1
+                while pi < len(parts) {
+                    if pi > 1 {
+                        builder_write(vb, ":")
+                    }
+                    builder_write(vb, parts[pi])
+                    pi = pi + 1
+                }
+                let val = str_trim_space(builder_string(vb))
+                // Simple HPACK encoder only supports lengths < 128
+                if str_len(name) > 0 {
+                    if str_len(name) < 128 {
+                        if str_len(val) < 128 {
+                            builder_write(out, h2_encode_literal_header(name, val))
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return builder_string(out)
 }
 
 fn sip_header(raw: string, name: string) -> string {
@@ -648,12 +1102,17 @@ fn forward_http(
     let resp = http_forward_body(fr)
     let blen = http_forward_body_len(fr)
     let ok = http_forward_ok(fr)
+    let up_headers = http_forward_headers(fr)
+    let ct = resolve_content_type(up_headers, resp)
+    let extra = extract_pass_headers(up_headers)
     return FwdResult {
         status: status,
         body: resp,
         ok: ok,
         bytes: blen,
-        retries: 0
+        retries: 0,
+        content_type: ct,
+        extra_headers: extra
     }
 }
 
@@ -959,6 +1418,26 @@ fn prepare_raw_dispatch(
         return d0
     }
 
+    // Force HTTPS: answer on the cleartext frontend with a scheme redirect.
+    if fe.redirect_https == 1 {
+        let _ = raw_http_redirect_https(c, method, host, path, fe.redirect_code)
+        let mut dr = empty
+        dr.err = 0
+        dr.bytes_out = 0
+        dr.servers = srv_list
+        dr.backends = be_list
+        dr.buckets = rate_list
+        if fe.access_log == 1 {
+            let rid = make_req_id()
+            let mut code = fe.redirect_code
+            if code <= 0 {
+                code = 301
+            }
+            print(access_log_line(method, path, code, "https-redirect", "-", 0, 0, rid, "", ""))
+        }
+        return dr
+    }
+
     if fe.request_body_limit_bytes > 0 {
         if req.bytes_in > fe.request_body_limit_bytes {
         log_proxy_reject("request_too_large", method, path, host, "status=413")
@@ -1155,7 +1634,7 @@ fn handle_tls_proxy_request(
     if req.ok == 0 {
         log_proxy_reject("malformed_request", method, path, host, "status=400")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 400, "bad request\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 400, "bad request\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 400, "bad request\n")
         }
@@ -1166,7 +1645,7 @@ fn handle_tls_proxy_request(
         if req.bytes_in > fe.request_body_limit_bytes {
             log_proxy_reject("request_too_large", method, path, host, "status=413")
             if h2_stream > 0 {
-                let _ = tls_write(conn, http2_response(h2_stream, 413, "request too large\n"))
+                let _ = h2_write_chunked_response(conn, h2_stream, 413, "request too large\n")
             } else {
                 let _ = tls_http_respond_method(conn, method, 413, "request too large\n")
             }
@@ -1180,7 +1659,7 @@ fn handle_tls_proxy_request(
             if rate_would_deny(rate_list[ri]) == 1 {
                 log_proxy_reject("rate_limited", method, path, host, "status=429")
                 if h2_stream > 0 {
-                    let _ = tls_write(conn, http2_response(h2_stream, 429, "rate limited\n"))
+                    let _ = h2_write_chunked_response(conn, h2_stream, 429, "rate limited\n")
                 } else {
                     let _ = tls_http_respond_method(conn, method, 429, "rate limited\n")
                 }
@@ -1194,7 +1673,7 @@ fn handle_tls_proxy_request(
     if frontend_at_maxconn(srv_list, fe) == 1 {
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 503, "frontend maxconn reached\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 503, "frontend maxconn reached\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 503, "frontend maxconn reached\n")
         }
@@ -1204,7 +1683,7 @@ fn handle_tls_proxy_request(
     if acl_decide(acls, fe.name, path, host, method) == 1 {
         log_proxy_reject("acl_denied", method, path, host, "status=403")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 403, "forbidden\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 403, "forbidden\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 403, "forbidden\n")
         }
@@ -1220,7 +1699,7 @@ fn handle_tls_proxy_request(
             if leba_should_welcome(path) == 1 {
                 let body_welcome = leba_welcome_html()
                 if h2_stream > 0 {
-                    let _ = tls_write(conn, http2_response(h2_stream, 200, body_welcome))
+                    let _ = h2_write_chunked_response_ct(conn, h2_stream, 200, "text/html; charset=utf-8", body_welcome)
                 } else {
                     let _ = tls_http_respond_welcome(conn, method)
                 }
@@ -1232,7 +1711,7 @@ fn handle_tls_proxy_request(
         }
         log_proxy_reject("backend_missing", method, path, host, "status=503")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 503, "no backend\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 503, "no backend\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 503, "no backend\n")
         }
@@ -1244,7 +1723,7 @@ fn handle_tls_proxy_request(
     if backend_at_maxconn(srv_list, be) == 1 {
         log_proxy_reject("backend_maxconn", method, path, host, "status=503")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 503, "backend maxconn reached\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 503, "backend maxconn reached\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 503, "backend maxconn reached\n")
         }
@@ -1262,7 +1741,7 @@ fn handle_tls_proxy_request(
     if si < 0 {
         log_proxy_reject("no_server", method, path, host, "status=502")
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 502, "no server\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 502, "no server\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 502, "no server\n")
         }
@@ -1284,10 +1763,15 @@ fn handle_tls_proxy_request(
         if st <= 0 {
             st = 200
         }
+        let mut ct = res.content_type
+        if str_eq(ct, "") {
+            ct = guess_content_type(res.body)
+        }
+        // Redirects often have empty body; still forward Location etc.
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, st, res.body))
+            let _ = h2_write_chunked_response_full(conn, h2_stream, st, ct, res.extra_headers, res.body)
         } else {
-            let _ = tls_http_respond_method(conn, method, st, res.body)
+            let _ = tls_http_respond_full(conn, method, st, ct, res.extra_headers, res.body)
         }
         srv_list = mark_server_req(srv_list, si, res.bytes, 0)
         out.err = 0
@@ -1296,7 +1780,7 @@ fn handle_tls_proxy_request(
         st = 502
         log_upstream_failure(method, path, s.host, s.port, res.status, res.retries)
         if h2_stream > 0 {
-            let _ = tls_write(conn, http2_response(h2_stream, 502, "bad gateway\n"))
+            let _ = h2_write_chunked_response(conn, h2_stream, 502, "bad gateway\n")
         } else {
             let _ = tls_http_respond_method(conn, method, 502, "bad gateway\n")
         }
@@ -1315,6 +1799,41 @@ fn handle_tls_proxy_request(
     return out
 }
 
+fn h2_wait_stream_body(conn: TlsConn, stream: int) -> int {
+    let mut waits = 0
+    while h2_stream_request_complete(stream) == 0 {
+        if waits > 16 {
+            return 0
+        }
+        let more = tls_read(conn, 8192)
+        if str_eq(more, "") {
+            return 0
+        }
+        let back = http2_conn_pump(more)
+        if not str_eq(back, "") {
+            let _b = tls_write(conn, back)
+        }
+        waits = waits + 1
+    }
+    return 1
+}
+
+fn h2_take_next_stream() -> int {
+    let mut stream = http2_next_ready_stream()
+    if stream > 0 {
+        let _t = http2_stream_take(stream)
+        return stream
+    }
+    stream = http2_conn_header_stream()
+    if stream > 0 {
+        let _t2 = http2_stream_take(stream)
+        return stream
+    }
+    return 0
+}
+
+// Multiplexed HTTP/2 over TLS: SETTINGS exchange, concurrent streams (ready
+// queue), request bodies, cookies/traceparent, and multi-request connections.
 fn handle_tls_h2_once(
     conn: TlsConn,
     fe: Frontend,
@@ -1328,6 +1847,9 @@ fn handle_tls_h2_once(
     let _u = http2_conn_use(h2c)
     let _s = http2_conn_set_server(1)
     let _w = tls_write(conn, http2_empty_settings())
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
     let mut out = ProxyResult {
         err: 1,
         bytes_out: 0,
@@ -1336,37 +1858,252 @@ fn handle_tls_h2_once(
         retries: 0,
         server_idx: -1,
         bytes_in: 0,
-        servers: servers,
-        backends: backends,
-        buckets: buckets
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
     }
     let mut done = 0
     let mut loops = 0
+    let mut handled = 0
+    let mut empty_reads = 0
     while done == 0 {
-        if loops > 20 {
+        if loops > 256 {
             done = 1
         } else {
-            let bytes = tls_read(conn, 8192)
-            if str_eq(bytes, "") {
+            if http2_conn_closing() == 1 {
                 done = 1
             } else {
-                out.bytes_in = out.bytes_in + str_len(bytes)
-                let back = http2_conn_pump(bytes)
-                if not str_eq(back, "") {
-                    let _b = tls_write(conn, back)
+                let mut drained = 0
+                while drained < 16 {
+                    if handled >= 64 {
+                        drained = 16
+                    } else {
+                        let stream = h2_take_next_stream()
+                        if stream <= 0 {
+                            drained = 16
+                        } else {
+                            let _ = h2_wait_stream_body(conn, stream)
+                            let req = h2_request_from_stream(stream)
+                            let tr = handle_tls_proxy_request(conn, req, fe, routes, acls, be_list, srv_list, rate_list, stream)
+                            srv_list = tr.servers
+                            be_list = tr.backends
+                            rate_list = tr.buckets
+                            out.bytes_out = out.bytes_out + tr.bytes_out
+                            out.bytes_in = out.bytes_in + tr.bytes_in
+                            out.retries = out.retries + tr.retries
+                            if tr.denied == 1 {
+                                out.denied = out.denied + 1
+                            }
+                            if tr.rate_limited == 1 {
+                                out.rate_limited = out.rate_limited + 1
+                            }
+                            if tr.err == 0 {
+                                out.err = 0
+                            }
+                            if tr.server_idx >= 0 {
+                                out.server_idx = tr.server_idx
+                            }
+                            handled = handled + 1
+                            drained = drained + 1
+                            empty_reads = 0
+                        }
+                    }
                 }
-                let stream = http2_conn_header_stream()
-                if stream > 0 {
-                    let _d = hpack_decode_block(http2_conn_header_block(stream))
-                    let req = h2_raw_request(h2_header_value(":method"), h2_header_value(":path"), h2_header_value(":authority"))
-                    out = handle_tls_proxy_request(conn, req, fe, routes, acls, backends, servers, buckets, stream)
+                if handled >= 64 {
                     done = 1
+                } else {
+                    if done == 0 {
+                        let bytes = tls_read(conn, 16384)
+                        if str_eq(bytes, "") {
+                            empty_reads = empty_reads + 1
+                            if handled > 0 {
+                                done = 1
+                            } else {
+                                if empty_reads > 2 {
+                                    done = 1
+                                }
+                            }
+                        } else {
+                            empty_reads = 0
+                            out.bytes_in = out.bytes_in + str_len(bytes)
+                            let back = http2_conn_pump(bytes)
+                            if not str_eq(back, "") {
+                                let _b = tls_write(conn, back)
+                            }
+                        }
+                    }
                 }
             }
         }
         loops = loops + 1
     }
+    out.servers = srv_list
+    out.backends = be_list
+    out.buckets = rate_list
+    if handled == 0 {
+        if out.err != 0 {
+            out.err = 1
+        }
+    }
     http2_conn_free(h2c)
+    return out
+}
+
+fn h3_respond(handle: int, stream: int, status: int, body: string) -> int {
+    let mut b = str_builder()
+    builder_write(b, int_to_string(status))
+    builder_write(b, "\n")
+    builder_write(b, body)
+    return h3_stream_write(handle, stream, builder_string(b))
+}
+
+// HTTP/3 ingress: request is a pseudo-HTTP/1.1 buffer from h3_stream_read.
+fn handle_h3_proxy_request(
+    h3_handle: int,
+    stream: int,
+    req: RawRequest,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> ProxyResult {
+    let method = req.method
+    let path = req.path
+    let host = req.host
+    let body = req.body
+    let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
+    let trace_id = traceparent_trace_id(traceparent)
+    let span_id = traceparent_span_id(traceparent)
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
+    let mut out = ProxyResult {
+        err: 1,
+        bytes_out: 0,
+        denied: 0,
+        rate_limited: 0,
+        retries: 0,
+        server_idx: -1,
+        bytes_in: req.bytes_in,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if req.ok == 0 {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        let _ = h3_respond(h3_handle, stream, 400, "bad request\n")
+        return out
+    }
+    if fe.request_body_limit_bytes > 0 {
+        if req.bytes_in > fe.request_body_limit_bytes {
+            log_proxy_reject("request_too_large", method, path, host, "status=413")
+            let _ = h3_respond(h3_handle, stream, 413, "request too large\n")
+            return out
+        }
+    }
+    if fe.rate_limit > 0 {
+        let ri = rate_find(rate_list, fe.name)
+        if ri >= 0 {
+            if rate_would_deny(rate_list[ri]) == 1 {
+                log_proxy_reject("rate_limited", method, path, host, "status=429")
+                let _ = h3_respond(h3_handle, stream, 429, "rate limited\n")
+                out.rate_limited = 1
+                return out
+            }
+            rate_list[ri] = rate_take(rate_list[ri])
+        }
+    }
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
+        let _ = h3_respond(h3_handle, stream, 503, "frontend maxconn reached\n")
+        return out
+    }
+    if acl_decide(acls, fe.name, path, host, method) == 1 {
+        log_proxy_reject("acl_denied", method, path, host, "status=403")
+        let _ = h3_respond(h3_handle, stream, 403, "forbidden\n")
+        out.denied = 1
+        out.buckets = rate_list
+        return out
+    }
+
+    let be_name = select_backend(routes, fe.name, path, host, fe.backend)
+    let bi = find_backend(be_list, be_name)
+    if bi < 0 {
+        if str_eq(be_name, "") {
+            if leba_should_welcome(path) == 1 {
+                let body_welcome = leba_welcome_html()
+                let _ = h3_respond(h3_handle, stream, 200, body_welcome)
+                out.err = 0
+                out.bytes_out = str_len(body_welcome)
+                out.buckets = rate_list
+                return out
+            }
+        }
+        log_proxy_reject("backend_missing", method, path, host, "status=503")
+        let _ = h3_respond(h3_handle, stream, 503, "no backend\n")
+        out.buckets = rate_list
+        return out
+    }
+
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        log_proxy_reject("backend_maxconn", method, path, host, "status=503")
+        let _ = h3_respond(h3_handle, stream, 503, "backend maxconn reached\n")
+        out.buckets = rate_list
+        return out
+    }
+
+    let mut sticky_val = ""
+    if str_len(fe.sticky_cookie) > 0 {
+        sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
+    }
+    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        log_proxy_reject("no_server", method, path, host, "status=502")
+        let _ = h3_respond(h3_handle, stream, 502, "no server\n")
+        out.backends = be_list
+        out.buckets = rate_list
+        return out
+    }
+
+    let s = srv_list[si]
+    let mut timeout_ms = be.connect_timeout_ms
+    if timeout_ms <= 0 {
+        timeout_ms = 5000
+    }
+    srv_list = server_conn_delta(srv_list, si, 1)
+    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries)
+    srv_list = server_conn_delta(srv_list, si, 0 - 1)
+    let mut st = res.status
+    if res.ok == 1 {
+        if st <= 0 {
+            st = 200
+        }
+        let _ = h3_respond(h3_handle, stream, st, res.body)
+        srv_list = mark_server_req(srv_list, si, res.bytes, 0)
+        out.err = 0
+        out.bytes_out = res.bytes
+    } else {
+        st = 502
+        log_upstream_failure(method, path, s.host, s.port, res.status, res.retries)
+        let _ = h3_respond(h3_handle, stream, 502, "bad gateway\n")
+        srv_list = mark_server_req(srv_list, si, 0, 1)
+        out.err = 1
+    }
+    if fe.access_log == 1 {
+        let rid = make_req_id()
+        print(access_log_line(method, path, st, s.host, int_to_string(si), 0, out.bytes_out, rid, trace_id, span_id))
+    }
+    out.retries = res.retries
+    out.server_idx = si
+    out.servers = srv_list
+    out.backends = be_list
+    out.buckets = rate_list
     return out
 }
 
@@ -1394,7 +2131,9 @@ fn worker_upstream(
         body: "",
         ok: 0,
         bytes: 0,
-        retries: 0
+        retries: 0,
+        content_type: "",
+        extra_headers: ""
     }
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
@@ -1409,12 +2148,16 @@ fn worker_upstream(
             }
             let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
+            let bdy = http_forward_body(fr)
+            let uph = http_forward_headers(fr)
             res = FwdResult {
                 status: http_forward_status(fr),
-                body: http_forward_body(fr),
+                body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
-                retries: 0
+                retries: 0,
+                content_type: resolve_content_type(uph, bdy),
+                extra_headers: extract_pass_headers(uph)
             }
             let _rel = tcp_pool_release(pool, fd, ok)
         }
@@ -1429,7 +2172,16 @@ fn worker_upstream(
         if st <= 0 {
             st = 200
         }
-        let _ = http_respond(c, st, res.body)
+        let mut ct = res.content_type
+        if str_eq(ct, "") {
+            ct = guess_content_type(res.body)
+        }
+        // stdlib http_respond_ct has no extra-header path; fall back to raw when needed.
+        if str_eq(res.extra_headers, "") {
+            let _ = http_respond_ct(c, st, ct, res.body)
+        } else {
+            let _ = raw_http_respond_full(c, "GET", st, ct, res.extra_headers, res.body)
+        }
     } else {
         err = 1
         st = 502
@@ -1470,7 +2222,9 @@ fn worker_raw_upstream(
         body: "",
         ok: 0,
         bytes: 0,
-        retries: 0
+        retries: 0,
+        content_type: "",
+        extra_headers: ""
     }
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
@@ -1485,12 +2239,16 @@ fn worker_raw_upstream(
             }
             let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
+            let bdy = http_forward_body(fr)
+            let uph = http_forward_headers(fr)
             res = FwdResult {
                 status: http_forward_status(fr),
-                body: http_forward_body(fr),
+                body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
-                retries: 0
+                retries: 0,
+                content_type: resolve_content_type(uph, bdy),
+                extra_headers: extract_pass_headers(uph)
             }
             let _rel = tcp_pool_release(pool, fd, ok)
         }
@@ -1505,7 +2263,11 @@ fn worker_raw_upstream(
         if st <= 0 {
             st = 200
         }
-        let _ = raw_http_respond_method(c, method, st, res.body)
+        let mut ct = res.content_type
+        if str_eq(ct, "") {
+            ct = guess_content_type(res.body)
+        }
+        let _ = raw_http_respond_full(c, method, st, ct, res.extra_headers, res.body)
     } else {
         err = 1
         st = 502

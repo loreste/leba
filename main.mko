@@ -207,21 +207,50 @@ fn main() {
     fill_slots(slots, workers)
     let mut stats_fe = frontend_new("stats")
     let mut http_listeners = make([]HttpListener, 0, len(http_fes))
+    let mut h3_listeners = make([]H3Listener, 0, len(http_fes))
     let mut hi_bind = 0
     while hi_bind < len(http_fes) {
         let mut hfe = http_fes[hi_bind]
         let mut h_tls = 0
         let mut h_tls_srv = tls_server_new("", "")
+        let mut h_h3 = 0
+        let mut h_h3_handle = -1
         if str_len(hfe.tls_cert) > 0 {
             h_tls = 1
             h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
+            if frontend_protocol_wants_h3(hfe.protocols) == 1 {
+                if h3_server_available() == 1 {
+                    let hh = h3_server_new(hfe.tls_cert, hfe.tls_key)
+                    if hh >= 0 {
+                        let bound = h3_server_bind(hh, hfe.bind_host, hfe.bind_port)
+                        if bound == 1 {
+                            h_h3 = 1
+                            h_h3_handle = hh
+                            h3_listeners = append(h3_listeners, H3Listener {
+                                frontend: hfe,
+                                handle: hh,
+                                fd: h3_server_fd(hh),
+                                frontend_idx: hi_bind
+                            })
+                        } else {
+                            let _ = h3_server_close(hh)
+                            let mut h3fail = str_builder()
+                            builder_write(h3fail, "frontend=")
+                            builder_write(h3fail, hfe.name)
+                            log_error_event("h3_bind_failed", builder_string(h3fail))
+                        }
+                    }
+                }
+            }
         }
         let hfd = tcp_listen_addr(hfe.bind_host, hfe.bind_port)
         http_listeners = append(http_listeners, HttpListener {
             frontend: hfe,
             fd: hfd,
             tls: h_tls,
-            tls_srv: h_tls_srv
+            tls_srv: h_tls_srv,
+            h3: h_h3,
+            h3_handle: h_h3_handle
         })
         hi_bind = hi_bind + 1
     }
@@ -377,6 +406,13 @@ fn main() {
         let _ = evloop_add(tcp_ev, http_listeners[hi_add].fd, 1)
         hi_add = hi_add + 1
     }
+    let mut h3_add = 0
+    while h3_add < len(h3_listeners) {
+        if h3_listeners[h3_add].fd >= 0 {
+            let _ = evloop_add(tcp_ev, h3_listeners[h3_add].fd, 1)
+        }
+        h3_add = h3_add + 1
+    }
     let _ = evloop_add(tcp_ev, stats_fd, 1)
     let mut ti_add = 0
     while ti_add < len(tcp_fds) {
@@ -397,8 +433,23 @@ fn main() {
         builder_write(http_bind_log, http_listeners[hi_log].frontend.bind_host)
         builder_write(http_bind_log, ":")
         builder_write(http_bind_log, int_to_string(http_listeners[hi_log].frontend.bind_port))
+        if http_listeners[hi_log].h3 == 1 {
+            builder_write(http_bind_log, " protocols=http1,h2,h3")
+        }
         log_info_event("listener_bound", builder_string(http_bind_log))
         hi_log = hi_log + 1
+    }
+    let mut h3_log = 0
+    while h3_log < len(h3_listeners) {
+        let mut h3_bind_log = str_builder()
+        builder_write(h3_bind_log, "frontend=")
+        builder_write(h3_bind_log, h3_listeners[h3_log].frontend.name)
+        builder_write(h3_bind_log, " mode=http3 bind=")
+        builder_write(h3_bind_log, h3_listeners[h3_log].frontend.bind_host)
+        builder_write(h3_bind_log, ":")
+        builder_write(h3_bind_log, int_to_string(h3_listeners[h3_log].frontend.bind_port))
+        log_info_event("listener_bound", builder_string(h3_bind_log))
+        h3_log = h3_log + 1
     }
     let mut stats_bind_log = str_builder()
     builder_write(stats_bind_log, "frontend=stats bind=")
@@ -656,6 +707,8 @@ fn main() {
                                 } else {
                                     let _ = tcp_set_timeout(c, 1000)
                                     if h.tls == 1 {
+                                    // accept_nb can leave the client fd nonblocking; SSL_accept needs blocking I/O.
+                                    let _ = io_set_nonblocking(c, 0)
                                     let tconn = tls_accept(h.tls_srv, c)
                                     let proto = tls_conn_alpn(tconn)
                                     let mut tr = ProxyResult {
@@ -716,6 +769,45 @@ fn main() {
                         hi_match = len(http_listeners)
                     } else {
                         hi_match = hi_match + 1
+                    }
+                }
+                let mut h3_match = 0
+                while h3_match < len(h3_listeners) {
+                    if rfd == h3_listeners[h3_match].fd {
+                        let h3l = h3_listeners[h3_match]
+                        let _ = h3_server_poll(h3l.handle, 0)
+                        let mut h3_streams = 0
+                        while h3_streams < 16 {
+                            let sid = h3_accept_stream(h3l.handle)
+                            if sid < 0 {
+                                h3_streams = 16
+                            } else {
+                                let raw = h3_stream_read(h3l.handle, sid)
+                                let req = parse_raw_request(raw)
+                                let tr = handle_h3_proxy_request(h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets)
+                                servers = tr.servers
+                                backends = tr.backends
+                                buckets = tr.buckets
+                                st.total_req = st.total_req + 1
+                                st.total_bytes_out = st.total_bytes_out + tr.bytes_out
+                                st.retries = st.retries + tr.retries
+                                if tr.err != 0 {
+                                    st.total_err = st.total_err + 1
+                                }
+                                if tr.denied == 1 {
+                                    st.denied = st.denied + 1
+                                }
+                                if tr.rate_limited == 1 {
+                                    st.rate_limited = st.rate_limited + 1
+                                }
+                                st.last_req_ms = now_ms()
+                                completed = completed + 1
+                                h3_streams = h3_streams + 1
+                            }
+                        }
+                        h3_match = len(h3_listeners)
+                    } else {
+                        h3_match = h3_match + 1
                     }
                 }
                 let mut ti_match = 0
@@ -838,6 +930,9 @@ fn main() {
         }
         if http_listeners[hi_close2].tls == 1 {
             let _ = tls_server_free(http_listeners[hi_close2].tls_srv)
+        }
+        if http_listeners[hi_close2].h3 == 1 {
+            let _ = h3_server_close(http_listeners[hi_close2].h3_handle)
         }
         hi_close2 = hi_close2 + 1
     }

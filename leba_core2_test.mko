@@ -297,12 +297,48 @@ fn TestFrontendProtocolsParse() {
     assert_eq_str(w.frontends[0].protocols, "http/1.1")
 }
 
-fn TestDoctorRejectsUnsupportedProtocolAcceptPaths() {
+fn TestRedirectHttpsParseAndDoctor() {
+    let raw = "frontend redir\n  bind 80\n  mode http\n  redirect https\nfrontend web\n  bind 443\n  mode http\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.frontends[0].redirect_https, 1)
+    assert_eq(w.frontends[0].redirect_code, 301)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+}
+
+fn TestRedirectHttpsCustomCode() {
+    let raw = "frontend redir\n  bind 80\n  mode http\n  redirect https 308\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.frontends[0].redirect_https, 1)
+    assert_eq(w.frontends[0].redirect_code, 308)
+}
+
+fn TestDoctorRejectsH3WithoutTls() {
     let raw = "frontend web\n  bind 1\n  mode http\n  protocols http/1.1,h2,h3\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
     let w = parse_config_text(raw)
     let rep = doctor_world(w)
     assert_eq(rep.ok, 0)
-    assert(str_contains(rep.text, "unsupported protocols"))
+    assert(str_contains(rep.text, "h3 without TLS") || str_contains(rep.text, "no HTTP/3"))
+}
+
+fn TestDoctorAllowsReadableTlsH3ConfigWhenAvailable() {
+    let cert_path = "/tmp/leba_test_tls_h3.crt"
+    let key_path = "/tmp/leba_test_tls_h3.key"
+    let _ = write_file(cert_path, "cert")
+    let _ = write_file(key_path, "key")
+    let raw = "frontend web\n  bind 1\n  mode http\n  tls_cert /tmp/leba_test_tls_h3.crt\n  tls_key /tmp/leba_test_tls_h3.key\n  protocols http/1.1,h2,h3\n  default_backend api\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
+    let w = parse_config_text(raw)
+    let rep = doctor_world(w)
+    if h3_server_available() == 1 {
+        if tls_server_available() == 1 {
+            assert_eq(rep.ok, 1)
+        }
+    } else {
+        assert_eq(rep.ok, 0)
+        assert(str_contains(rep.text, "HTTP/3") || str_contains(rep.text, "h3"))
+    }
+    let _ = remove_file(cert_path)
+    let _ = remove_file(key_path)
 }
 
 fn TestDoctorRejectsTlsWithUnreadableFiles() {

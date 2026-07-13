@@ -90,7 +90,8 @@ Supported keys:
 | `access_log` | `on` or `off` | Controls access log lines for this frontend. |
 | `tls_cert` | path | Enables TLS termination for this HTTP frontend. |
 | `tls_key` | path | Private key for `tls_cert`. |
-| `protocols` / `alpn` | list | `http/1.1` and `h2` are accepted on TLS frontends. HTTP/3 and QUIC are rejected by `doctor`. |
+| `protocols` / `alpn` | list | `http/1.1`, `h2`, and `h3` (aliases `http/2`, `http/3`, `quic`). `h2`/`h3` require TLS certs. `h3` also requires a quiche-linked build (`h3_server_available`). |
+| `redirect https` | optional code | Force HTTP→HTTPS with `301` (default) or `302`/`307`/`308`. No backend required. Example: `redirect https` or `redirect https 308`. |
 | `auth` | `user:pass[:role]` | Backward-compatible stats admin credential. Role defaults to `admin`. |
 | `admin_user` | `user pass role` | Additional stats user. Role is `viewer`, `operator`, or `admin`. |
 | `auth_hash` | `user hash role` | Stats admin credential using Argon2id PHC, `leba-kdf-v1`, or legacy SHA-256. |

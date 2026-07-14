@@ -81,6 +81,7 @@ struct Frontend {
     maxconn: int
     tls_cert: string
     tls_key: string
+    tls_client_ca: string
     protocols: string
     sticky_cookie: string
     rate_limit: int
@@ -236,6 +237,7 @@ fn frontend_new(name: string) -> Frontend {
         maxconn: 0,
         tls_cert: "",
         tls_key: "",
+        tls_client_ca: "",
         protocols: "http/1.1",
         sticky_cookie: "",
         rate_limit: 0,

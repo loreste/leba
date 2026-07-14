@@ -124,6 +124,7 @@ struct Dispatch {
     method: string
     path: string
     body: string
+    cookie: string
     traceparent: string
     trace_id: string
     span_id: string
@@ -1085,6 +1086,7 @@ fn forward_http(
     method: string,
     path: string,
     body: string,
+    cookie: string,
     traceparent: string,
     host: string,
     port: int,
@@ -1095,6 +1097,11 @@ fn forward_http(
     if not str_eq(orig_host, "") {
         builder_write(hb, "Host: ")
         builder_write(hb, orig_host)
+        builder_write(hb, "\r\n")
+    }
+    if not str_eq(cookie, "") {
+        builder_write(hb, "Cookie: ")
+        builder_write(hb, cookie)
         builder_write(hb, "\r\n")
     }
     if not str_eq(traceparent, "") {
@@ -1126,6 +1133,7 @@ fn forward_http_retries(
     method: string,
     path: string,
     body: string,
+    cookie: string,
     traceparent: string,
     host: string,
     port: int,
@@ -1133,7 +1141,7 @@ fn forward_http_retries(
     retries: int,
     orig_host: string
 ) -> FwdResult {
-    let mut res = forward_http(method, path, body, traceparent, host, port, timeout_ms, orig_host)
+    let mut res = forward_http(method, path, body, cookie, traceparent, host, port, timeout_ms, orig_host)
     let mut used = 0
     let mut limit = retries
     if limit < 0 {
@@ -1145,7 +1153,7 @@ fn forward_http_retries(
             return res
         }
         used = used + 1
-        res = forward_http(method, path, body, traceparent, host, port, timeout_ms, orig_host)
+        res = forward_http(method, path, body, cookie, traceparent, host, port, timeout_ms, orig_host)
     }
     res.retries = used
     return res
@@ -1177,6 +1185,7 @@ fn prepare_dispatch(
         method: method,
         path: path,
         body: body,
+        cookie: "",
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
@@ -1348,6 +1357,7 @@ fn prepare_dispatch(
         method: method,
         path: path,
         body: body,
+        cookie: cookie,
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
@@ -1398,6 +1408,7 @@ fn prepare_raw_dispatch(
         method: method,
         path: path,
         body: body,
+        cookie: "",
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
@@ -1586,6 +1597,7 @@ fn prepare_raw_dispatch(
         method: method,
         path: path,
         body: body,
+        cookie: req.cookie,
         traceparent: traceparent,
         trace_id: trace_id,
         span_id: span_id,
@@ -1767,7 +1779,7 @@ fn handle_tls_proxy_request(
         timeout_ms = 5000
     }
     srv_list = server_conn_delta(srv_list, si, 1)
-    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries, host)
+    let res = forward_http_retries(method, path, body, req.cookie, traceparent, s.host, s.port, timeout_ms, be.retries, host)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
     if res.ok == 1 {
@@ -2088,7 +2100,7 @@ fn handle_h3_proxy_request(
         timeout_ms = 5000
     }
     srv_list = server_conn_delta(srv_list, si, 1)
-    let res = forward_http_retries(method, path, body, traceparent, s.host, s.port, timeout_ms, be.retries, host)
+    let res = forward_http_retries(method, path, body, req.cookie, traceparent, s.host, s.port, timeout_ms, be.retries, host)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
     if res.ok == 1 {
@@ -2124,6 +2136,7 @@ fn worker_upstream(
     method: string,
     path: string,
     body: string,
+    cookie: string,
     traceparent: string,
     trace_id: string,
     span_id: string,
@@ -2156,6 +2169,11 @@ fn worker_upstream(
                 builder_write(hb, orig_host)
                 builder_write(hb, "\r\n")
             }
+            if not str_eq(cookie, "") {
+                builder_write(hb, "Cookie: ")
+                builder_write(hb, cookie)
+                builder_write(hb, "\r\n")
+            }
             if not str_eq(traceparent, "") {
                 builder_write(hb, "traceparent: ")
                 builder_write(hb, traceparent)
@@ -2179,7 +2197,7 @@ fn worker_upstream(
         }
     }
     if res.ok == 0 {
-        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries, orig_host)
+        res = forward_http_retries(method, path, body, cookie, traceparent, host, port, timeout_ms, retries, orig_host)
     }
     let mut err = 0
     let mut st = res.status
@@ -2220,6 +2238,7 @@ fn worker_raw_upstream(
     method: string,
     path: string,
     body: string,
+    cookie: string,
     traceparent: string,
     trace_id: string,
     span_id: string,
@@ -2252,6 +2271,11 @@ fn worker_raw_upstream(
                 builder_write(hb, orig_host)
                 builder_write(hb, "\r\n")
             }
+            if not str_eq(cookie, "") {
+                builder_write(hb, "Cookie: ")
+                builder_write(hb, cookie)
+                builder_write(hb, "\r\n")
+            }
             if not str_eq(traceparent, "") {
                 builder_write(hb, "traceparent: ")
                 builder_write(hb, traceparent)
@@ -2275,7 +2299,7 @@ fn worker_raw_upstream(
         }
     }
     if res.ok == 0 {
-        res = forward_http_retries(method, path, body, traceparent, host, port, timeout_ms, retries, orig_host)
+        res = forward_http_retries(method, path, body, cookie, traceparent, host, port, timeout_ms, retries, orig_host)
     }
     let mut err = 0
     let mut st = res.status
@@ -2321,6 +2345,7 @@ fn prepare_tcp_dispatch(
         method: "TCP",
         path: "",
         body: "",
+        cookie: "",
         traceparent: "",
         trace_id: "",
         span_id: "",
@@ -2423,6 +2448,7 @@ fn prepare_tcp_dispatch(
         method: "TCP",
         path: "",
         body: initial_data,
+        cookie: "",
         traceparent: "",
         trace_id: "",
         span_id: "",
@@ -2508,7 +2534,7 @@ fn proxy_http_once(
             buckets: d.buckets
         }
     }
-    let res = forward_http_retries(d.method, d.path, d.body, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries, d.orig_host)
+    let res = forward_http_retries(d.method, d.path, d.body, d.cookie, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries, d.orig_host)
     let mut srv_list = d.servers
     srv_list = server_conn_delta(srv_list, d.server_idx, 0 - 1)
     if res.ok == 1 {

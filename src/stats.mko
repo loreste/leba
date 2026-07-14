@@ -691,6 +691,7 @@ fn handle_stats_raw_conn(
     stats_pass: string,
     admin_users: []AdminUser,
     state_file: string,
+    state_key: string,
     config_path: string,
     config_dir: string
 ) -> StatsConnResult {
@@ -753,7 +754,7 @@ fn handle_stats_raw_conn(
     if ar.handled == 1 {
         if ar.status == 200 {
             if admin_path_mutates_state(ponly) == 1 {
-                let _ = save_runtime_state_file(state_file, config_dir, ar.servers)
+                let _ = save_runtime_state_file(state_file, config_dir, ar.servers, state_key)
             }
         }
         let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
@@ -779,11 +780,7 @@ fn handle_stats_raw_conn(
 }
 
 fn admin_audit_id() -> string {
-    let mut b = str_builder()
-    builder_write(b, int_to_string(now_ms()))
-    builder_write(b, "-")
-    builder_write(b, int_to_string(rand_intn(1000000)))
-    return builder_string(b)
+    return uuid_string(uuid_v7())
 }
 
 fn admin_audit_detail(req_id: string, user: string, role: string, method: string, path: string, status: int, outcome: string) -> string {
@@ -827,6 +824,7 @@ fn handle_stats_conn(
     stats_pass: string,
     admin_users: []AdminUser,
     state_file: string,
+    state_key: string,
     config_path: string,
     config_dir: string
 ) -> StatsConnResult {
@@ -883,7 +881,7 @@ fn handle_stats_conn(
     if ar.handled == 1 {
         if ar.status == 200 {
             if admin_path_mutates_state(ponly) == 1 {
-                let _ = save_runtime_state_file(state_file, config_dir, ar.servers)
+                let _ = save_runtime_state_file(state_file, config_dir, ar.servers, state_key)
             }
         }
         let _ = http_respond_json(c, ar.status, ar.body)

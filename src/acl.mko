@@ -99,6 +99,35 @@ fn acl_decide(acls: []AclRule, frontend: string, path: string, host: string, met
     return 0
 }
 
+// Pre-group route indices by frontend name for O(1) frontend filtering.
+// map[string][]int: frontend name → indices into routes array.
+fn route_build_index(routes: []Route) -> map[string][]int {
+    let mut idx = make(map[string][]int)
+    let mut i = 0
+    while i < len(routes) {
+        let fe = routes[i].frontend
+        let mut cur = idx[fe]
+        cur = append(cur, i)
+        idx[fe] = cur
+        i = i + 1
+    }
+    return idx
+}
+
+// Pre-group ACL rule indices by frontend name.
+fn acl_build_index(acls: []AclRule) -> map[string][]int {
+    let mut idx = make(map[string][]int)
+    let mut i = 0
+    while i < len(acls) {
+        let fe = acls[i].frontend
+        let mut cur = idx[fe]
+        cur = append(cur, i)
+        idx[fe] = cur
+        i = i + 1
+    }
+    return idx
+}
+
 fn select_backend(routes: []Route, frontend: string, path: string, host: string, fallback: string) -> string {
     let p = path_only(path)
     let mut default_be = fallback

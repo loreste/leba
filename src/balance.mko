@@ -13,6 +13,22 @@ fn server_indices_for(servers: []Server, backend: string) -> []int {
     return out
 }
 
+// Pre-group server indices by backend name for O(1) lookup.
+// Rebuild after server list changes (reload, health state change does NOT
+// alter indices — only add/remove does).
+fn server_build_index(servers: []Server) -> map[string][]int {
+    let mut idx = make(map[string][]int)
+    let mut i = 0
+    while i < len(servers) {
+        let be = servers[i].backend
+        let mut cur = idx[be]
+        cur = append(cur, i)
+        idx[be] = cur
+        i = i + 1
+    }
+    return idx
+}
+
 fn count_alive(servers: []Server, idxs: []int) -> int {
     let mut n = 0
     let mut i = 0

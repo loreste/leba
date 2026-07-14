@@ -389,6 +389,19 @@ fn doctor_world(w: World) -> DoctorReport {
                     builder_write(b, "\n")
                     errors = errors + 1
                 }
+                if str_len(fe.tls_client_ca) > 0 {
+                    let client_ca = read_file(fe.tls_client_ca)
+                    if str_eq(client_ca, "") {
+                        builder_write(b, "ERROR  tls_client_ca not readable: ")
+                        builder_write(b, fe.tls_client_ca)
+                        builder_write(b, "\n")
+                        errors = errors + 1
+                    } else {
+                        builder_write(b, "INFO   frontend ")
+                        builder_write(b, fe.name)
+                        builder_write(b, " mTLS enabled (client certificates required)\n")
+                    }
+                }
             }
         }
         if str_len(fe.tls_key) > 0 {

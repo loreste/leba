@@ -9,6 +9,32 @@ fn fill_slots(slots: chan[int], n: int) {
     }
 }
 
+// Cooperative drain via session cancel tokens.
+// mint_drain_token() creates a token that workers can poll with
+// session_cancelled() to detect a graceful shutdown in progress.
+fn mint_drain_token() -> string {
+    return session_cancel_token()
+}
+
+fn fire_drain(token: string) {
+    if not str_eq(token, "") {
+        let _ = session_cancel(token)
+    }
+}
+
+fn drain_fired(token: string) -> int {
+    if str_eq(token, "") {
+        return 0
+    }
+    return session_cancelled(token)
+}
+
+fn clear_drain(token: string) {
+    if not str_eq(token, "") {
+        let _ = session_cancel_clear(token)
+    }
+}
+
 fn apply_done(
     v: int,
     servers: []Server,

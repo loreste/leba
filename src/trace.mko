@@ -1,61 +1,19 @@
 // W3C trace-context helpers — request correlation without log-format ceremony
+//
+// Trace-id generation uses UUID v7 (time-ordered, Copy POD — no GC pressure
+// on the hot path).  Span-ids use UUID v4 (random).  Both are stripped to
+// dash-free hex via strip_uuid_dashes() so they fit the traceparent wire
+// format directly.
 pack trace
 
-fn hex_lower_digit(n: int) -> string {
-    let d = n % 16
-    if d == 0 {
-        return "0"
-    }
-    if d == 1 {
-        return "1"
-    }
-    if d == 2 {
-        return "2"
-    }
-    if d == 3 {
-        return "3"
-    }
-    if d == 4 {
-        return "4"
-    }
-    if d == 5 {
-        return "5"
-    }
-    if d == 6 {
-        return "6"
-    }
-    if d == 7 {
-        return "7"
-    }
-    if d == 8 {
-        return "8"
-    }
-    if d == 9 {
-        return "9"
-    }
-    if d == 10 {
-        return "a"
-    }
-    if d == 11 {
-        return "b"
-    }
-    if d == 12 {
-        return "c"
-    }
-    if d == 13 {
-        return "d"
-    }
-    if d == 14 {
-        return "e"
-    }
-    return "f"
-}
-
-fn hex_n(width: int) -> string {
+fn strip_uuid_dashes(s: string) -> string {
     let mut b = str_builder()
+    let data = bytes(s)
     let mut i = 0
-    while i < width {
-        builder_write(b, hex_lower_digit(rand_intn(16)))
+    while i < len(data) {
+        if int(data[i]) != 45 {
+            builder_write_byte(b, data[i])
+        }
         i = i + 1
     }
     return builder_string(b)
@@ -148,11 +106,13 @@ fn traceparent_valid(tp: string) -> int {
 }
 
 fn traceparent_new() -> string {
+    let trace_id = strip_uuid_dashes(uuid_string(uuid_v7()))
+    let span_id = substr(strip_uuid_dashes(uuid_string(uuid_v4())), 0, 16)
     let mut b = str_builder()
     builder_write(b, "00-")
-    builder_write(b, hex_n(32))
+    builder_write(b, trace_id)
     builder_write(b, "-")
-    builder_write(b, hex_n(16))
+    builder_write(b, span_id)
     builder_write(b, "-01")
     return builder_string(b)
 }

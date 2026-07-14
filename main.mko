@@ -174,6 +174,7 @@ fn main() {
     if workers > 64 {
         workers = 64
     }
+    let conn_limits = limits_new(0, 0, d.maxconn)
     let stats_idx = frontend_mode_index(frontends, "stats", 0)
     let mut http_fes = make([]Frontend, 0, 8)
     let mut tcp_fes = make([]Frontend, 0, 8)
@@ -217,7 +218,17 @@ fn main() {
         let mut h_h3_handle = -1
         if str_len(hfe.tls_cert) > 0 {
             h_tls = 1
-            h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
+            if str_len(hfe.tls_client_ca) > 0 {
+                h_tls_srv = tls_server_new_mtls(hfe.tls_cert, hfe.tls_key, hfe.tls_client_ca)
+                let mut mtls_log = str_builder()
+                builder_write(mtls_log, "frontend=")
+                builder_write(mtls_log, hfe.name)
+                builder_write(mtls_log, " client_ca=")
+                builder_write(mtls_log, hfe.tls_client_ca)
+                log_info_event("mtls_enabled", builder_string(mtls_log))
+            } else {
+                h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
+            }
             if frontend_protocol_wants_h3(hfe.protocols) == 1 {
                 if h3_server_available() == 1 {
                     let hh = h3_server_new(hfe.tls_cert, hfe.tls_key)
@@ -499,10 +510,12 @@ fn main() {
     let mut udp_flows = make([]UdpFlow, 0, 64)
     let mut pending_clients = make([]PendingClient, 0, workers * 16)
     let pending_limit = workers * 64
+    let drain_token = mint_drain_token()
     crew pool {
         while max_req <= 0 or completed < max_req {
             if signal_fired("TERM") == 1 {
-                log_info_event("runtime_signal", "signal=TERM action=shutdown")
+                fire_drain(drain_token)
+                log_info_event("runtime_signal", "signal=TERM action=shutdown drain=fired")
                 completed = max_req
                 if max_req <= 0 {
                     max_req = 1
@@ -511,7 +524,8 @@ fn main() {
                 continue
             }
             if signal_fired("INT") == 1 {
-                log_info_event("runtime_signal", "signal=INT action=shutdown")
+                fire_drain(drain_token)
+                log_info_event("runtime_signal", "signal=INT action=shutdown drain=fired")
                 completed = max_req
                 if max_req <= 0 {
                     max_req = 1
@@ -613,7 +627,7 @@ fn main() {
                                 continue
                             }
                             if pc.kind == 1 {
-                                let srp = handle_stats_raw_conn(pc.fd, raw_pending, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, path, config_dir)
+                                let srp = handle_stats_raw_conn(pc.fd, raw_pending, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir)
                                 frontends = srp.frontends
                                 backends = srp.backends
                                 servers = srp.servers
@@ -640,7 +654,7 @@ fn main() {
                                             inflight = inflight + 1
                                             st.active_conns = st.active_conns + 1
                                             let _ = pool.kick(worker_raw_upstream(
-                                                dp.c, dp.method, dp.path, dp.body, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
+                                                dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
                                                 dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.orig_host, slots, done
                                             ))
                                         }
@@ -950,6 +964,7 @@ fn main() {
         let _ = watch_close(server_watch)
     }
     let _ = http_close_listener(stats_fd)
+    clear_drain(drain_token)
     let mut stop_log = str_builder()
     builder_write(stop_log, "completed=")
     builder_write(stop_log, int_to_string(completed))

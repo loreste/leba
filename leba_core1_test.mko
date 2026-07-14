@@ -204,7 +204,7 @@ fn TestRuntimeStateFileSave() {
     s.alive = 0
     s.drain = 1
     servers = append(servers, s)
-    let _ = save_runtime_state_file(state_path, "", servers)
+    let _ = save_runtime_state_file(state_path, "", servers, "")
     let raw = read_file(state_path)
     assert(str_contains(raw, "api a 0 1"))
     let _ = remove_file(state_path)

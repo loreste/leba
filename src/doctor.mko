@@ -24,71 +24,54 @@ struct ExplainResult {
 }
 
 fn balance_known(b: string) -> int {
-    if str_eq(b, "round_robin") {
-        return 1
-    }
-    if str_eq(b, "least_conn") {
-        return 1
-    }
-    if str_eq(b, "ip_hash") {
-        return 1
-    }
-    if str_eq(b, "sip_call_id") {
-        return 1
-    }
-    if str_eq(b, "weighted") {
-        return 1
-    }
-    if str_eq(b, "random") {
-        return 1
+    match b {
+        "round_robin" => { return 1 }
+        "least_conn" => { return 1 }
+        "ip_hash" => { return 1 }
+        "sip_call_id" => { return 1 }
+        "weighted" => { return 1 }
+        "random" => { return 1 }
+        _ => { return 0 }
     }
     return 0
 }
 
 fn backend_exists(backends: []Backend, name: string) -> int {
-    let mut i = 0
-    while i < len(backends) {
-        if str_eq(backends[i].name, name) {
+    for _, be in range backends {
+        if str_eq(be.name, name) {
             return 1
         }
-        i = i + 1
     }
     return 0
 }
 
 fn server_count(servers: []Server, backend: string) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, backend) {
+    for _, s in range servers {
+        if str_eq(s.backend, backend) {
             n = n + 1
         }
-        i = i + 1
     }
     return n
 }
 
 fn backend_balance(backends: []Backend, name: string) -> string {
-    let mut i = 0
-    while i < len(backends) {
-        if str_eq(backends[i].name, name) {
-            return backends[i].balance
+    for _, be in range backends {
+        if str_eq(be.name, name) {
+            return be.balance
         }
-        i = i + 1
     }
     return ""
 }
 
 fn port_used_twice(frontends: []Frontend, port: int, skip: int) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(frontends) {
-        if frontends[i].bind_port == port {
+    for i, fe in range frontends {
+        if fe.bind_port == port {
             if i != skip {
                 n = n + 1
             }
         }
-        i = i + 1
     }
     return n
 }
@@ -159,14 +142,11 @@ fn admin_hash_shape_ok(pass_hash: string) -> int {
 }
 
 fn doctor_admin_role_known(role: string) -> int {
-    if str_eq(role, "viewer") {
-        return 1
-    }
-    if str_eq(role, "operator") {
-        return 1
-    }
-    if str_eq(role, "admin") {
-        return 1
+    match role {
+        "viewer" => { return 1 }
+        "operator" => { return 1 }
+        "admin" => { return 1 }
+        _ => { return 0 }
     }
     return 0
 }
@@ -205,9 +185,7 @@ fn doctor_world(w: World) -> DoctorReport {
     builder_write(b, "==================================\n")
 
     if w.ok == 0 {
-        builder_write(b, "ERROR  parse failed: ")
-        builder_write(b, w.error)
-        builder_write(b, "\n")
+        builder_write(b, f"ERROR  parse failed: {w.error}\n")
         errors = errors + 1
         return DoctorReport {
             errors: errors,
@@ -224,12 +202,10 @@ fn doctor_world(w: World) -> DoctorReport {
     }
 
     let mut has_http_frontend = 0
-    let mut hfi0 = 0
-    while hfi0 < len(w.frontends) {
-        if str_eq(w.frontends[hfi0].mode, "http") {
+    for _, fe0 in range w.frontends {
+        if str_eq(fe0.mode, "http") {
             has_http_frontend = 1
         }
-        hfi0 = hfi0 + 1
     }
     if len(w.backends) == 0 {
         if has_http_frontend == 1 {
@@ -242,25 +218,17 @@ fn doctor_world(w: World) -> DoctorReport {
     }
 
     let mut has_stats_frontend = 0
-    let mut fi = 0
-    while fi < len(w.frontends) {
-        let fe = w.frontends[fi]
+    for fi, fe in range w.frontends {
         if str_eq(fe.mode, "stats") {
             has_stats_frontend = 1
         }
         if fe.bind_port <= 0 {
-            builder_write(b, "ERROR  frontend ")
-            builder_write(b, fe.name)
-            builder_write(b, " has no bind port\n")
+            builder_write(b, f"ERROR  frontend {fe.name} has no bind port\n")
             builder_write(b, "  fix:  bind 8080\n")
             errors = errors + 1
         } else {
             if port_used_twice(w.frontends, fe.bind_port, fi) > 0 {
-                builder_write(b, "ERROR  port ")
-                builder_write(b, int_to_string(fe.bind_port))
-                builder_write(b, " bound by multiple frontends (including ")
-                builder_write(b, fe.name)
-                builder_write(b, ")\n")
+                builder_write(b, f"ERROR  port {fe.bind_port} bound by multiple frontends (including {fe.name})\n")
                 builder_write(b, "  fix:  use unique bind ports\n")
                 errors = errors + 1
             }
@@ -272,22 +240,16 @@ fn doctor_world(w: World) -> DoctorReport {
             if str_eq(fe.backend, "") {
                 // check routes exist
                 let mut has_route = 0
-                let mut ri = 0
-                while ri < len(w.routes) {
-                    if str_eq(w.routes[ri].frontend, fe.name) {
+                for _, rt in range w.routes {
+                    if str_eq(rt.frontend, fe.name) {
                         has_route = 1
                     }
-                    ri = ri + 1
                 }
                 if has_route == 0 {
                     if len(w.backends) == 0 {
-                        builder_write(b, "INFO   frontend ")
-                        builder_write(b, fe.name)
-                        builder_write(b, " has no routes or backend; built-in welcome page will be served for /\n")
+                        builder_write(b, f"INFO   frontend {fe.name} has no routes or backend; built-in welcome page will be served for /\n")
                     } else {
-                        builder_write(b, "ERROR  frontend ")
-                        builder_write(b, fe.name)
-                        builder_write(b, " has no routes or backend\n")
+                        builder_write(b, f"ERROR  frontend {fe.name} has no routes or backend\n")
                         builder_write(b, "  fix:  route default -> mybackend  (or `redirect https`)\n")
                         errors = errors + 1
                     }
@@ -297,39 +259,27 @@ fn doctor_world(w: World) -> DoctorReport {
         } else {
             if str_eq(fe.mode, "tcp") {
                 if str_eq(fe.backend, "") {
-                    builder_write(b, "ERROR  tcp frontend ")
-                    builder_write(b, fe.name)
-                    builder_write(b, " has no backend\n")
+                    builder_write(b, f"ERROR  tcp frontend {fe.name} has no backend\n")
                     builder_write(b, "  fix:  add `default_backend NAME` under the tcp frontend\n")
                     errors = errors + 1
                 }
             } else {
                 if str_eq(fe.mode, "udp") {
                     if str_eq(fe.backend, "") {
-                        builder_write(b, "ERROR  udp frontend ")
-                        builder_write(b, fe.name)
-                        builder_write(b, " has no backend\n")
+                        builder_write(b, f"ERROR  udp frontend {fe.name} has no backend\n")
                         builder_write(b, "  fix:  add `default_backend NAME` under the udp frontend\n")
                         errors = errors + 1
                     } else {
                         let ubal = backend_balance(w.backends, fe.backend)
                         if not str_eq(ubal, "sip_call_id") {
-                            builder_write(b, "ERROR  udp frontend ")
-                            builder_write(b, fe.name)
-                            builder_write(b, " points to backend `")
-                            builder_write(b, fe.backend)
-                            builder_write(b, "` without `balance sip_call_id`\n")
+                            builder_write(b, f"ERROR  udp frontend {fe.name} points to backend `{fe.backend}` without `balance sip_call_id`\n")
                             builder_write(b, "  fix:  UDP support is currently limited to SIP signaling with Call-ID affinity\n")
                             errors = errors + 1
                         }
                     }
                 } else {
                 if not str_eq(fe.mode, "stats") {
-                    builder_write(b, "ERROR  frontend ")
-                    builder_write(b, fe.name)
-                    builder_write(b, " unknown mode `")
-                    builder_write(b, fe.mode)
-                    builder_write(b, "`\n")
+                    builder_write(b, f"ERROR  frontend {fe.name} unknown mode `{fe.mode}`\n")
                     builder_write(b, "  fix:  use mode http | tcp | udp | stats\n")
                     errors = errors + 1
                 }
@@ -338,25 +288,19 @@ fn doctor_world(w: World) -> DoctorReport {
         }
         if frontend_protocol_wants_h2(fe.protocols) == 1 {
             if str_len(fe.tls_cert) == 0 {
-                builder_write(b, "ERROR  frontend ")
-                builder_write(b, fe.name)
-                builder_write(b, " declares h2 without TLS\n")
+                builder_write(b, f"ERROR  frontend {fe.name} declares h2 without TLS\n")
                 builder_write(b, "  fix:  configure tls_cert and tls_key for HTTP/2 ALPN\n")
                 errors = errors + 1
             }
         }
         if frontend_protocol_wants_h3(fe.protocols) == 1 {
             if str_len(fe.tls_cert) == 0 {
-                builder_write(b, "ERROR  frontend ")
-                builder_write(b, fe.name)
-                builder_write(b, " declares h3 without TLS\n")
+                builder_write(b, f"ERROR  frontend {fe.name} declares h3 without TLS\n")
                 builder_write(b, "  fix:  configure tls_cert and tls_key for HTTP/3/QUIC\n")
                 errors = errors + 1
             } else {
                 if h3_server_available() == 0 {
-                    builder_write(b, "ERROR  frontend ")
-                    builder_write(b, fe.name)
-                    builder_write(b, " declares h3, but this build has no HTTP/3/QUIC backend\n")
+                    builder_write(b, f"ERROR  frontend {fe.name} declares h3, but this build has no HTTP/3/QUIC backend\n")
                     builder_write(b, "  fix:  rebuild Mako/Leba with quiche linked (MAKO_QUICHE_ROOT)\n")
                     errors = errors + 1
                 }
@@ -364,55 +308,40 @@ fn doctor_world(w: World) -> DoctorReport {
         }
         if str_len(fe.tls_cert) > 0 {
             if str_len(fe.tls_key) == 0 {
-                builder_write(b, "ERROR  frontend ")
-                builder_write(b, fe.name)
-                builder_write(b, " has tls_cert but no tls_key\n")
+                builder_write(b, f"ERROR  frontend {fe.name} has tls_cert but no tls_key\n")
                 errors = errors + 1
             } else {
                 if tls_server_available() == 0 {
-                    builder_write(b, "ERROR  frontend ")
-                    builder_write(b, fe.name)
-                    builder_write(b, " configures TLS, but this build has no TLS server backend\n")
+                    builder_write(b, f"ERROR  frontend {fe.name} configures TLS, but this build has no TLS server backend\n")
                     errors = errors + 1
                 }
                 let cert = read_file(fe.tls_cert)
                 let key = read_file(fe.tls_key)
                 if str_eq(cert, "") {
-                    builder_write(b, "ERROR  tls_cert not readable: ")
-                    builder_write(b, fe.tls_cert)
-                    builder_write(b, "\n")
+                    builder_write(b, f"ERROR  tls_cert not readable: {fe.tls_cert}\n")
                     errors = errors + 1
                 }
                 if str_eq(key, "") {
-                    builder_write(b, "ERROR  tls_key not readable: ")
-                    builder_write(b, fe.tls_key)
-                    builder_write(b, "\n")
+                    builder_write(b, f"ERROR  tls_key not readable: {fe.tls_key}\n")
                     errors = errors + 1
                 }
                 if str_len(fe.tls_client_ca) > 0 {
                     let client_ca = read_file(fe.tls_client_ca)
                     if str_eq(client_ca, "") {
-                        builder_write(b, "ERROR  tls_client_ca not readable: ")
-                        builder_write(b, fe.tls_client_ca)
-                        builder_write(b, "\n")
+                        builder_write(b, f"ERROR  tls_client_ca not readable: {fe.tls_client_ca}\n")
                         errors = errors + 1
                     } else {
-                        builder_write(b, "INFO   frontend ")
-                        builder_write(b, fe.name)
-                        builder_write(b, " mTLS enabled (client certificates required)\n")
+                        builder_write(b, f"INFO   frontend {fe.name} mTLS enabled (client certificates required)\n")
                     }
                 }
             }
         }
         if str_len(fe.tls_key) > 0 {
             if str_len(fe.tls_cert) == 0 {
-                builder_write(b, "ERROR  frontend ")
-                builder_write(b, fe.name)
-                builder_write(b, " has tls_key but no tls_cert\n")
+                builder_write(b, f"ERROR  frontend {fe.name} has tls_key but no tls_cert\n")
                 errors = errors + 1
             }
         }
-        fi = fi + 1
     }
 
     if has_stats_frontend == 1 {
@@ -421,9 +350,7 @@ fn doctor_world(w: World) -> DoctorReport {
             builder_write(b, "  fix:  add `auth user:strong-password:admin` or `admin_user user pass role` under the stats frontend\n")
             warnings = warnings + 1
         } else {
-            let mut ui = 0
-            while ui < len(w.admin_users) {
-                let au = w.admin_users[ui]
+            for _, au in range w.admin_users {
                 if stats_auth_placeholder(au.user, au.pass) == 1 {
                     builder_write(b, "WARN   stats auth uses placeholder/demo credentials\n")
                     builder_write(b, "  fix:  replace stats credentials before exposing the admin port\n")
@@ -435,143 +362,86 @@ fn doctor_world(w: World) -> DoctorReport {
                     warnings = warnings + 1
                 }
                 if admin_hash_shape_ok(au.pass_hash) == 0 {
-                    builder_write(b, "ERROR  admin user ")
-                    builder_write(b, au.user)
-                    builder_write(b, " has malformed password hash\n")
+                    builder_write(b, f"ERROR  admin user {au.user} has malformed password hash\n")
                     builder_write(b, "  fix:  use `leba admin hash-password PASSWORD` and store the generated hash\n")
                     errors = errors + 1
                 }
                 if doctor_admin_role_known(au.role) == 0 {
-                    builder_write(b, "ERROR  admin user ")
-                    builder_write(b, au.user)
-                    builder_write(b, " has unknown role `")
-                    builder_write(b, au.role)
-                    builder_write(b, "`\n")
+                    builder_write(b, f"ERROR  admin user {au.user} has unknown role `{au.role}`\n")
                     builder_write(b, "  fix:  use role viewer | operator | admin\n")
                     errors = errors + 1
                 }
-                ui = ui + 1
             }
         }
     }
 
     // routes point to real backends; empty match values are dangerous
-    let mut ri = 0
-    while ri < len(w.routes) {
-        let r = w.routes[ri]
+    for _, r in range w.routes {
         if not str_eq(r.backend, "") {
             if backend_exists(w.backends, r.backend) == 0 {
-                builder_write(b, "ERROR  route on frontend ")
-                builder_write(b, r.frontend)
-                builder_write(b, " points to unknown backend `")
-                builder_write(b, r.backend)
-                builder_write(b, "`\n")
-                builder_write(b, "  fix:  define `backend ")
-                builder_write(b, r.backend)
-                builder_write(b, "` or fix the route target\n")
+                builder_write(b, f"ERROR  route on frontend {r.frontend} points to unknown backend `{r.backend}`\n")
+                builder_write(b, f"  fix:  define `backend {r.backend}` or fix the route target\n")
                 errors = errors + 1
             }
         }
         if str_eq(r.kind, "path_prefix") {
             if str_eq(r.value, "") {
-                builder_write(b, "ERROR  route path_prefix on ")
-                builder_write(b, r.frontend)
-                builder_write(b, " has empty match (would match nothing; refuse silent footgun)\n")
+                builder_write(b, f"ERROR  route path_prefix on {r.frontend} has empty match (would match nothing; refuse silent footgun)\n")
                 errors = errors + 1
             }
         }
-        ri = ri + 1
     }
 
-    let mut ai = 0
-    while ai < len(w.acls) {
-        let a = w.acls[ai]
+    for _, a in range w.acls {
         if str_eq(a.kind, "path_prefix") {
             if str_eq(a.value, "") {
-                builder_write(b, "ERROR  ACL path_prefix on ")
-                builder_write(b, a.frontend)
-                builder_write(b, " has empty match value\n")
+                builder_write(b, f"ERROR  ACL path_prefix on {a.frontend} has empty match value\n")
                 errors = errors + 1
             }
         }
-        ai = ai + 1
     }
 
-    let mut bi = 0
-    while bi < len(w.backends) {
-        let be = w.backends[bi]
+    for _, be in range w.backends {
         if not str_eq(be.servers_file, "") {
-            builder_write(b, "INFO   backend ")
-            builder_write(b, be.name)
-            builder_write(b, " loads servers_file ")
-            builder_write(b, be.servers_file)
-            builder_write(b, "\n")
+            builder_write(b, f"INFO   backend {be.name} loads servers_file {be.servers_file}\n")
         }
         if balance_known(be.balance) == 0 {
-            builder_write(b, "ERROR  backend ")
-            builder_write(b, be.name)
-            builder_write(b, " unknown balance `")
-            builder_write(b, be.balance)
-            builder_write(b, "`\n")
-                    builder_write(b, "  fix:  round_robin | least_conn | ip_hash | sip_call_id | weighted | random\n")
+            builder_write(b, f"ERROR  backend {be.name} unknown balance `{be.balance}`\n")
+            builder_write(b, "  fix:  round_robin | least_conn | ip_hash | sip_call_id | weighted | random\n")
             errors = errors + 1
         }
         let sc = server_count(w.servers, be.name)
         if sc == 0 {
-            builder_write(b, "ERROR  backend ")
-            builder_write(b, be.name)
-            builder_write(b, " has zero servers\n")
+            builder_write(b, f"ERROR  backend {be.name} has zero servers\n")
             builder_write(b, "  fix:  server name 127.0.0.1:8080 weight 100 check\n")
             errors = errors + 1
         }
         if sc == 1 {
-            builder_write(b, "WARN   backend ")
-            builder_write(b, be.name)
-            builder_write(b, " has only 1 server (no HA)\n")
+            builder_write(b, f"WARN   backend {be.name} has only 1 server (no HA)\n")
             warnings = warnings + 1
         }
         if be.health_interval_ms < 100 {
-            builder_write(b, "WARN   backend ")
-            builder_write(b, be.name)
-            builder_write(b, " health_interval < 100ms (noisy)\n")
+            builder_write(b, f"WARN   backend {be.name} health_interval < 100ms (noisy)\n")
             warnings = warnings + 1
         }
-        bi = bi + 1
     }
 
-    let mut si = 0
-    while si < len(w.servers) {
-        let s = w.servers[si]
+    for _, s in range w.servers {
         if s.port <= 0 {
-            builder_write(b, "ERROR  server ")
-            builder_write(b, s.backend)
-            builder_write(b, "/")
-            builder_write(b, s.name)
-            builder_write(b, " invalid port\n")
+            builder_write(b, f"ERROR  server {s.backend}/{s.name} invalid port\n")
             errors = errors + 1
         }
         if s.weight <= 0 {
-            builder_write(b, "WARN   server ")
-            builder_write(b, s.name)
-            builder_write(b, " weight <= 0 (will rarely be picked)\n")
+            builder_write(b, f"WARN   server {s.name} weight <= 0 (will rarely be picked)\n")
             warnings = warnings + 1
         }
         if backend_exists(w.backends, s.backend) == 0 {
-            builder_write(b, "ERROR  server ")
-            builder_write(b, s.name)
-            builder_write(b, " belongs to unknown backend `")
-            builder_write(b, s.backend)
-            builder_write(b, "`\n")
+            builder_write(b, f"ERROR  server {s.name} belongs to unknown backend `{s.backend}`\n")
             errors = errors + 1
         }
-        si = si + 1
     }
 
-    builder_write(b, "\nSummary: ")
-    builder_write(b, int_to_string(errors))
-    builder_write(b, " error(s), ")
-    builder_write(b, int_to_string(warnings))
-    builder_write(b, " warning(s)\n")
+    builder_write(b, f"\nSummary: {errors} error(s), {warnings} warning(s)\n")
     if errors == 0 {
         builder_write(b, "Result: PASS — safe to run\n")
     } else {
@@ -601,33 +471,25 @@ fn explain_request(
     let mut fe_name = frontend_name
     let mut fe = frontend_new("")
     let mut found = 0
-    let mut i = 0
-    while i < len(w.frontends) {
+    for _, f in range w.frontends {
         if str_eq(fe_name, "") {
-            if str_eq(w.frontends[i].mode, "http") {
-                fe = w.frontends[i]
+            if str_eq(f.mode, "http") {
+                fe = f
                 fe_name = fe.name
                 found = 1
             }
         } else {
-            if str_eq(w.frontends[i].name, fe_name) {
-                fe = w.frontends[i]
+            if str_eq(f.name, fe_name) {
+                fe = f
                 found = 1
             }
         }
-        i = i + 1
     }
 
     let mut b = str_builder()
     builder_write(b, "Leba explain — request dry-run\n")
     builder_write(b, "==============================\n")
-    builder_write(b, "input:  ")
-    builder_write(b, method)
-    builder_write(b, " ")
-    builder_write(b, path)
-    builder_write(b, " host=")
-    builder_write(b, host)
-    builder_write(b, "\n")
+    builder_write(b, f"input:  {method} {path} host={host}\n")
 
     if found == 0 {
         builder_write(b, "result: no http frontend found\n")
@@ -647,15 +509,7 @@ fn explain_request(
         }
     }
 
-    builder_write(b, "frontend: ")
-    builder_write(b, fe.name)
-    builder_write(b, " ")
-    builder_write(b, fe.bind_host)
-    builder_write(b, ":")
-    builder_write(b, int_to_string(fe.bind_port))
-    builder_write(b, " mode=")
-    builder_write(b, fe.mode)
-    builder_write(b, "\n")
+    builder_write(b, f"frontend: {fe.name} {fe.bind_host}:{fe.bind_port} mode={fe.mode}\n")
 
     let denied = acl_decide(w.acls, fe.name, path, host, method)
     if denied == 1 {
@@ -679,9 +533,7 @@ fn explain_request(
     builder_write(b, "acl:    allow\n")
 
     let be_name = select_backend(w.routes, fe.name, path, host, fe.backend)
-    builder_write(b, "route:  -> backend `")
-    builder_write(b, be_name)
-    builder_write(b, "`\n")
+    builder_write(b, f"route:  -> backend `{be_name}`\n")
 
     if str_eq(be_name, "") {
         builder_write(b, "result: 503 no backend matched\n")
@@ -702,14 +554,12 @@ fn explain_request(
     }
 
     let mut be = backend_new(be_name)
-    let mut bi = 0
     let mut be_found = 0
-    while bi < len(w.backends) {
-        if str_eq(w.backends[bi].name, be_name) {
-            be = w.backends[bi]
+    for _, candidate in range w.backends {
+        if str_eq(candidate.name, be_name) {
+            be = candidate
             be_found = 1
         }
-        bi = bi + 1
     }
     if be_found == 0 {
         builder_write(b, "result: 503 unknown backend\n")
@@ -729,22 +579,13 @@ fn explain_request(
         }
     }
 
-    builder_write(b, "balance: ")
-    builder_write(b, be.balance)
-    builder_write(b, "\n")
+    builder_write(b, f"balance: {be.balance}\n")
 
     // list candidates
     builder_write(b, "servers:\n")
-    let mut si = 0
-    while si < len(w.servers) {
-        let s = w.servers[si]
+    for _, s in range w.servers {
         if str_eq(s.backend, be_name) {
-            builder_write(b, "  - ")
-            builder_write(b, s.name)
-            builder_write(b, " ")
-            builder_write(b, join_host_port(s.host, s.port))
-            builder_write(b, " weight=")
-            builder_write(b, int_to_string(s.weight))
+            builder_write(b, f"  - {s.name} {join_host_port(s.host, s.port)} weight={s.weight}")
             if s.alive == 1 {
                 builder_write(b, " UP")
             } else {
@@ -755,7 +596,6 @@ fn explain_request(
             }
             builder_write(b, "\n")
         }
-        si = si + 1
     }
 
     let pick = pick_server(w.servers, be, host, fe.sticky_cookie, "")
@@ -779,18 +619,8 @@ fn explain_request(
     }
 
     let s = w.servers[pick]
-    builder_write(b, "pick:   ")
-    builder_write(b, s.name)
-    builder_write(b, " @ ")
-    builder_write(b, join_host_port(s.host, s.port))
-    builder_write(b, "\n")
-    builder_write(b, "result: would proxy ")
-    builder_write(b, method)
-    builder_write(b, " ")
-    builder_write(b, path)
-    builder_write(b, " -> ")
-    builder_write(b, http_url(s.host, s.port, path))
-    builder_write(b, "\n")
+    builder_write(b, f"pick:   {s.name} @ {join_host_port(s.host, s.port)}\n")
+    builder_write(b, f"result: would proxy {method} {path} -> {http_url(s.host, s.port, path)}\n")
 
     return ExplainResult {
         frontend: fe.name,
@@ -822,38 +652,16 @@ fn access_log_line(
     span_id: string
 ) -> string {
     let mut b = str_builder()
-    builder_write(b, "[access] id=")
-    builder_write(b, req_id)
-    builder_write(b, " ")
-    builder_write(b, method)
-    builder_write(b, " ")
-    builder_write(b, path)
-    builder_write(b, " status=")
-    builder_write(b, int_to_string(status))
-    builder_write(b, " be=")
-    builder_write(b, backend)
-    builder_write(b, " srv=")
-    builder_write(b, server)
-    builder_write(b, " t=")
-    builder_write(b, int_to_string(latency_ms))
-    builder_write(b, "ms bytes=")
-    builder_write(b, int_to_string(bytes_out))
+    builder_write(b, f"[access] id={req_id} {method} {path} status={status} be={backend} srv={server} t={latency_ms}ms bytes={bytes_out}")
     if not str_eq(trace_id, "") {
-        builder_write(b, " trace=")
-        builder_write(b, trace_id)
+        builder_write(b, f" trace={trace_id}")
     }
     if not str_eq(span_id, "") {
-        builder_write(b, " span=")
-        builder_write(b, span_id)
+        builder_write(b, f" span={span_id}")
     }
     return builder_string(b)
 }
 
 fn make_req_id() -> string {
-    let mut b = str_builder()
-    builder_write(b, "lb")
-    builder_write(b, int_to_string(now_ms() % 1000000000))
-    builder_write(b, "r")
-    builder_write(b, int_to_string(rand_intn(100000)))
-    return builder_string(b)
+    return f"lb{now_ms() % 1000000000}r{rand_intn(100000)}"
 }

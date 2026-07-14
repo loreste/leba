@@ -1011,38 +1011,19 @@ fn parse_raw_request(raw: string) -> RawRequest {
 
 fn pack_done_retry(err: int, status: int, si: int, bytes: int, retries: int) -> int {
     let mut e = 0
-    if err != 0 {
-        e = 1
-    }
+    if err != 0 { e = 1 }
     let mut st = status
-    if st < 0 {
-        st = 0
-    }
-    if st > 999 {
-        st = 999
-    }
+    if st < 0 { st = 0 }
+    if st > 999 { st = 999 }
     let mut six = si + 1
-    if six < 0 {
-        six = 0
-    }
-    if six > 4095 {
-        six = 4095
-    }
+    if six < 0 { six = 0 }
+    if six > 4095 { six = 4095 }
     let mut b = bytes
-    if b < 0 {
-        b = 0
-    }
-    if b > 50000000 {
-        b = 50000000
-    }
+    if b < 0 { b = 0 }
+    if b > 50000000 { b = 50000000 }
     let mut r = retries
-    if r < 0 {
-        r = 0
-    }
-    if r > 1000 {
-        r = 1000
-    }
-    // e | status*2 | (si+1)*2000 | bytes*2000*4096 | retries*retry_base
+    if r < 0 { r = 0 }
+    if r > 1000 { r = 1000 }
     return e + st * 2 + six * 2000 + b * 8192000 + r * 409600008192000
 }
 
@@ -1050,26 +1031,11 @@ fn pack_done(err: int, status: int, si: int, bytes: int) -> int {
     return pack_done_retry(err, status, si, bytes, 0)
 }
 
-fn unpack_done_err(v: int) -> int {
-    return v % 2
-}
-
-fn unpack_done_status(v: int) -> int {
-    return (v / 2) % 1000
-}
-
-fn unpack_done_si(v: int) -> int {
-    let six = (v / 2000) % 4096
-    return six - 1
-}
-
-fn unpack_done_bytes(v: int) -> int {
-    return (v / 8192000) % 50000001
-}
-
-fn unpack_done_retries(v: int) -> int {
-    return v / 409600008192000
-}
+fn unpack_done_err(v: int) -> int { return v % 2 }
+fn unpack_done_status(v: int) -> int { return (v / 2) % 1000 }
+fn unpack_done_si(v: int) -> int { let six = (v / 2000) % 4096; return six - 1 }
+fn unpack_done_bytes(v: int) -> int { return (v / 8192000) % 50000001 }
+fn unpack_done_retries(v: int) -> int { return v / 409600008192000 }
 
 fn find_backend(backends: []Backend, name: string) -> int {
     let mut i = 0
@@ -2490,18 +2456,7 @@ fn worker_tcp_upstream(
     }
     if access_log == 1 {
         let rid = make_req_id()
-        let mut line = str_builder()
-        builder_write(line, "[access] id=")
-        builder_write(line, rid)
-        builder_write(line, " TCP frontend=")
-        builder_write(line, frontend)
-        builder_write(line, " upstream=")
-        builder_write(line, host)
-        builder_write(line, ":")
-        builder_write(line, int_to_string(port))
-        builder_write(line, " bytes=")
-        builder_write(line, int_to_string(bytes))
-        print(builder_string(line))
+        print(f"[access] id={rid} TCP frontend={frontend} upstream={host}:{port} bytes={bytes}")
     }
     let _ = done.send(pack_done(err, 200, server_idx, bytes))
     let _ = slots.send(1)

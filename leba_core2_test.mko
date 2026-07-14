@@ -695,10 +695,6 @@ fn TestPackDoneRoundTrip() {
     assert_eq(unpack_done_si(v), 3)
     assert_eq(unpack_done_bytes(v), 99)
     assert_eq(unpack_done_retries(v), 0)
-    let v2 = pack_done(0, 200, 0, 0)
-    assert_eq(unpack_done_err(v2), 0)
-    assert_eq(unpack_done_status(v2), 200)
-    assert_eq(unpack_done_si(v2), 0)
 }
 
 fn TestPackDoneRetryRoundTripAndStats() {

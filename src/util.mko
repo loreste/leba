@@ -69,11 +69,7 @@ fn admin_kdf_hash(pass: string, salt: string, iterations: int) -> string {
     let mut out = hmac_sha256(pass, salt)
     let mut i = 1
     while i < n {
-        let mut msg = str_builder()
-        builder_write(msg, salt)
-        builder_write(msg, ":")
-        builder_write(msg, out)
-        out = hmac_sha256(pass, builder_string(msg))
+        out = hmac_sha256(pass, f"{salt}:{out}")
         i = i + 1
     }
     return out
@@ -123,38 +119,21 @@ fn parse_host_port(addr: string) -> HostPort {
 }
 
 fn join_host_port(host: string, port: int) -> string {
-    let mut b = str_builder()
-    builder_write(b, host)
-    builder_write(b, ":")
-    builder_write(b, int_to_string(port))
-    return builder_string(b)
+    return f"{host}:{port}"
 }
 
 fn join_user_pass(user: string, pass: string) -> string {
-    let mut b = str_builder()
-    builder_write(b, user)
-    builder_write(b, ":")
-    builder_write(b, pass)
-    return builder_string(b)
+    return f"{user}:{pass}"
 }
 
 fn http_url(host: string, port: int, path: string) -> string {
-    let mut b = str_builder()
-    builder_write(b, "http://")
-    builder_write(b, host)
-    builder_write(b, ":")
-    builder_write(b, int_to_string(port))
     if str_eq(path, "") {
-        builder_write(b, "/")
-    } else {
-        if str_has_prefix(path, "/") {
-            builder_write(b, path)
-        } else {
-            builder_write(b, "/")
-            builder_write(b, path)
-        }
+        return f"http://{host}:{port}/"
     }
-    return builder_string(b)
+    if str_has_prefix(path, "/") {
+        return f"http://{host}:{port}{path}"
+    }
+    return f"http://{host}:{port}/{path}"
 }
 
 fn path_only(path: string) -> string {
@@ -214,16 +193,14 @@ fn cookie_get(cookie_hdr: string, name: string) -> string {
         return ""
     }
     let parts = str_split(cookie_hdr, ";")
-    let mut i = 0
-    while i < len(parts) {
-        let p = str_trim_space(parts[i])
+    for _, part in range parts {
+        let p = str_trim_space(part)
         let cut = str_cut(p, "=")
         if len(cut) >= 2 {
             if str_eq(str_trim_space(cut[0]), name) {
                 return str_trim_space(cut[1])
             }
         }
-        i = i + 1
     }
     return ""
 }
@@ -261,23 +238,15 @@ fn now() -> int {
 }
 
 fn log_info(msg: string) {
-    let mut b = str_builder()
-    builder_write(b, "[leba] ")
-    builder_write(b, msg)
-    print(builder_string(b))
+    print(f"[leba] {msg}")
 }
 
 fn log_event(level: string, event: string, detail: string) {
-    let mut b = str_builder()
-    builder_write(b, "[leba] level=")
-    builder_write(b, level)
-    builder_write(b, " event=")
-    builder_write(b, event)
     if not str_eq(detail, "") {
-        builder_write(b, " ")
-        builder_write(b, detail)
+        print(f"[leba] level={level} event={event} {detail}")
+    } else {
+        print(f"[leba] level={level} event={event}")
     }
-    print(builder_string(b))
 }
 
 fn log_info_event(event: string, detail: string) {
@@ -293,10 +262,5 @@ fn log_error_event(event: string, detail: string) {
 }
 
 fn log_kv(key: string, val: string) {
-    let mut b = str_builder()
-    builder_write(b, "[leba] ")
-    builder_write(b, key)
-    builder_write(b, "=")
-    builder_write(b, val)
-    print(builder_string(b))
+    print(f"[leba] {key}={val}")
 }

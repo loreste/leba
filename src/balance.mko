@@ -3,12 +3,10 @@ pack balance
 
 fn server_indices_for(servers: []Server, backend: string) -> []int {
     let mut out = make([]int, 0, 8)
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, backend) {
+    for i, s in range servers {
+        if str_eq(s.backend, backend) {
             out = append(out, i)
         }
-        i = i + 1
     }
     return out
 }
@@ -18,51 +16,43 @@ fn server_indices_for(servers: []Server, backend: string) -> []int {
 // alter indices — only add/remove does).
 fn server_build_index(servers: []Server) -> map[string][]int {
     let mut idx = make(map[string][]int)
-    let mut i = 0
-    while i < len(servers) {
-        let be = servers[i].backend
+    for i, s in range servers {
+        let be = s.backend
         let mut cur = idx[be]
         cur = append(cur, i)
         idx[be] = cur
-        i = i + 1
     }
     return idx
 }
 
 fn count_alive(servers: []Server, idxs: []int) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(idxs) {
-        let s = servers[idxs[i]]
+    for _, idx in range idxs {
+        let s = servers[idx]
         // alive and not draining
         if s.alive == 1 {
             if s.drain == 0 {
                 n = n + 1
             }
         }
-        i = i + 1
     }
     return n
 }
 
 fn backend_conn_count(servers: []Server, backend: string) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, backend) {
-            n = n + servers[i].conns
+    for _, s in range servers {
+        if str_eq(s.backend, backend) {
+            n = n + s.conns
         }
-        i = i + 1
     }
     return n
 }
 
 fn total_conn_count(servers: []Server) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(servers) {
-        n = n + servers[i].conns
-        i = i + 1
+    for _, s in range servers {
+        n = n + s.conns
     }
     return n
 }
@@ -119,15 +109,12 @@ fn pick_server(
     // Sticky cookie: value is server name (must be eligible — never stick to DRAIN/DOWN)
     if not str_eq(sticky_name, "") {
         if not str_eq(sticky_val, "") {
-            let mut i = 0
-            while i < len(idxs) {
-                let si = idxs[i]
+            for _, si in range idxs {
                 if str_eq(servers[si].name, sticky_val) {
                     if server_eligible(servers[si]) == 1 {
                         return si
                     }
                 }
-                i = i + 1
             }
             // sticky target unusable — fall through to normal pick
         }
@@ -138,13 +125,10 @@ fn pick_server(
     // pure DRAIN of all members fails closed (502) so deploys can empty a pool.
     let alive_n = count_alive(servers, idxs)
     let mut pool = make([]int, 0, len(idxs))
-    let mut j = 0
-    while j < len(idxs) {
-        let si = idxs[j]
+    for _, si in range idxs {
         if server_eligible(servers[si]) == 1 {
             pool = append(pool, si)
         }
-        j = j + 1
     }
     if len(pool) == 0 {
         // Fail closed when only DRAIN members remain (deploy empty pool).
@@ -154,86 +138,79 @@ fn pick_server(
     }
 
     let algo = be.balance
-    if str_eq(algo, "random") {
-        let r = rand_intn(len(pool))
-        return pool[r]
-    }
-
-    if str_eq(algo, "ip_hash") {
-        let h = hash_str(client_key)
-        let idx = h % len(pool)
-        return pool[idx]
-    }
-
-    if str_eq(algo, "sip_call_id") {
-        let h = hash_str(client_key)
-        let idx = h % len(pool)
-        return pool[idx]
-    }
-
-    if str_eq(algo, "least_conn") {
-        let mut best = pool[0]
-        let mut best_c = servers[best].conns
-        let mut k = 1
-        while k < len(pool) {
-            let si = pool[k]
-            if servers[si].conns < best_c {
-                best = si
-                best_c = servers[si].conns
-            } else {
-                if servers[si].conns == best_c {
-                    // tie-break by weight (higher preferred)
-                    if servers[si].weight > servers[best].weight {
-                        best = si
-                        best_c = servers[si].conns
+    match algo {
+        "random" => {
+            let r = rand_intn(len(pool))
+            return pool[r]
+        }
+        "ip_hash" => {
+            let h = hash_str(client_key)
+            let idx = h % len(pool)
+            return pool[idx]
+        }
+        "sip_call_id" => {
+            let h = hash_str(client_key)
+            let idx = h % len(pool)
+            return pool[idx]
+        }
+        "least_conn" => {
+            let mut best = pool[0]
+            let mut best_c = servers[best].conns
+            for _, si in range pool {
+                if servers[si].conns < best_c {
+                    best = si
+                    best_c = servers[si].conns
+                } else {
+                    if servers[si].conns == best_c {
+                        // tie-break by weight (higher preferred)
+                        if servers[si].weight > servers[best].weight {
+                            best = si
+                            best_c = servers[si].conns
+                        }
                     }
                 }
             }
-            k = k + 1
+            return best
         }
-        return best
-    }
-
-    if str_eq(algo, "weighted") {
-        // weighted random
-        let mut total = 0
-        let mut k = 0
-        while k < len(pool) {
-            let w = servers[pool[k]].weight
-            if w < 1 {
-                total = total + 1
-            } else {
-                total = total + w
+        "weighted" => {
+            // weighted random
+            let mut total = 0
+            for _, si in range pool {
+                let w = servers[si].weight
+                if w < 1 {
+                    total = total + 1
+                } else {
+                    total = total + w
+                }
             }
-            k = k + 1
-        }
-        if total < 1 {
-            total = 1
-        }
-        let mut r = rand_intn(total)
-        k = 0
-        while k < len(pool) {
-            let mut w = servers[pool[k]].weight
-            if w < 1 {
-                w = 1
+            if total < 1 {
+                total = 1
             }
-            if r < w {
-                return pool[k]
+            let mut r = rand_intn(total)
+            for _, si in range pool {
+                let mut w = servers[si].weight
+                if w < 1 {
+                    w = 1
+                }
+                if r < w {
+                    return si
+                }
+                r = r - w
             }
-            r = r - w
-            k = k + 1
+            return pool[len(pool) - 1]
         }
-        return pool[len(pool) - 1]
+        _ => {
+            // round_robin (default) — weighted smooth-ish: skip by cycling
+            let mut start = be.rr_idx % len(pool)
+            if start < 0 {
+                start = 0
+            }
+            // prefer higher weight by multi-slot expansion conceptually:
+            // simple RR for base; weighted handled above
+            return pool[start]
+        }
     }
-
-    // round_robin (default) — weighted smooth-ish: skip by cycling
-    let mut start = be.rr_idx % len(pool)
-    if start < 0 {
-        start = 0
-    }
-    // prefer higher weight by multi-slot expansion conceptually:
-    // simple RR for base; weighted handled above
-    return pool[start]
+    return -1
 }
 
 fn next_rr(be: Backend) -> Backend {

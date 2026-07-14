@@ -65,104 +65,40 @@ fn apply_frontend_bind(fe: Frontend, raw: string) -> Frontend {
 
 fn apply_defaults_kv(d: Defaults, key: string, val: string) -> Defaults {
     let mut out = d
-    if str_eq(key, "timeout_client") {
-        out.timeout_client_ms = parse_duration_ms(val)
-    } else {
-        if str_eq(key, "timeout_client_ms") {
-            out.timeout_client_ms = to_int(val)
-        } else {
-            if str_eq(key, "timeout_server") {
-                out.timeout_server_ms = parse_duration_ms(val)
-            } else {
-                if str_eq(key, "timeout_server_ms") {
-                    out.timeout_server_ms = to_int(val)
-                } else {
-                    if str_eq(key, "timeout_connect") {
-                        out.timeout_connect_ms = parse_duration_ms(val)
-                    } else {
-                        if str_eq(key, "timeout_connect_ms") {
-                            out.timeout_connect_ms = to_int(val)
-                        } else {
-                            if str_eq(key, "maxconn") {
-                                out.maxconn = to_int(val)
-                            } else {
-                                if str_eq(key, "retries") {
-                                    out.retries = to_int(val)
-                                } else {
-                                if str_eq(key, "workers") {
-                                    out.workers = to_int(val)
-                                } else {
-                                    if str_eq(key, "request_body_limit") {
-                                        out.request_body_limit_bytes = parse_size_bytes(val)
-                                    } else {
-                                        if str_eq(key, "request_body_limit_bytes") {
-                                            out.request_body_limit_bytes = to_int(val)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        }
-                    }
-                }
-            }
-        }
+    match key {
+        "timeout_client" => { out.timeout_client_ms = parse_duration_ms(val) },
+        "timeout_client_ms" => { out.timeout_client_ms = to_int(val) },
+        "timeout_server" => { out.timeout_server_ms = parse_duration_ms(val) },
+        "timeout_server_ms" => { out.timeout_server_ms = to_int(val) },
+        "timeout_connect" => { out.timeout_connect_ms = parse_duration_ms(val) },
+        "timeout_connect_ms" => { out.timeout_connect_ms = to_int(val) },
+        "maxconn" => { out.maxconn = to_int(val) },
+        "retries" => { out.retries = to_int(val) },
+        "workers" => { out.workers = to_int(val) },
+        "request_body_limit" => { out.request_body_limit_bytes = parse_size_bytes(val) },
+        "request_body_limit_bytes" => { out.request_body_limit_bytes = to_int(val) },
+        _ => {}
     }
     return out
 }
 
 fn apply_backend_kv(b: Backend, key: string, val: string) -> Backend {
     let mut out = b
-    if str_eq(key, "balance") {
-        out.balance = val
-    } else {
-        if str_eq(key, "servers_file") {
-            out.servers_file = val
-        } else {
-            if str_eq(key, "health_path") {
-                out.health_path = val
-            } else {
-                if str_eq(key, "health_interval") {
-                    out.health_interval_ms = parse_duration_ms(val)
-                } else {
-                    if str_eq(key, "health_interval_ms") {
-                        out.health_interval_ms = to_int(val)
-                    } else {
-                        if str_eq(key, "health_timeout") {
-                            out.health_timeout_ms = parse_duration_ms(val)
-                        } else {
-                            if str_eq(key, "health_timeout_ms") {
-                                out.health_timeout_ms = to_int(val)
-                            } else {
-                                if str_eq(key, "health_rise") {
-                                    out.health_rise = to_int(val)
-                                } else {
-                                    if str_eq(key, "health_fall") {
-                                        out.health_fall = to_int(val)
-                                    } else {
-                                        if str_eq(key, "connect_timeout") {
-                                            out.connect_timeout_ms = parse_duration_ms(val)
-                                        } else {
-                                            if str_eq(key, "connect_timeout_ms") {
-                                                out.connect_timeout_ms = to_int(val)
-                                            } else {
-                                                if str_eq(key, "maxconn") {
-                                                    out.maxconn = to_int(val)
-                                                } else {
-                                                    if str_eq(key, "retries") {
-                                                        out.retries = to_int(val)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    match key {
+        "balance" => { out.balance = val },
+        "servers_file" => { out.servers_file = val },
+        "health_path" => { out.health_path = val },
+        "health_interval" => { out.health_interval_ms = parse_duration_ms(val) },
+        "health_interval_ms" => { out.health_interval_ms = to_int(val) },
+        "health_timeout" => { out.health_timeout_ms = parse_duration_ms(val) },
+        "health_timeout_ms" => { out.health_timeout_ms = to_int(val) },
+        "health_rise" => { out.health_rise = to_int(val) },
+        "health_fall" => { out.health_fall = to_int(val) },
+        "connect_timeout" => { out.connect_timeout_ms = parse_duration_ms(val) },
+        "connect_timeout_ms" => { out.connect_timeout_ms = to_int(val) },
+        "maxconn" => { out.maxconn = to_int(val) },
+        "retries" => { out.retries = to_int(val) },
+        _ => {}
     }
     return out
 }
@@ -214,23 +150,19 @@ fn world_new() -> World {
 }
 
 fn find_backend_idx(backends: []Backend, name: string) -> int {
-    let mut i = 0
-    while i < len(backends) {
-        if str_eq(backends[i].name, name) {
+    for i, be in range backends {
+        if str_eq(be.name, name) {
             return i
         }
-        i = i + 1
     }
     return -1
 }
 
 fn find_frontend_idx(frontends: []Frontend, name: string) -> int {
-    let mut i = 0
-    while i < len(frontends) {
-        if str_eq(frontends[i].name, name) {
+    for i, fe in range frontends {
+        if str_eq(fe.name, name) {
             return i
         }
-        i = i + 1
     }
     return -1
 }
@@ -290,10 +222,8 @@ fn parse_servers_file_line(fields: []string, backend: string) -> Server {
     }
     let mut sf = make([]string, 0, len(fields) + 1)
     sf = append(sf, "server")
-    let mut i = 0
-    while i < len(fields) {
-        sf = append(sf, fields[i])
-        i = i + 1
+    for i, f in range fields {
+        sf = append(sf, f)
     }
     return parse_server_line(sf, backend)
 }
@@ -317,12 +247,7 @@ fn load_servers_file_into(w: World, backend: string, file_path: string, base_dir
     let raw = read_file(full_path)
     if str_eq(raw, "") {
         out.ok = 0
-        let mut eb = str_builder()
-        builder_write(eb, "servers_file unreadable for backend ")
-        builder_write(eb, backend)
-        builder_write(eb, ": ")
-        builder_write(eb, full_path)
-        out.error = builder_string(eb)
+        out.error = f"servers_file unreadable for backend {backend}: {full_path}"
         return out
     }
     let lines = str_split(raw, "\n")
@@ -348,12 +273,7 @@ fn load_servers_file_into(w: World, backend: string, file_path: string, base_dir
         }
         if len(fields) < min_fields {
             out.ok = 0
-            let mut eb = str_builder()
-            builder_write(eb, "servers_file malformed line for backend ")
-            builder_write(eb, backend)
-            builder_write(eb, ": ")
-            builder_write(eb, clean)
-            out.error = builder_string(eb)
+            out.error = f"servers_file malformed line for backend {backend}: {clean}"
             return out
         }
         out.servers = append(out.servers, parse_servers_file_line(fields, backend))
@@ -363,29 +283,24 @@ fn load_servers_file_into(w: World, backend: string, file_path: string, base_dir
 
 fn load_all_servers_files(w: World, base_dir: string) -> World {
     let mut out = w
-    let mut bi = 0
-    while bi < len(out.backends) {
-        let be = out.backends[bi]
+    for bi, be in range out.backends {
         if not str_eq(be.servers_file, "") {
             out = load_servers_file_into(out, be.name, be.servers_file, base_dir)
             if out.ok == 0 {
                 return out
             }
         }
-        bi = bi + 1
     }
     return out
 }
 
 fn config_server_idx(servers: []Server, backend: string, name: string) -> int {
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, backend) {
-            if str_eq(servers[i].name, name) {
+    for i, s in range servers {
+        if str_eq(s.backend, backend) {
+            if str_eq(s.name, name) {
                 return i
             }
         }
-        i = i + 1
     }
     return -1
 }
@@ -418,23 +333,19 @@ fn preserve_server_runtime(s: Server, current: []Server) -> Server {
 }
 
 fn backend_timeout_for_pool(backends: []Backend, name: string) -> int {
-    let mut i = 0
-    while i < len(backends) {
-        if str_eq(backends[i].name, name) {
-            if backends[i].connect_timeout_ms > 0 {
-                return backends[i].connect_timeout_ms
+    for i, be in range backends {
+        if str_eq(be.name, name) {
+            if be.connect_timeout_ms > 0 {
+                return be.connect_timeout_ms
             }
         }
-        i = i + 1
     }
     return 5000
 }
 
 fn init_server_pools(servers: []Server, backends: []Backend) -> []Server {
     let mut out = servers
-    let mut i = 0
-    while i < len(out) {
-        let mut s = out[i]
+    for i, s in range out {
         if s.pool < 0 {
             let mut max = s.maxconn
             if max <= 0 {
@@ -445,10 +356,10 @@ fn init_server_pools(servers: []Server, backends: []Backend) -> []Server {
             }
             let timeout_ms = backend_timeout_for_pool(backends, s.backend)
             let p = tcp_pool_open(s.host, s.port, max, timeout_ms)
-            s.pool = p
-            out[i] = s
+            let mut ns = s
+            ns.pool = p
+            out[i] = ns
         }
-        i = i + 1
     }
     return out
 }
@@ -457,14 +368,9 @@ fn load_servers_file_list(backend: string, file_path: string, base_dir: string) 
     let full_path = resolve_servers_path(base_dir, file_path)
     let raw = read_file(full_path)
     if str_eq(raw, "") {
-        let mut eb = str_builder()
-        builder_write(eb, "servers_file unreadable for backend ")
-        builder_write(eb, backend)
-        builder_write(eb, ": ")
-        builder_write(eb, full_path)
         return ServersReload {
             ok: 0,
-            error: builder_string(eb),
+            error: f"servers_file unreadable for backend {backend}: {full_path}",
             servers: make([]Server, 0, 0),
             loaded: 0
         }
@@ -492,14 +398,9 @@ fn load_servers_file_list(backend: string, file_path: string, base_dir: string) 
             min_fields = 3
         }
         if len(fields) < min_fields {
-            let mut eb2 = str_builder()
-            builder_write(eb2, "servers_file malformed line for backend ")
-            builder_write(eb2, backend)
-            builder_write(eb2, ": ")
-            builder_write(eb2, clean)
             return ServersReload {
                 ok: 0,
-                error: builder_string(eb2),
+                error: f"servers_file malformed line for backend {backend}: {clean}",
                 servers: make([]Server, 0, 0),
                 loaded: 0
             }
@@ -517,16 +418,12 @@ fn load_servers_file_list(backend: string, file_path: string, base_dir: string) 
 fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string) -> ServersReload {
     let mut out = make([]Server, 0, len(current) + 8)
     let mut loaded_total = 0
-    let mut bi = 0
-    while bi < len(backends) {
-        let be = backends[bi]
+    for bi, be in range backends {
         if str_eq(be.servers_file, "") {
-            let mut ci = 0
-            while ci < len(current) {
-                if str_eq(current[ci].backend, be.name) {
-                    out = append(out, current[ci])
+            for ci, cs in range current {
+                if str_eq(cs.backend, be.name) {
+                    out = append(out, cs)
                 }
-                ci = ci + 1
             }
         } else {
             let rr = load_servers_file_list(be.name, be.servers_file, base_dir)
@@ -538,27 +435,22 @@ fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string
                     loaded: loaded_total
                 }
             }
-            let mut ni = 0
-            while ni < len(rr.servers) {
-                out = append(out, preserve_server_runtime(rr.servers[ni], current))
-                ni = ni + 1
+            for ni, ns in range rr.servers {
+                out = append(out, preserve_server_runtime(ns, current))
             }
-            let mut oi = 0
-            while oi < len(current) {
-                if str_eq(current[oi].backend, be.name) {
-                    if server_in_backend_list(rr.servers, be.name, current[oi].name) == 0 {
-                        if current[oi].conns > 0 {
-                            let mut draining = current[oi]
+            for oi, cs in range current {
+                if str_eq(cs.backend, be.name) {
+                    if server_in_backend_list(rr.servers, be.name, cs.name) == 0 {
+                        if cs.conns > 0 {
+                            let mut draining = cs
                             draining.drain = 1
                             out = append(out, draining)
                         }
                     }
                 }
-                oi = oi + 1
             }
             loaded_total = loaded_total + rr.loaded
         }
-        bi = bi + 1
     }
     return ServersReload {
         ok: 1,
@@ -584,10 +476,7 @@ fn load_admin_users_file(w: World, base_dir: string) -> World {
     let raw = read_file(full_path)
     if str_eq(raw, "") {
         out.ok = 0
-        let mut eb = str_builder()
-        builder_write(eb, "admin_users_file unreadable: ")
-        builder_write(eb, full_path)
-        out.error = builder_string(eb)
+        out.error = f"admin_users_file unreadable: {full_path}"
         return out
     }
     let lines = str_split(raw, "\n")
@@ -609,10 +498,7 @@ fn load_admin_users_file(w: World, base_dir: string) -> World {
         }
         if len(fields) < 3 {
             out.ok = 0
-            let mut eb2 = str_builder()
-            builder_write(eb2, "admin_users_file malformed line: ")
-            builder_write(eb2, clean)
-            out.error = builder_string(eb2)
+            out.error = f"admin_users_file malformed line: {clean}"
             return out
         }
         out.admin_users = append(out.admin_users, admin_user_hash_new(fields[0], admin_hash_value(fields[1]), fields[2]))
@@ -688,18 +574,8 @@ fn save_runtime_state_file(state_file: string, base_dir: string, servers: []Serv
     let full_path = resolve_servers_path(base_dir, state_file)
     let mut b = str_builder()
     builder_write(b, "# backend server alive drain\n")
-    let mut i = 0
-    while i < len(servers) {
-        let s = servers[i]
-        builder_write(b, s.backend)
-        builder_write(b, " ")
-        builder_write(b, s.name)
-        builder_write(b, " ")
-        builder_write(b, int_to_string(s.alive))
-        builder_write(b, " ")
-        builder_write(b, int_to_string(s.drain))
-        builder_write(b, "\n")
-        i = i + 1
+    for i, s in range servers {
+        builder_write(b, f"{s.backend} {s.name} {int_to_string(s.alive)} {int_to_string(s.drain)}\n")
     }
     let content = builder_string(b)
     if not str_eq(state_key, "") {
@@ -1124,40 +1000,36 @@ fn parse_config_text(raw: string) -> World {
 
     // Inherit default timeouts onto backends that still have zeros handled at runtime
     if w.defaults.retries > 0 {
-        let mut bi = 0
         let mut bes = w.backends
-        while bi < len(bes) {
-            let mut be = bes[bi]
-            if be.retries <= 0 {
-                be.retries = w.defaults.retries
+        for bi, be in range bes {
+            let mut b = be
+            if b.retries <= 0 {
+                b.retries = w.defaults.retries
             }
-            if be.connect_timeout_ms <= 0 {
-                be.connect_timeout_ms = w.defaults.timeout_connect_ms
+            if b.connect_timeout_ms <= 0 {
+                b.connect_timeout_ms = w.defaults.timeout_connect_ms
             }
-            bes[bi] = be
-            bi = bi + 1
+            bes[bi] = b
         }
         w.backends = bes
     }
 
     // stats frontend without explicit stats_port
-    let mut fi = 0
     let mut fes2 = w.frontends
-    while fi < len(w.frontends) {
-        let mut fe2 = fes2[fi]
-        if fe2.maxconn <= 0 {
-            fe2.maxconn = w.defaults.maxconn
+    for fi, fe2 in range fes2 {
+        let mut f = fe2
+        if f.maxconn <= 0 {
+            f.maxconn = w.defaults.maxconn
         }
-        if fe2.request_body_limit_bytes <= 0 {
-            fe2.request_body_limit_bytes = w.defaults.request_body_limit_bytes
+        if f.request_body_limit_bytes <= 0 {
+            f.request_body_limit_bytes = w.defaults.request_body_limit_bytes
         }
-        fes2[fi] = fe2
-        if str_eq(fe2.mode, "stats") {
+        fes2[fi] = f
+        if str_eq(f.mode, "stats") {
             if w.stats_port == 0 {
-                w.stats_port = fe2.bind_port
+                w.stats_port = f.bind_port
             }
         }
-        fi = fi + 1
     }
     w.frontends = fes2
 
@@ -1196,10 +1068,7 @@ fn parse_config_file(path: string) -> World {
                 if str_eq(inc_raw, "") {
                     let mut wi = world_new()
                     wi.ok = 0
-                    let mut eb = str_builder()
-                    builder_write(eb, "empty or unreadable include ")
-                    builder_write(eb, inc_path)
-                    wi.error = builder_string(eb)
+                    wi.error = f"empty or unreadable include {inc_path}"
                     return wi
                 }
                 builder_write(combined, "\n")
@@ -1224,20 +1093,9 @@ fn parse_config_file(path: string) -> World {
 }
 
 fn config_summary(w: World) -> string {
-    let mut b = str_builder()
-    builder_write(b, "frontends=")
-    builder_write(b, int_to_string(len(w.frontends)))
-    builder_write(b, " backends=")
-    builder_write(b, int_to_string(len(w.backends)))
-    builder_write(b, " servers=")
-    builder_write(b, int_to_string(len(w.servers)))
-    builder_write(b, " routes=")
-    builder_write(b, int_to_string(len(w.routes)))
-    builder_write(b, " acls=")
-    builder_write(b, int_to_string(len(w.acls)))
+    let mut base = f"frontends={int_to_string(len(w.frontends))} backends={int_to_string(len(w.backends))} servers={int_to_string(len(w.servers))} routes={int_to_string(len(w.routes))} acls={int_to_string(len(w.acls))}"
     if w.stats_port > 0 {
-        builder_write(b, " stats=:")
-        builder_write(b, int_to_string(w.stats_port))
+        return f"{base} stats=:{int_to_string(w.stats_port)}"
     }
-    return builder_string(b)
+    return base
 }

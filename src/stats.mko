@@ -37,12 +37,10 @@ fn server_json(s: Server) -> string {
 fn backend_json(be: Backend, servers: []Server) -> string {
     let up = backend_up_count(servers, be.name)
     let mut total = 0
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, be.name) {
+    for i, srv in range servers {
+        if str_eq(srv.backend, be.name) {
             total = total + 1
         }
-        i = i + 1
     }
     let mut b = str_builder()
     builder_write(b, "{")
@@ -101,9 +99,8 @@ fn acl_json(a: AclRule) -> string {
 fn prom_escape(s: string) -> string {
     let mut b = str_builder()
     let data = bytes(s)
-    let mut i = 0
-    while i < len(data) {
-        let c = int(data[i])
+    for i, d in range data {
+        let c = int(d)
         if c == 34 {
             builder_write(b, "\\\"")
         } else {
@@ -113,20 +110,16 @@ fn prom_escape(s: string) -> string {
                 if c == 10 {
                     builder_write(b, "\\n")
                 } else {
-                    builder_write_byte(b, data[i])
+                    builder_write_byte(b, d)
                 }
             }
         }
-        i = i + 1
     }
     return builder_string(b)
 }
 
 fn prom_line0(b: StrBuilder, name: string, value: int) {
-    builder_write(b, name)
-    builder_write(b, " ")
-    builder_write(b, int_to_string(value))
-    builder_write(b, "\n")
+    builder_write(b, f"{name} {value}\n")
 }
 
 fn metrics_text(
@@ -166,28 +159,13 @@ fn metrics_text(
     prom_line0(b, "leba_bytes_out_total", st.total_bytes_out)
     builder_write(b, "# HELP leba_latency_ms Last and max observed proxy latency.\n")
     builder_write(b, "# TYPE leba_latency_ms gauge\n")
-    builder_write(b, "leba_latency_ms{kind=\"last\"} ")
-    builder_write(b, int_to_string(st.last_latency_ms))
-    builder_write(b, "\n")
-    builder_write(b, "leba_latency_ms{kind=\"max\"} ")
-    builder_write(b, int_to_string(st.max_latency_ms))
-    builder_write(b, "\n")
+    builder_write(b, f"leba_latency_ms{{kind=\"last\"}} {st.last_latency_ms}\n")
+    builder_write(b, f"leba_latency_ms{{kind=\"max\"}} {st.max_latency_ms}\n")
 
     builder_write(b, "# HELP leba_frontend_info Configured frontend information.\n")
     builder_write(b, "# TYPE leba_frontend_info gauge\n")
-    let mut fi = 0
-    while fi < len(frontends) {
-        let fe = frontends[fi]
-        builder_write(b, "leba_frontend_info{frontend=\"")
-        builder_write(b, prom_escape(fe.name))
-        builder_write(b, "\",mode=\"")
-        builder_write(b, prom_escape(fe.mode))
-        builder_write(b, "\",bind_host=\"")
-        builder_write(b, prom_escape(fe.bind_host))
-        builder_write(b, "\",port=\"")
-        builder_write(b, int_to_string(fe.bind_port))
-        builder_write(b, "\"} 1\n")
-        fi = fi + 1
+    for fi, fe in range frontends {
+        builder_write(b, f"leba_frontend_info{{frontend=\"{prom_escape(fe.name)}\",mode=\"{prom_escape(fe.mode)}\",bind_host=\"{prom_escape(fe.bind_host)}\",port=\"{fe.bind_port}\"}} 1\n")
     }
 
     builder_write(b, "# HELP leba_backend_servers Number of configured servers per backend.\n")
@@ -198,38 +176,18 @@ fn metrics_text(
     builder_write(b, "# TYPE leba_backend_connections gauge\n")
     builder_write(b, "# HELP leba_backend_maxconn Configured backend connection limit, or zero when unlimited.\n")
     builder_write(b, "# TYPE leba_backend_maxconn gauge\n")
-    let mut bi = 0
-    while bi < len(backends) {
-        let be = backends[bi]
+    for bi, be in range backends {
         let mut total = 0
-        let mut si = 0
-        while si < len(servers) {
-            if str_eq(servers[si].backend, be.name) {
+        for si, srv in range servers {
+            if str_eq(srv.backend, be.name) {
                 total = total + 1
             }
-            si = si + 1
         }
-        builder_write(b, "leba_backend_servers{backend=\"")
-        builder_write(b, prom_escape(be.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(total))
-        builder_write(b, "\n")
-        builder_write(b, "leba_backend_up_servers{backend=\"")
-        builder_write(b, prom_escape(be.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(backend_up_count(servers, be.name)))
-        builder_write(b, "\n")
-        builder_write(b, "leba_backend_connections{backend=\"")
-        builder_write(b, prom_escape(be.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(backend_conn_count(servers, be.name)))
-        builder_write(b, "\n")
-        builder_write(b, "leba_backend_maxconn{backend=\"")
-        builder_write(b, prom_escape(be.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(be.maxconn))
-        builder_write(b, "\n")
-        bi = bi + 1
+        let bname = prom_escape(be.name)
+        builder_write(b, f"leba_backend_servers{{backend=\"{bname}\"}} {total}\n")
+        builder_write(b, f"leba_backend_up_servers{{backend=\"{bname}\"}} {backend_up_count(servers, be.name)}\n")
+        builder_write(b, f"leba_backend_connections{{backend=\"{bname}\"}} {backend_conn_count(servers, be.name)}\n")
+        builder_write(b, f"leba_backend_maxconn{{backend=\"{bname}\"}} {be.maxconn}\n")
     }
 
     builder_write(b, "# HELP leba_server_up Server is alive and not draining.\n")
@@ -244,56 +202,19 @@ fn metrics_text(
     builder_write(b, "# TYPE leba_server_errors_total counter\n")
     builder_write(b, "# HELP leba_server_bytes_total Bytes received from a server.\n")
     builder_write(b, "# TYPE leba_server_bytes_total counter\n")
-    let mut si2 = 0
-    while si2 < len(servers) {
-        let s = servers[si2]
+    for si2, s in range servers {
         let mut up = 0
         if server_eligible(s) == 1 {
             up = 1
         }
-        builder_write(b, "leba_server_up{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(up))
-        builder_write(b, "\n")
-        builder_write(b, "leba_server_connections{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(s.conns))
-        builder_write(b, "\n")
-        builder_write(b, "leba_server_maxconn{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(s.maxconn))
-        builder_write(b, "\n")
-        builder_write(b, "leba_server_requests_total{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(s.total_req))
-        builder_write(b, "\n")
-        builder_write(b, "leba_server_errors_total{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(s.total_err))
-        builder_write(b, "\n")
-        builder_write(b, "leba_server_bytes_total{backend=\"")
-        builder_write(b, prom_escape(s.backend))
-        builder_write(b, "\",server=\"")
-        builder_write(b, prom_escape(s.name))
-        builder_write(b, "\"} ")
-        builder_write(b, int_to_string(s.total_bytes))
-        builder_write(b, "\n")
-        si2 = si2 + 1
+        let sb = prom_escape(s.backend)
+        let sn = prom_escape(s.name)
+        builder_write(b, f"leba_server_up{{backend=\"{sb}\",server=\"{sn}\"}} {up}\n")
+        builder_write(b, f"leba_server_connections{{backend=\"{sb}\",server=\"{sn}\"}} {s.conns}\n")
+        builder_write(b, f"leba_server_maxconn{{backend=\"{sb}\",server=\"{sn}\"}} {s.maxconn}\n")
+        builder_write(b, f"leba_server_requests_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_req}\n")
+        builder_write(b, f"leba_server_errors_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_err}\n")
+        builder_write(b, f"leba_server_bytes_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_bytes}\n")
     }
     return builder_string(b)
 }
@@ -334,12 +255,10 @@ fn stats_json(
     builder_write(b, ",\"bytes_out\":")
     builder_write(b, int_to_string(st.total_bytes_out))
     builder_write(b, ",\"frontends\":[")
-    let mut fi = 0
-    while fi < len(frontends) {
+    for fi, fe in range frontends {
         if fi > 0 {
             builder_write(b, ",")
         }
-        let fe = frontends[fi]
         builder_write(b, "{\"name\":\"")
         builder_write(b, json_escape(fe.name))
         builder_write(b, "\",\"bind_host\":\"")
@@ -363,53 +282,41 @@ fn stats_json(
         builder_write(b, "\",\"access_log\":")
         builder_write(b, int_to_string(fe.access_log))
         builder_write(b, "}")
-        fi = fi + 1
     }
     builder_write(b, "],\"backends\":[")
-    let mut bi = 0
-    while bi < len(backends) {
+    for bi, be in range backends {
         if bi > 0 {
             builder_write(b, ",")
         }
-        builder_write(b, backend_json(backends[bi], servers))
-        bi = bi + 1
+        builder_write(b, backend_json(be, servers))
     }
     builder_write(b, "],\"servers\":[")
-    let mut si = 0
-    while si < len(servers) {
+    for si, srv in range servers {
         if si > 0 {
             builder_write(b, ",")
         }
-        builder_write(b, server_json(servers[si]))
-        si = si + 1
+        builder_write(b, server_json(srv))
     }
     builder_write(b, "],\"routes\":[")
-    let mut ri = 0
-    while ri < len(routes) {
+    for ri, rt in range routes {
         if ri > 0 {
             builder_write(b, ",")
         }
-        builder_write(b, route_json(routes[ri]))
-        ri = ri + 1
+        builder_write(b, route_json(rt))
     }
     builder_write(b, "],\"acls\":[")
-    let mut ai = 0
-    while ai < len(acls) {
+    for ai, ac in range acls {
         if ai > 0 {
             builder_write(b, ",")
         }
-        builder_write(b, acl_json(acls[ai]))
-        ai = ai + 1
+        builder_write(b, acl_json(ac))
     }
     builder_write(b, "]}\n")
     return builder_string(b)
 }
 
 fn basic_auth_header(user: string, pass: string) -> string {
-    let mut b = str_builder()
-    builder_write(b, "Basic ")
-    builder_write(b, base64_encode(join_user_pass(user, pass)))
-    return builder_string(b)
+    return f"Basic {base64_encode(join_user_pass(user, pass))}"
 }
 
 fn basic_auth_payload(auth_header: string) -> string {
@@ -507,9 +414,7 @@ fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: strin
     let payload = basic_auth_payload(auth_header)
     let auth_user = basic_auth_user(payload)
     let auth_pass = basic_auth_pass(payload)
-    let mut i = 0
-    while i < len(users) {
-        let u = users[i]
+    for i, u in range users {
         if str_eq(auth_user, u.user) {
             let mut ok = 0
             if not str_eq(u.pass_hash, "") {
@@ -528,7 +433,6 @@ fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: strin
                 return "viewer"
             }
         }
-        i = i + 1
     }
     if len(users) > 0 {
         return ""
@@ -784,22 +688,7 @@ fn admin_audit_id() -> string {
 }
 
 fn admin_audit_detail(req_id: string, user: string, role: string, method: string, path: string, status: int, outcome: string) -> string {
-    let mut b = str_builder()
-    builder_write(b, "id=")
-    builder_write(b, req_id)
-    builder_write(b, " user=\"")
-    builder_write(b, json_escape(user))
-    builder_write(b, "\" role=\"")
-    builder_write(b, json_escape(role))
-    builder_write(b, "\" method=")
-    builder_write(b, method)
-    builder_write(b, " path=\"")
-    builder_write(b, json_escape(path))
-    builder_write(b, "\" status=")
-    builder_write(b, int_to_string(status))
-    builder_write(b, " outcome=")
-    builder_write(b, outcome)
-    return builder_string(b)
+    return f"id={req_id} user=\"{json_escape(user)}\" role=\"{json_escape(role)}\" method={method} path=\"{json_escape(path)}\" status={status} outcome={outcome}"
 }
 
 fn log_admin_audit(req_id: string, user: string, role: string, method: string, path: string, status: int, outcome: string) {

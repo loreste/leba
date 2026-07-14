@@ -81,25 +81,20 @@ fn rate_would_deny(b: RateBucket) -> int {
 }
 
 fn rate_find(buckets: []RateBucket, frontend: string) -> int {
-    let mut i = 0
-    while i < len(buckets) {
-        if str_eq(buckets[i].frontend, frontend) {
+    for i, b in range buckets {
+        if str_eq(b.frontend, frontend) {
             return i
         }
-        i = i + 1
     }
     return -1
 }
 
 fn rate_init_all(frontends: []Frontend) -> []RateBucket {
     let mut out = make([]RateBucket, 0, len(frontends))
-    let mut i = 0
-    while i < len(frontends) {
-        let fe = frontends[i]
+    for _, fe in range frontends {
         if fe.rate_limit > 0 {
             out = append(out, rate_new(fe.name, fe.rate_limit))
         }
-        i = i + 1
     }
     return out
 }
@@ -108,10 +103,8 @@ fn rate_init_all(frontends: []Frontend) -> []RateBucket {
 // Values are 1-indexed (0 = not found) because maps return 0 for missing keys.
 fn rate_build_index(buckets: []RateBucket) -> map[string]int {
     let mut idx = make(map[string]int)
-    let mut i = 0
-    while i < len(buckets) {
-        idx[buckets[i].frontend] = i + 1
-        i = i + 1
+    for i, b in range buckets {
+        idx[b.frontend] = i + 1
     }
     return idx
 }

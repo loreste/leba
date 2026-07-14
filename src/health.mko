@@ -52,12 +52,7 @@ fn apply_probe_result(
             if s.rises >= rise {
                 s.alive = 1
                 s.rises = 0
-                let mut msg = str_builder()
-                builder_write(msg, "UP server ")
-                builder_write(msg, s.backend)
-                builder_write(msg, "/")
-                builder_write(msg, s.name)
-                log_info_event("health_up", builder_string(msg))
+                log_info_event("health_up", f"UP server {s.backend}/{s.name}")
             }
         } else {
             s.rises = 0
@@ -69,12 +64,7 @@ fn apply_probe_result(
             if s.fails >= fall {
                 s.alive = 0
                 s.fails = 0
-                let mut msg = str_builder()
-                builder_write(msg, "DOWN server ")
-                builder_write(msg, s.backend)
-                builder_write(msg, "/")
-                builder_write(msg, s.name)
-                log_warn_event("health_down", builder_string(msg))
+                log_warn_event("health_down", f"DOWN server {s.backend}/{s.name}")
             }
         }
     }
@@ -89,19 +79,13 @@ fn run_health_checks(
 ) -> []Server {
     let mut out = servers
     let now = now_ms()
-    let mut bi = 0
-    while bi < len(backends) {
-        let be = backends[bi]
-        bi = bi + 1
-        let mut si = 0
-        while si < len(out) {
+    for _, be in range backends {
+        for si in range len(out) {
             let s = out[si]
             if not str_eq(s.backend, be.name) {
-                si = si + 1
                 continue
             }
             if s.check == 0 {
-                si = si + 1
                 continue
             }
             let mut due = 0
@@ -118,18 +102,19 @@ fn run_health_checks(
             }
             if due == 1 {
                 let mut ok = 0
-                if str_eq(be.health_path, "tcp") {
-                    ok = health_tcp_probe(s.host, s.port)
-                } else {
-                    if str_eq(be.health_path, "") {
+                match be.health_path {
+                    "tcp" => {
                         ok = health_tcp_probe(s.host, s.port)
-                    } else {
+                    }
+                    "" => {
+                        ok = health_tcp_probe(s.host, s.port)
+                    }
+                    _ => {
                         ok = health_http_probe(s.host, s.port, be.health_path, be.health_timeout_ms)
                     }
                 }
                 out = apply_probe_result(out, si, ok, be.health_rise, be.health_fall)
             }
-            si = si + 1
         }
     }
     return out
@@ -137,14 +122,12 @@ fn run_health_checks(
 
 fn backend_up_count(servers: []Server, backend: string) -> int {
     let mut n = 0
-    let mut i = 0
-    while i < len(servers) {
-        if str_eq(servers[i].backend, backend) {
-            if servers[i].alive == 1 {
+    for _, s in range servers {
+        if str_eq(s.backend, backend) {
+            if s.alive == 1 {
                 n = n + 1
             }
         }
-        i = i + 1
     }
     return n
 }

@@ -90,43 +90,22 @@ fn main() {
             }
         }
     }
-    let mut load_log = str_builder()
-    builder_write(load_log, "path=")
-    builder_write(load_log, path)
-    log_info_event("config_load", builder_string(load_log))
+    log_info_event("config_load", f"path={path}")
     let w = parse_config_file(path)
     if w.ok == 0 {
-        let mut parse_log = str_builder()
-        builder_write(parse_log, "path=")
-        builder_write(parse_log, path)
-        builder_write(parse_log, " error=\"")
-        builder_write(parse_log, w.error)
-        builder_write(parse_log, "\"")
-        log_error_event("config_parse_failed", builder_string(parse_log))
+        log_error_event("config_parse_failed", f"path={path} error=\"{w.error}\"")
         print(w.error)
         exit(1)
         return
     }
     let rep = doctor_world(w)
     if rep.ok == 0 {
-        let mut doctor_fail_log = str_builder()
-        builder_write(doctor_fail_log, "path=")
-        builder_write(doctor_fail_log, path)
-        builder_write(doctor_fail_log, " errors=")
-        builder_write(doctor_fail_log, int_to_string(rep.errors))
-        builder_write(doctor_fail_log, " warnings=")
-        builder_write(doctor_fail_log, int_to_string(rep.warnings))
-        log_error_event("doctor_failed", builder_string(doctor_fail_log))
+        log_error_event("doctor_failed", f"path={path} errors={rep.errors} warnings={rep.warnings}")
         print(rep.text)
         exit(1)
         return
     }
-    let mut doctor_ok_log = str_builder()
-    builder_write(doctor_ok_log, "path=")
-    builder_write(doctor_ok_log, path)
-    builder_write(doctor_ok_log, " warnings=")
-    builder_write(doctor_ok_log, int_to_string(rep.warnings))
-    log_info_event("doctor_passed", builder_string(doctor_ok_log))
+    log_info_event("doctor_passed", f"path={path} warnings={rep.warnings}")
     let mut servers = w.servers
     let mut backends = w.backends
     let mut frontends = w.frontends
@@ -142,19 +121,9 @@ fn main() {
                 let watch_path = resolve_servers_path(config_dir, backends[wi].servers_file)
                 if watch_add(server_watch, watch_path) == 0 {
                     has_server_watch = 1
-                    let mut wlog = str_builder()
-                    builder_write(wlog, "backend=")
-                    builder_write(wlog, backends[wi].name)
-                    builder_write(wlog, " path=")
-                    builder_write(wlog, watch_path)
-                    log_info_event("servers_file_watch_enabled", builder_string(wlog))
+                    log_info_event("servers_file_watch_enabled", f"backend={backends[wi].name} path={watch_path}")
                 } else {
-                    let mut wfail = str_builder()
-                    builder_write(wfail, "backend=")
-                    builder_write(wfail, backends[wi].name)
-                    builder_write(wfail, " path=")
-                    builder_write(wfail, watch_path)
-                    log_warn_event("servers_file_watch_failed", builder_string(wfail))
+                    log_warn_event("servers_file_watch_failed", f"backend={backends[wi].name} path={watch_path}")
                 }
             }
             wi = wi + 1
@@ -220,12 +189,7 @@ fn main() {
             h_tls = 1
             if str_len(hfe.tls_client_ca) > 0 {
                 h_tls_srv = tls_server_new_mtls(hfe.tls_cert, hfe.tls_key, hfe.tls_client_ca)
-                let mut mtls_log = str_builder()
-                builder_write(mtls_log, "frontend=")
-                builder_write(mtls_log, hfe.name)
-                builder_write(mtls_log, " client_ca=")
-                builder_write(mtls_log, hfe.tls_client_ca)
-                log_info_event("mtls_enabled", builder_string(mtls_log))
+                log_info_event("mtls_enabled", f"frontend={hfe.name} client_ca={hfe.tls_client_ca}")
             } else {
                 h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
             }
@@ -245,10 +209,7 @@ fn main() {
                             })
                         } else {
                             let _ = h3_server_close(hh)
-                            let mut h3fail = str_builder()
-                            builder_write(h3fail, "frontend=")
-                            builder_write(h3fail, hfe.name)
-                            log_error_event("h3_bind_failed", builder_string(h3fail))
+                            log_error_event("h3_bind_failed", f"frontend={hfe.name}")
                         }
                     }
                 }
@@ -289,14 +250,7 @@ fn main() {
     let mut hi_check = 0
     while hi_check < len(http_listeners) {
         if http_listeners[hi_check].fd < 0 {
-            let mut bind_fail = str_builder()
-            builder_write(bind_fail, "frontend=")
-            builder_write(bind_fail, http_listeners[hi_check].frontend.name)
-            builder_write(bind_fail, " bind=")
-            builder_write(bind_fail, http_listeners[hi_check].frontend.bind_host)
-            builder_write(bind_fail, ":")
-            builder_write(bind_fail, int_to_string(http_listeners[hi_check].frontend.bind_port))
-            log_error_event("listener_bind_failed", builder_string(bind_fail))
+            log_error_event("listener_bind_failed", f"frontend={http_listeners[hi_check].frontend.name} bind={http_listeners[hi_check].frontend.bind_host}:{http_listeners[hi_check].frontend.bind_port}")
             let mut hi_close_fail = 0
             while hi_close_fail < len(http_listeners) {
                 if http_listeners[hi_close_fail].fd >= 0 {
@@ -313,12 +267,7 @@ fn main() {
         hi_check = hi_check + 1
     }
     if stats_fd < 0 {
-        let mut stats_fail = str_builder()
-        builder_write(stats_fail, "frontend=stats bind=")
-        builder_write(stats_fail, stats_fe.bind_host)
-        builder_write(stats_fail, ":")
-        builder_write(stats_fail, int_to_string(w.stats_port))
-        log_error_event("listener_bind_failed", builder_string(stats_fail))
+        log_error_event("listener_bind_failed", f"frontend=stats bind={stats_fe.bind_host}:{w.stats_port}")
         let mut hi_close0 = 0
         while hi_close0 < len(http_listeners) {
             if http_listeners[hi_close0].fd >= 0 {
@@ -345,12 +294,7 @@ fn main() {
     let mut ti_check = 0
     while ti_check < len(tcp_fds) {
         if tcp_fds[ti_check] < 0 {
-            let mut tcp_fail = str_builder()
-            builder_write(tcp_fail, "frontend=")
-            builder_write(tcp_fail, tcp_fes[ti_check].name)
-            builder_write(tcp_fail, " port=")
-            builder_write(tcp_fail, int_to_string(tcp_fes[ti_check].bind_port))
-            log_error_event("listener_bind_failed", builder_string(tcp_fail))
+            log_error_event("listener_bind_failed", f"frontend={tcp_fes[ti_check].name} port={tcp_fes[ti_check].bind_port}")
             let mut hi_close1_http = 0
             while hi_close1_http < len(http_listeners) {
                 if http_listeners[hi_close1_http].fd >= 0 {
@@ -377,12 +321,7 @@ fn main() {
     let mut ui_check = 0
     while ui_check < len(udp_listeners) {
         if udp_listeners[ui_check].fd < 0 {
-            let mut udp_fail = str_builder()
-            builder_write(udp_fail, "frontend=")
-            builder_write(udp_fail, udp_listeners[ui_check].frontend.name)
-            builder_write(udp_fail, " port=")
-            builder_write(udp_fail, int_to_string(udp_listeners[ui_check].frontend.bind_port))
-            log_error_event("listener_bind_failed", builder_string(udp_fail))
+            log_error_event("listener_bind_failed", f"frontend={udp_listeners[ui_check].frontend.name} port={udp_listeners[ui_check].frontend.bind_port}")
             let mut hi_close_udp_http = 0
             while hi_close_udp_http < len(http_listeners) {
                 if http_listeners[hi_close_udp_http].fd >= 0 {
@@ -437,73 +376,33 @@ fn main() {
     }
     let mut hi_log = 0
     while hi_log < len(http_listeners) {
-        let mut http_bind_log = str_builder()
-        builder_write(http_bind_log, "frontend=")
-        builder_write(http_bind_log, http_listeners[hi_log].frontend.name)
-        builder_write(http_bind_log, " bind=")
-        builder_write(http_bind_log, http_listeners[hi_log].frontend.bind_host)
-        builder_write(http_bind_log, ":")
-        builder_write(http_bind_log, int_to_string(http_listeners[hi_log].frontend.bind_port))
         if http_listeners[hi_log].h3 == 1 {
-            builder_write(http_bind_log, " protocols=http1,h2,h3")
+            log_info_event("listener_bound", f"frontend={http_listeners[hi_log].frontend.name} bind={http_listeners[hi_log].frontend.bind_host}:{http_listeners[hi_log].frontend.bind_port} protocols=http1,h2,h3")
+        } else {
+            log_info_event("listener_bound", f"frontend={http_listeners[hi_log].frontend.name} bind={http_listeners[hi_log].frontend.bind_host}:{http_listeners[hi_log].frontend.bind_port}")
         }
-        log_info_event("listener_bound", builder_string(http_bind_log))
         hi_log = hi_log + 1
     }
     let mut h3_log = 0
     while h3_log < len(h3_listeners) {
-        let mut h3_bind_log = str_builder()
-        builder_write(h3_bind_log, "frontend=")
-        builder_write(h3_bind_log, h3_listeners[h3_log].frontend.name)
-        builder_write(h3_bind_log, " mode=http3 bind=")
-        builder_write(h3_bind_log, h3_listeners[h3_log].frontend.bind_host)
-        builder_write(h3_bind_log, ":")
-        builder_write(h3_bind_log, int_to_string(h3_listeners[h3_log].frontend.bind_port))
-        log_info_event("listener_bound", builder_string(h3_bind_log))
+        log_info_event("listener_bound", f"frontend={h3_listeners[h3_log].frontend.name} mode=http3 bind={h3_listeners[h3_log].frontend.bind_host}:{h3_listeners[h3_log].frontend.bind_port}")
         h3_log = h3_log + 1
     }
-    let mut stats_bind_log = str_builder()
-    builder_write(stats_bind_log, "frontend=stats bind=")
-    builder_write(stats_bind_log, stats_fe.bind_host)
-    builder_write(stats_bind_log, ":")
-    builder_write(stats_bind_log, int_to_string(w.stats_port))
-    log_info_event("listener_bound", builder_string(stats_bind_log))
+    log_info_event("listener_bound", f"frontend=stats bind={stats_fe.bind_host}:{w.stats_port}")
     let mut ti_log = 0
     while ti_log < len(tcp_fes) {
-        let mut tcp_bind_log = str_builder()
-        builder_write(tcp_bind_log, "frontend=")
-        builder_write(tcp_bind_log, tcp_fes[ti_log].name)
-        builder_write(tcp_bind_log, " mode=tcp bind=")
-        builder_write(tcp_bind_log, tcp_fes[ti_log].bind_host)
-        builder_write(tcp_bind_log, ":")
-        builder_write(tcp_bind_log, int_to_string(tcp_fes[ti_log].bind_port))
-        log_info_event("listener_bound", builder_string(tcp_bind_log))
+        log_info_event("listener_bound", f"frontend={tcp_fes[ti_log].name} mode=tcp bind={tcp_fes[ti_log].bind_host}:{tcp_fes[ti_log].bind_port}")
         ti_log = ti_log + 1
     }
     let mut ui_log = 0
     while ui_log < len(udp_listeners) {
-        let mut udp_bind_log = str_builder()
-        builder_write(udp_bind_log, "frontend=")
-        builder_write(udp_bind_log, udp_listeners[ui_log].frontend.name)
-        builder_write(udp_bind_log, " mode=udp bind=")
-        builder_write(udp_bind_log, udp_listeners[ui_log].frontend.bind_host)
-        builder_write(udp_bind_log, ":")
-        builder_write(udp_bind_log, int_to_string(udp_listeners[ui_log].frontend.bind_port))
-        log_info_event("listener_bound", builder_string(udp_bind_log))
+        log_info_event("listener_bound", f"frontend={udp_listeners[ui_log].frontend.name} mode=udp bind={udp_listeners[ui_log].frontend.bind_host}:{udp_listeners[ui_log].frontend.bind_port}")
         ui_log = ui_log + 1
     }
     if max_req > 0 {
-        let mut run_log = str_builder()
-        builder_write(run_log, "mode=bounded max_req=")
-        builder_write(run_log, int_to_string(max_req))
-        builder_write(run_log, " workers=")
-        builder_write(run_log, int_to_string(workers))
-        log_info_event("runtime_start", builder_string(run_log))
+        log_info_event("runtime_start", f"mode=bounded max_req={max_req} workers={workers}")
     } else {
-        let mut run_log2 = str_builder()
-        builder_write(run_log2, "mode=forever workers=")
-        builder_write(run_log2, int_to_string(workers))
-        log_info_event("runtime_start", builder_string(run_log2))
+        log_info_event("runtime_start", f"mode=forever workers={workers}")
     }
     let mut completed = 0
     let mut inflight = 0
@@ -540,30 +439,16 @@ fn main() {
             if has_server_watch == 1 {
                 let changed = watch_poll(server_watch, 0)
                 if not str_eq(changed, "") {
-                    let mut reason = str_builder()
-                    builder_write(reason, "watch_path=")
-                    builder_write(reason, changed)
-                    reload_reason = builder_string(reason)
+                    reload_reason = f"watch_path={changed}"
                 }
             }
             if not str_eq(reload_reason, "") {
                 let rr = reload_servers_files(backends, servers, config_dir)
                 if rr.ok == 1 {
                     servers = rr.servers
-                    let mut rlog = str_builder()
-                    builder_write(rlog, reload_reason)
-                    builder_write(rlog, " loaded=")
-                    builder_write(rlog, int_to_string(rr.loaded))
-                    builder_write(rlog, " servers=")
-                    builder_write(rlog, int_to_string(len(servers)))
-                    log_info_event("servers_file_reloaded", builder_string(rlog))
+                    log_info_event("servers_file_reloaded", f"{reload_reason} loaded={rr.loaded} servers={len(servers)}")
                 } else {
-                    let mut rfail = str_builder()
-                    builder_write(rfail, reload_reason)
-                    builder_write(rfail, " error=\"")
-                    builder_write(rfail, json_escape(rr.error))
-                    builder_write(rfail, "\"")
-                    log_warn_event("servers_file_reload_failed", builder_string(rfail))
+                    log_warn_event("servers_file_reload_failed", f"{reload_reason} error=\"{json_escape(rr.error)}\"")
                 }
             }
             if inflight > 0 {
@@ -965,9 +850,6 @@ fn main() {
     }
     let _ = http_close_listener(stats_fd)
     clear_drain(drain_token)
-    let mut stop_log = str_builder()
-    builder_write(stop_log, "completed=")
-    builder_write(stop_log, int_to_string(completed))
-    log_info_event("runtime_stop", builder_string(stop_log))
+    log_info_event("runtime_stop", f"completed={completed}")
     print("ok")
 }

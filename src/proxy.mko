@@ -2280,8 +2280,174 @@ fn worker_raw_upstream(
     return err
 }
 
-// WebSocket tunnel: forward the full upgrade request to the backend,
-// relay the 101 Switching Protocols response, then bidirectional TCP relay.
+// WebSocket route pick only — never writes to the client (safe for TLS and plain).
+// On need_worker=0: check denied / rate_limited / err and respond with the right protocol.
+fn prepare_ws_dispatch(
+    req: RawRequest,
+    fe: Frontend,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    buckets: []RateBucket
+) -> Dispatch {
+    let method = req.method
+    let path = req.path
+    let host = req.host
+    let mut srv_list = servers
+    let mut be_list = backends
+    let mut rate_list = buckets
+    let empty = Dispatch {
+        need_worker: 0,
+        c: 0 - 1,
+        method: method,
+        path: path,
+        body: "",
+        cookie: req.cookie,
+        traceparent: "",
+        trace_id: "",
+        span_id: "",
+        orig_host: host,
+        up_host: "",
+        up_port: 0,
+        up_pool: 0 - 1,
+        timeout_ms: 5000,
+        retries: 0,
+        server_idx: 0 - 1,
+        access_log: fe.access_log,
+        err: 1,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: req.bytes_in,
+        is_ws: 1,
+        ws_raw: req.raw,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+
+    if req.ok == 0 {
+        log_proxy_reject("malformed_request", method, path, host, "status=400")
+        return empty
+    }
+    if fe.rate_limit > 0 {
+        let ri = rate_find(rate_list, fe.name)
+        if ri >= 0 {
+            if rate_would_deny(rate_list[ri]) == 1 {
+                log_proxy_reject("rate_limited", method, path, host, "status=429")
+                let mut d = empty
+                d.rate_limited = 1
+                d.buckets = rate_list
+                return d
+            }
+            rate_list[ri] = rate_take(rate_list[ri])
+        }
+    }
+    if frontend_at_maxconn(srv_list, fe) == 1 {
+        log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
+        let mut d = empty
+        d.buckets = rate_list
+        return d
+    }
+    if acl_decide(acls, fe.name, path, host, method) == 1 {
+        log_proxy_reject("acl_denied", method, path, host, "status=403")
+        let mut d = empty
+        d.denied = 1
+        d.buckets = rate_list
+        return d
+    }
+    let be_name = select_backend(routes, fe.name, path, host, fe.backend)
+    let bi = find_backend(be_list, be_name)
+    if bi < 0 {
+        log_proxy_reject("backend_missing", method, path, host, "status=503")
+        let mut d = empty
+        d.buckets = rate_list
+        return d
+    }
+    let mut be = be_list[bi]
+    if backend_at_maxconn(srv_list, be) == 1 {
+        log_proxy_reject("backend_maxconn", method, path, host, "status=503")
+        let mut d = empty
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+    let mut sticky_val = ""
+    if str_len(fe.sticky_cookie) > 0 {
+        sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
+    }
+    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    be = next_rr(be)
+    be_list[bi] = be
+    if si < 0 {
+        log_proxy_reject("no_server", method, path, host, "status=502")
+        let mut d = empty
+        d.backends = be_list
+        d.buckets = rate_list
+        return d
+    }
+    let s = srv_list[si]
+    let mut timeout_ms = be.connect_timeout_ms
+    if timeout_ms <= 0 {
+        timeout_ms = 5000
+    }
+    srv_list = server_conn_delta(srv_list, si, 1)
+    return Dispatch {
+        need_worker: 1,
+        c: 0 - 1,
+        method: method,
+        path: path,
+        body: "",
+        cookie: req.cookie,
+        traceparent: "",
+        trace_id: "",
+        span_id: "",
+        orig_host: host,
+        up_host: s.host,
+        up_port: s.port,
+        up_pool: s.pool,
+        timeout_ms: timeout_ms,
+        retries: be.retries,
+        server_idx: si,
+        access_log: fe.access_log,
+        err: 0,
+        denied: 0,
+        rate_limited: 0,
+        bytes_out: 0,
+        bytes_in: req.bytes_in,
+        is_ws: 1,
+        ws_raw: req.raw,
+        servers: srv_list,
+        backends: be_list,
+        buckets: rate_list
+    }
+}
+
+// Read upstream HTTP response headers (and any bytes already available after \r\n\r\n).
+fn ws_read_http_response(up: int, timeout_ms: int) -> string {
+    let _ = tcp_set_timeout(up, timeout_ms)
+    let mut resp = ""
+    let mut spins = 0
+    while str_index(resp, "\r\n\r\n") < 0 {
+        let chunk = tcp_read(up)
+        if str_eq(chunk, "") {
+            return resp
+        }
+        resp = resp + chunk
+        spins = spins + 1
+        if spins > 64 {
+            return resp
+        }
+        if str_len(resp) > 65536 {
+            return resp
+        }
+    }
+    return resp
+}
+
+// WebSocket tunnel (plain HTTP client): forward upgrade request, relay 101, then
+// bidirectional TCP copy until either side closes.
 fn worker_ws_upstream(
     c: int,
     ws_raw: string,
@@ -2295,6 +2461,7 @@ fn worker_ws_upstream(
     slots: chan[int],
     done: chan[int]
 ) -> int {
+    let _ = frontend_name
     let up = tcp_connect(host, port)
     if up < 0 {
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
@@ -2303,9 +2470,10 @@ fn worker_ws_upstream(
         let _ = slots.send(1)
         return 1
     }
+    let _ = tcp_nodelay(c)
     let _ = tcp_nodelay(up)
     // Forward the original upgrade request verbatim to the backend.
-    let n = tcp_write(up, ws_raw)
+    let n = tcp_write_all(up, ws_raw)
     if n < 0 {
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
@@ -2314,9 +2482,7 @@ fn worker_ws_upstream(
         let _ = slots.send(1)
         return 1
     }
-    // Read backend response (should be 101 Switching Protocols).
-    let _ = tcp_set_timeout(up, timeout_ms)
-    let resp = tcp_read(up)
+    let resp = ws_read_http_response(up, timeout_ms)
     if str_eq(resp, "") {
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
@@ -2325,23 +2491,22 @@ fn worker_ws_upstream(
         let _ = slots.send(1)
         return 1
     }
-    // Check the response starts with HTTP/1.1 101.
     let status = raw_response_status(resp)
     if status != 101 {
         // Not an upgrade — forward the response as-is and close.
-        let _ = tcp_write(c, resp)
+        let _ = tcp_write_all(c, resp)
         let _ = tcp_close(up)
         let _ = tcp_close(c)
         let _ = done.send(pack_done(0, status, server_idx, str_len(resp)))
         let _ = slots.send(1)
         return 0
     }
-    // Relay the 101 response to the client; connection is now a tunnel.
-    let _ = tcp_write(c, resp)
-    // Bidirectional relay until either side closes.
+    // Relay 101 (+ any early frame bytes) to the client; connection is now a tunnel.
+    let _ = tcp_write_all(c, resp)
     let mut alive = 1
     let mut nbytes = str_len(resp)
-    let idle = 60000
+    // Long-lived realtime sessions (dashboards); idle closes after 1h of silence.
+    let idle = 3600000
     let _ = tcp_set_timeout(c, 0)
     let _ = tcp_set_timeout(up, 0)
     while alive == 1 {
@@ -2354,7 +2519,7 @@ fn worker_ws_upstream(
                 if str_eq(data, "") {
                     alive = 0
                 } else {
-                    let w = tcp_write(up, data)
+                    let w = tcp_write_all(up, data)
                     if w < 0 {
                         alive = 0
                     } else {
@@ -2367,7 +2532,7 @@ fn worker_ws_upstream(
                     if str_eq(data, "") {
                         alive = 0
                     } else {
-                        let w = tcp_write(c, data)
+                        let w = tcp_write_all(c, data)
                         if w < 0 {
                             alive = 0
                         } else {
@@ -2385,6 +2550,117 @@ fn worker_ws_upstream(
     if access_log == 1 {
         let rid = make_req_id()
         print(f"[access] id={rid} WS {path} upstream={host}:{port} bytes={nbytes}")
+    }
+    let _ = done.send(pack_done(0, 101, server_idx, nbytes))
+    let _ = slots.send(1)
+    return 0
+}
+
+// WebSocket tunnel over TLS edge (WSS): same as plain WS, but client I/O is
+// tls_read/tls_write. TlsConn ownership moves into this worker (must be Send).
+fn worker_ws_tls_upstream(
+    conn: TlsConn,
+    ws_raw: string,
+    host: string,
+    port: int,
+    timeout_ms: int,
+    server_idx: int,
+    access_log: int,
+    path: string,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let cfd = tls_conn_fd(conn)
+    let up = tcp_connect(host, port)
+    if up < 0 {
+        let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
+        let _ = tls_conn_close(conn)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    let _ = tcp_nodelay(up)
+    let n = tcp_write_all(up, ws_raw)
+    if n < 0 {
+        let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
+        let _ = tcp_close(up)
+        let _ = tls_conn_close(conn)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    let resp = ws_read_http_response(up, timeout_ms)
+    if str_eq(resp, "") {
+        let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
+        let _ = tcp_close(up)
+        let _ = tls_conn_close(conn)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    let status = raw_response_status(resp)
+    if status != 101 {
+        let _ = tls_write(conn, resp)
+        let _ = tcp_close(up)
+        let _ = tls_conn_close(conn)
+        let _ = done.send(pack_done(0, status, server_idx, str_len(resp)))
+        let _ = slots.send(1)
+        return 0
+    }
+    let w0 = tls_write(conn, resp)
+    if w0 < 0 {
+        let _ = tcp_close(up)
+        let _ = tls_conn_close(conn)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    let mut alive = 1
+    let mut nbytes = str_len(resp)
+    let idle = 3600000
+    let _ = tcp_set_timeout(up, 0)
+    while alive == 1 {
+        let which = io_native_poll2(cfd, up, idle)
+        if which < 0 {
+            alive = 0
+        } else {
+            if which == 0 {
+                // Client TLS readable
+                let data = tls_read(conn, 65536)
+                if str_eq(data, "") {
+                    alive = 0
+                } else {
+                    let w = tcp_write_all(up, data)
+                    if w < 0 {
+                        alive = 0
+                    } else {
+                        nbytes = nbytes + str_len(data)
+                    }
+                }
+            } else {
+                if which == 1 {
+                    let data = tcp_read(up)
+                    if str_eq(data, "") {
+                        alive = 0
+                    } else {
+                        let w = tls_write(conn, data)
+                        if w < 0 {
+                            alive = 0
+                        } else {
+                            nbytes = nbytes + str_len(data)
+                        }
+                    }
+                } else {
+                    alive = 0
+                }
+            }
+        }
+    }
+    let _ = tcp_close(up)
+    let _ = tls_conn_close(conn)
+    if access_log == 1 {
+        let rid = make_req_id()
+        print(f"[access] id={rid} WSS {path} upstream={host}:{port} bytes={nbytes}")
     }
     let _ = done.send(pack_done(0, 101, server_idx, nbytes))
     let _ = slots.send(1)

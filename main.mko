@@ -633,28 +633,102 @@ fn main() {
                                     }
                                     if str_eq(proto, "h2") {
                                         tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets)
+                                        servers = tr.servers
+                                        backends = tr.backends
+                                        buckets = tr.buckets
+                                        st.total_req = st.total_req + 1
+                                        st.total_bytes_out = st.total_bytes_out + tr.bytes_out
+                                        st.retries = st.retries + tr.retries
+                                        if tr.err != 0 {
+                                            st.total_err = st.total_err + 1
+                                        }
+                                        if tr.denied == 1 {
+                                            st.denied = st.denied + 1
+                                        }
+                                        if tr.rate_limited == 1 {
+                                            st.rate_limited = st.rate_limited + 1
+                                        }
+                                        st.last_req_ms = now_ms()
+                                        let _ = tls_conn_close(tconn)
+                                        completed = completed + 1
                                     } else {
-                                        let raw_req = parse_raw_request(tls_read(tconn, 65536))
-                                        tr = handle_tls_proxy_request(tconn, raw_req, h.frontend, routes, acls, backends, servers, buckets, 0)
+                                        let raw_bytes = tls_read(tconn, 65536)
+                                        let raw_req = parse_raw_request(raw_bytes)
+                                        // WSS: tunnel Upgrade: websocket off the accept thread
+                                        if str_eq(raw_req.upgrade, "websocket") {
+                                            let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets)
+                                            servers = dp.servers
+                                            backends = dp.backends
+                                            buckets = dp.buckets
+                                            if dp.need_worker == 0 {
+                                                let mut code = 503
+                                                if raw_req.ok == 0 {
+                                                    code = 400
+                                                } else {
+                                                    if dp.denied == 1 {
+                                                        code = 403
+                                                    } else {
+                                                        if dp.rate_limited == 1 {
+                                                            code = 429
+                                                        }
+                                                    }
+                                                }
+                                                let _ = tls_http_respond_method(tconn, "GET", code, "websocket rejected\n")
+                                                let _ = tls_conn_close(tconn)
+                                                st.total_req = st.total_req + 1
+                                                st.total_err = st.total_err + 1
+                                                if dp.denied == 1 {
+                                                    st.denied = st.denied + 1
+                                                }
+                                                if dp.rate_limited == 1 {
+                                                    st.rate_limited = st.rate_limited + 1
+                                                }
+                                                st.last_req_ms = now_ms()
+                                                completed = completed + 1
+                                            } else {
+                                                if chan_len(slots) <= 0 {
+                                                    let _ = tls_http_respond_method(tconn, "GET", 503, "workers busy\n")
+                                                    let _ = tls_conn_close(tconn)
+                                                    servers = server_conn_delta(servers, dp.server_idx, 0 - 1)
+                                                    st.total_req = st.total_req + 1
+                                                    st.total_err = st.total_err + 1
+                                                    st.last_req_ms = now_ms()
+                                                    completed = completed + 1
+                                                } else {
+                                                    let _ = slots.recv()
+                                                    inflight = inflight + 1
+                                                    st.active_conns = st.active_conns + 1
+                                                    st.total_req = st.total_req + 1
+                                                    st.last_req_ms = now_ms()
+                                                    // Ownership of tconn moves into the worker — do not close here.
+                                                    let _ = pool.kick(worker_ws_tls_upstream(
+                                                        tconn, dp.ws_raw, dp.up_host, dp.up_port, dp.timeout_ms,
+                                                        dp.server_idx, dp.access_log, dp.path, slots, done
+                                                    ))
+                                                }
+                                            }
+                                        } else {
+                                            tr = handle_tls_proxy_request(tconn, raw_req, h.frontend, routes, acls, backends, servers, buckets, 0)
+                                            servers = tr.servers
+                                            backends = tr.backends
+                                            buckets = tr.buckets
+                                            st.total_req = st.total_req + 1
+                                            st.total_bytes_out = st.total_bytes_out + tr.bytes_out
+                                            st.retries = st.retries + tr.retries
+                                            if tr.err != 0 {
+                                                st.total_err = st.total_err + 1
+                                            }
+                                            if tr.denied == 1 {
+                                                st.denied = st.denied + 1
+                                            }
+                                            if tr.rate_limited == 1 {
+                                                st.rate_limited = st.rate_limited + 1
+                                            }
+                                            st.last_req_ms = now_ms()
+                                            let _ = tls_conn_close(tconn)
+                                            completed = completed + 1
+                                        }
                                     }
-                                    servers = tr.servers
-                                    backends = tr.backends
-                                    buckets = tr.buckets
-                                    st.total_req = st.total_req + 1
-                                    st.total_bytes_out = st.total_bytes_out + tr.bytes_out
-                                    st.retries = st.retries + tr.retries
-                                    if tr.err != 0 {
-                                        st.total_err = st.total_err + 1
-                                    }
-                                    if tr.denied == 1 {
-                                        st.denied = st.denied + 1
-                                    }
-                                    if tr.rate_limited == 1 {
-                                        st.rate_limited = st.rate_limited + 1
-                                    }
-                                    st.last_req_ms = now_ms()
-                                    let _ = tls_conn_close(tconn)
-                                    completed = completed + 1
                                     } else {
                                         if len(pending_clients) >= pending_limit {
                                             log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")

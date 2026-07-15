@@ -1,14 +1,14 @@
 pack proxy
 
 struct FwdResult {
-    status: int
-    body: string
-    ok: int
-    bytes: int
-    retries: int
-    content_type: string
+    status: int = 0
+    body: string = ""
+    ok: int = 0
+    bytes: int = 0
+    retries: int = 0
+    content_type: string = ""
     // Extra upstream headers to pass through, each line as "\r\nName: value"
-    extra_headers: string
+    extra_headers: string = ""
 }
 
 fn guess_content_type(body: string) -> string {
@@ -43,13 +43,13 @@ fn guess_content_type(body: string) -> string {
 }
 
 struct ProxyResult {
-    err: int
-    bytes_out: int
-    denied: int
-    rate_limited: int
-    retries: int
-    server_idx: int
-    bytes_in: int
+    err: int = 0
+    bytes_out: int = 0
+    denied: int = 0
+    rate_limited: int = 0
+    retries: int = 0
+    server_idx: int = -1
+    bytes_in: int = 0
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
@@ -1089,7 +1089,6 @@ fn forward_http(
         body: resp,
         ok: ok,
         bytes: blen,
-        retries: 0,
         content_type: ct,
         extra_headers: extra
     }
@@ -1609,11 +1608,6 @@ fn handle_tls_proxy_request(
     let mut rate_list = buckets
     let mut out = ProxyResult {
         err: 1,
-        bytes_out: 0,
-        denied: 0,
-        rate_limited: 0,
-        retries: 0,
-        server_idx: -1,
         bytes_in: req.bytes_in,
         servers: srv_list,
         backends: be_list,
@@ -1841,12 +1835,6 @@ fn handle_tls_h2_once(
     let mut rate_list = buckets
     let mut out = ProxyResult {
         err: 1,
-        bytes_out: 0,
-        denied: 0,
-        rate_limited: 0,
-        retries: 0,
-        server_idx: -1,
-        bytes_in: 0,
         servers: srv_list,
         backends: be_list,
         buckets: rate_list
@@ -1970,11 +1958,6 @@ fn handle_h3_proxy_request(
     let mut rate_list = buckets
     let mut out = ProxyResult {
         err: 1,
-        bytes_out: 0,
-        denied: 0,
-        rate_limited: 0,
-        retries: 0,
-        server_idx: -1,
         bytes_in: req.bytes_in,
         servers: srv_list,
         backends: be_list,
@@ -2117,15 +2100,7 @@ fn worker_upstream(
     slots: chan[int],
     done: chan[int]
 ) -> int {
-    let mut res = FwdResult {
-        status: 0,
-        body: "",
-        ok: 0,
-        bytes: 0,
-        retries: 0,
-        content_type: "",
-        extra_headers: ""
-    }
+    let mut res = FwdResult {}
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
         if fd >= 0 {
@@ -2155,7 +2130,6 @@ fn worker_upstream(
                 body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
-                retries: 0,
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: extract_pass_headers(uph)
             }
@@ -2219,15 +2193,7 @@ fn worker_raw_upstream(
     slots: chan[int],
     done: chan[int]
 ) -> int {
-    let mut res = FwdResult {
-        status: 0,
-        body: "",
-        ok: 0,
-        bytes: 0,
-        retries: 0,
-        content_type: "",
-        extra_headers: ""
-    }
+    let mut res = FwdResult {}
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
         if fd >= 0 {
@@ -2257,7 +2223,6 @@ fn worker_raw_upstream(
                 body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
-                retries: 0,
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: extract_pass_headers(uph)
             }
@@ -2481,7 +2446,6 @@ fn proxy_http_once(
             bytes_out: d.bytes_out,
             denied: d.denied,
             rate_limited: d.rate_limited,
-            retries: 0,
             server_idx: d.server_idx,
             bytes_in: d.bytes_in,
             servers: d.servers,
@@ -2501,10 +2465,7 @@ fn proxy_http_once(
         let _ = http_respond(c, st, res.body)
         let _ = http_close(c)
         return ProxyResult {
-            err: 0,
             bytes_out: res.bytes,
-            denied: 0,
-            rate_limited: 0,
             retries: res.retries,
             server_idx: d.server_idx,
             bytes_in: d.bytes_in,
@@ -2518,9 +2479,6 @@ fn proxy_http_once(
     let _ = http_close(c)
     return ProxyResult {
         err: 1,
-        bytes_out: 0,
-        denied: 0,
-        rate_limited: 0,
         retries: res.retries,
         server_idx: d.server_idx,
         bytes_in: d.bytes_in,

@@ -540,10 +540,17 @@ fn main() {
                                             let _ = slots.recv()
                                             inflight = inflight + 1
                                             st.active_conns = st.active_conns + 1
-                                            let _ = pool.kick(worker_raw_upstream(
-                                                dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
-                                                dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.orig_host, slots, done
-                                            ))
+                                            if dp.is_ws == 1 {
+                                                let _ = pool.kick(worker_ws_upstream(
+                                                    dp.c, dp.ws_raw, dp.up_host, dp.up_port, dp.timeout_ms,
+                                                    dp.server_idx, dp.access_log, ph.frontend.name, dp.path, slots, done
+                                                ))
+                                            } else {
+                                                let _ = pool.kick(worker_raw_upstream(
+                                                    dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
+                                                    dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.orig_host, slots, done
+                                                ))
+                                            }
                                         }
                                     } else {
                                         let _ = tcp_close(pc.fd)

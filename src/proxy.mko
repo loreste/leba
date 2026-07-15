@@ -141,20 +141,24 @@ struct Dispatch {
     rate_limited: int
     bytes_out: int
     bytes_in: int
+    is_ws: int = 0
+    ws_raw: string = ""
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
 }
 
 struct RawRequest {
-    ok: int
-    method: string
-    path: string
-    host: string
-    cookie: string
-    traceparent: string
-    body: string
-    bytes_in: int
+    ok: int = 0
+    method: string = ""
+    path: string = ""
+    host: string = ""
+    cookie: string = ""
+    traceparent: string = ""
+    body: string = ""
+    bytes_in: int = 0
+    upgrade: string = ""
+    raw: string = ""
 }
 
 fn raw_request_complete(raw: string, max_bytes: int) -> int {
@@ -997,6 +1001,10 @@ fn parse_raw_request(raw: string) -> RawRequest {
             ok = 0
         }
     }
+    let mut upgrade = http_parsed_header(parsed, "Upgrade")
+    if str_eq(upgrade, "") {
+        upgrade = raw_header(raw, "Upgrade")
+    }
     return RawRequest {
         ok: ok,
         method: method,
@@ -1005,7 +1013,9 @@ fn parse_raw_request(raw: string) -> RawRequest {
         cookie: cookie,
         traceparent: traceparent,
         body: body,
-        bytes_in: str_len(raw)
+        bytes_in: str_len(raw),
+        upgrade: str_to_lower(upgrade),
+        raw: raw
     }
 }
 
@@ -1556,6 +1566,13 @@ fn prepare_raw_dispatch(
     }
     srv_list = server_conn_delta(srv_list, si, 1)
 
+    let mut ws = 0
+    let mut ws_raw = ""
+    if str_eq(req.upgrade, "websocket") {
+        ws = 1
+        ws_raw = req.raw
+    }
+
     return Dispatch {
         need_worker: 1,
         c: c,
@@ -1579,6 +1596,8 @@ fn prepare_raw_dispatch(
         rate_limited: 0,
         bytes_out: 0,
         bytes_in: req.bytes_in,
+        is_ws: ws,
+        ws_raw: ws_raw,
         servers: srv_list,
         backends: be_list,
         buckets: rate_list
@@ -2259,6 +2278,117 @@ fn worker_raw_upstream(
     let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
     let _ = slots.send(1)
     return err
+}
+
+// WebSocket tunnel: forward the full upgrade request to the backend,
+// relay the 101 Switching Protocols response, then bidirectional TCP relay.
+fn worker_ws_upstream(
+    c: int,
+    ws_raw: string,
+    host: string,
+    port: int,
+    timeout_ms: int,
+    server_idx: int,
+    access_log: int,
+    frontend_name: string,
+    path: string,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let up = tcp_connect(host, port)
+    if up < 0 {
+        let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
+        let _ = tcp_close(c)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    let _ = tcp_nodelay(up)
+    // Forward the original upgrade request verbatim to the backend.
+    let n = tcp_write(up, ws_raw)
+    if n < 0 {
+        let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
+        let _ = tcp_close(up)
+        let _ = tcp_close(c)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    // Read backend response (should be 101 Switching Protocols).
+    let _ = tcp_set_timeout(up, timeout_ms)
+    let resp = tcp_read(up)
+    if str_eq(resp, "") {
+        let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
+        let _ = tcp_close(up)
+        let _ = tcp_close(c)
+        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = slots.send(1)
+        return 1
+    }
+    // Check the response starts with HTTP/1.1 101.
+    let status = raw_response_status(resp)
+    if status != 101 {
+        // Not an upgrade — forward the response as-is and close.
+        let _ = tcp_write(c, resp)
+        let _ = tcp_close(up)
+        let _ = tcp_close(c)
+        let _ = done.send(pack_done(0, status, server_idx, str_len(resp)))
+        let _ = slots.send(1)
+        return 0
+    }
+    // Relay the 101 response to the client; connection is now a tunnel.
+    let _ = tcp_write(c, resp)
+    // Bidirectional relay until either side closes.
+    let mut alive = 1
+    let mut nbytes = str_len(resp)
+    let idle = 60000
+    let _ = tcp_set_timeout(c, 0)
+    let _ = tcp_set_timeout(up, 0)
+    while alive == 1 {
+        let which = io_native_poll2(c, up, idle)
+        if which < 0 {
+            alive = 0
+        } else {
+            if which == 0 {
+                let data = tcp_read(c)
+                if str_eq(data, "") {
+                    alive = 0
+                } else {
+                    let w = tcp_write(up, data)
+                    if w < 0 {
+                        alive = 0
+                    } else {
+                        nbytes = nbytes + str_len(data)
+                    }
+                }
+            } else {
+                if which == 1 {
+                    let data = tcp_read(up)
+                    if str_eq(data, "") {
+                        alive = 0
+                    } else {
+                        let w = tcp_write(c, data)
+                        if w < 0 {
+                            alive = 0
+                        } else {
+                            nbytes = nbytes + str_len(data)
+                        }
+                    }
+                } else {
+                    alive = 0
+                }
+            }
+        }
+    }
+    let _ = tcp_close(up)
+    let _ = tcp_close(c)
+    if access_log == 1 {
+        let rid = make_req_id()
+        print(f"[access] id={rid} WS {path} upstream={host}:{port} bytes={nbytes}")
+    }
+    let _ = done.send(pack_done(0, 101, server_idx, nbytes))
+    let _ = slots.send(1)
+    return 0
 }
 
 fn prepare_tcp_dispatch(

@@ -231,7 +231,7 @@ fn stats_json(
     let mut b = str_builder()
     builder_write(b, "{")
     builder_write(b, "\"name\":\"leba\",")
-    builder_write(b, "\"version\":\"0.4.0\",")
+    builder_write(b, "\"version\":\"0.5.0\",")
     builder_write(b, "\"uptime_ms\":")
     builder_write(b, int_to_string(uptime))
     builder_write(b, ",\"total_req\":")

@@ -452,12 +452,14 @@ fn main() {
                 }
             }
             if inflight > 0 {
-                if chan_len(done) > 0 {
-                    let v = done.recv()
-                    servers = apply_done_servers(v, servers)
-                    st = apply_done(v, servers, st)
-                    inflight = inflight - 1
-                    completed = completed + 1
+                match done.try_recv() {
+                    Ok(v) => {
+                        servers = apply_done_servers(v, servers)
+                        st = apply_done(v, servers, st)
+                        inflight = inflight - 1
+                        completed = completed + 1
+                    }
+                    Err(_) => {}
                 }
             }
             if max_req > 0 {
@@ -810,10 +812,17 @@ fn main() {
             }
         }
         while inflight > 0 {
-            let v = done.recv()
-            servers = apply_done_servers(v, servers)
-            st = apply_done(v, servers, st)
-            inflight = inflight - 1
+            match done.recv_timeout(5000) {
+                Ok(v) => {
+                    servers = apply_done_servers(v, servers)
+                    st = apply_done(v, servers, st)
+                    inflight = inflight - 1
+                }
+                Err(_) => {
+                    log_warn_event("drain_timeout", f"inflight={inflight} action=force_exit")
+                    inflight = 0
+                }
+            }
         }
         let mut pc_close = 0
         while pc_close < len(pending_clients) {

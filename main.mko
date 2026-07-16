@@ -708,25 +708,51 @@ fn main() {
                                                 }
                                             }
                                         } else {
-                                            tr = handle_tls_proxy_request(tconn, raw_req, h.frontend, routes, acls, backends, servers, buckets, 0)
-                                            servers = tr.servers
-                                            backends = tr.backends
-                                            buckets = tr.buckets
-                                            st.total_req = st.total_req + 1
-                                            st.total_bytes_out = st.total_bytes_out + tr.bytes_out
-                                            st.retries = st.retries + tr.retries
-                                            if tr.err != 0 {
+                                            // Dispatch TLS HTTP to worker (TlsConn ownership moves).
+                                            let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets)
+                                            servers = dp_tls.servers
+                                            backends = dp_tls.backends
+                                            buckets = dp_tls.buckets
+                                            if dp_tls.need_worker == 0 {
+                                                let mut tls_code = 503
+                                                if dp_tls.denied == 1 {
+                                                    tls_code = 403
+                                                    st.denied = st.denied + 1
+                                                }
+                                                if dp_tls.rate_limited == 1 {
+                                                    tls_code = 429
+                                                    st.rate_limited = st.rate_limited + 1
+                                                }
+                                                let _ = tls_http_respond_method(tconn, raw_req.method, tls_code, "rejected\n")
+                                                let _ = tls_conn_close(tconn)
+                                                st.total_req = st.total_req + 1
                                                 st.total_err = st.total_err + 1
+                                                st.last_req_ms = now_ms()
+                                                completed = completed + 1
+                                            } else {
+                                                if chan_len(slots) <= 0 {
+                                                    let _ = tls_http_respond_method(tconn, raw_req.method, 503, "workers busy\n")
+                                                    let _ = tls_conn_close(tconn)
+                                                    servers = server_conn_delta(servers, dp_tls.server_idx, 0 - 1)
+                                                    st.total_req = st.total_req + 1
+                                                    st.total_err = st.total_err + 1
+                                                    st.last_req_ms = now_ms()
+                                                    completed = completed + 1
+                                                } else {
+                                                    let _ = slots.recv()
+                                                    inflight = inflight + 1
+                                                    st.active_conns = st.active_conns + 1
+                                                    let traceparent = proxy_traceparent(raw_req.traceparent, h.frontend.access_log)
+                                                    // TlsConn ownership moves into worker.
+                                                    let _ = pool.kick(worker_tls_upstream(
+                                                        tconn, raw_req.method, raw_req.path, raw_req.body, raw_req.cookie,
+                                                        traceparent, traceparent_trace_id(traceparent), traceparent_span_id(traceparent),
+                                                        dp_tls.up_host, dp_tls.up_port, dp_tls.up_pool,
+                                                        dp_tls.timeout_ms, dp_tls.retries, dp_tls.server_idx,
+                                                        dp_tls.access_log, raw_req.host, slots, done
+                                                    ))
+                                                }
                                             }
-                                            if tr.denied == 1 {
-                                                st.denied = st.denied + 1
-                                            }
-                                            if tr.rate_limited == 1 {
-                                                st.rate_limited = st.rate_limited + 1
-                                            }
-                                            st.last_req_ms = now_ms()
-                                            let _ = tls_conn_close(tconn)
-                                            completed = completed + 1
                                         }
                                     }
                                     } else {

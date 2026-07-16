@@ -2282,6 +2282,90 @@ fn worker_raw_upstream(
 
 // WebSocket route pick only — never writes to the client (safe for TLS and plain).
 // On need_worker=0: check denied / rate_limited / err and respond with the right protocol.
+// TLS HTTP worker: runs upstream I/O on a crew worker instead of the accept thread.
+// TlsConn ownership moves into the worker (caller must not use it after kick).
+fn worker_tls_upstream(
+    conn: TlsConn,
+    method: string,
+    path: string,
+    body: string,
+    cookie: string,
+    traceparent: string,
+    trace_id: string,
+    span_id: string,
+    host: string,
+    port: int,
+    pool: int,
+    timeout_ms: int,
+    retries: int,
+    server_idx: int,
+    access_log: int,
+    orig_host: string,
+    slots: chan[int],
+    done: chan[int]
+) -> int {
+    let mut res = FwdResult {}
+    if pool >= 0 {
+        let fd = tcp_pool_acquire(pool)
+        if fd >= 0 {
+            let mut hb = str_builder()
+            if not str_eq(orig_host, "") {
+                builder_write(hb, f"Host: {orig_host}\r\n")
+            }
+            if not str_eq(cookie, "") {
+                builder_write(hb, f"Cookie: {cookie}\r\n")
+            }
+            if not str_eq(traceparent, "") {
+                builder_write(hb, f"traceparent: {traceparent}\r\n")
+            }
+            let headers = builder_string(hb)
+            let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
+            let ok = http_forward_ok(fr)
+            let bdy = http_forward_body(fr)
+            let uph = http_forward_headers(fr)
+            res = FwdResult {
+                status: http_forward_status(fr),
+                body: bdy,
+                ok: ok,
+                bytes: http_forward_body_len(fr),
+                content_type: resolve_content_type(uph, bdy),
+                extra_headers: extract_pass_headers(uph)
+            }
+            let _rel = tcp_pool_release(pool, fd, ok)
+        }
+    }
+    if res.ok == 0 {
+        res = forward_http_retries(method, path, body, cookie, traceparent, host, port, timeout_ms, retries, orig_host)
+    }
+    let mut err = 0
+    let mut st = res.status
+    let mut bytes = res.bytes
+    if res.ok == 1 {
+        if st <= 0 {
+            st = 200
+        }
+        let mut ct = res.content_type
+        if str_eq(ct, "") {
+            ct = guess_content_type(res.body)
+        }
+        let _ = tls_http_respond_full(conn, method, st, ct, res.extra_headers, res.body)
+    } else {
+        err = 1
+        st = 502
+        bytes = 0
+        log_upstream_failure(method, path, host, port, res.status, res.retries)
+        let _ = tls_http_respond_method(conn, method, 502, "bad gateway\n")
+    }
+    if access_log == 1 {
+        let rid = make_req_id()
+        print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
+    }
+    let _ = tls_conn_close(conn)
+    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = slots.send(1)
+    return err
+}
+
 fn prepare_ws_dispatch(
     req: RawRequest,
     fe: Frontend,

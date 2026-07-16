@@ -63,6 +63,7 @@ fn apply_done(
 
 fn apply_done_servers(v: int, servers: []Server) -> []Server {
     let err = unpack_done_err(v)
+    let status = unpack_done_status(v)
     let si = unpack_done_si(v)
     let bytes = unpack_done_bytes(v)
     let mut srv = servers
@@ -73,6 +74,9 @@ fn apply_done_servers(v: int, servers: []Server) -> []Server {
         } else {
             srv = mark_server_req(srv, si, 0, 1)
         }
+        // Passive health: track upstream status and auto-mark DOWN after
+        // consecutive 5xx responses (fall threshold defaults to 3).
+        srv = apply_passive_health(srv, si, status, 3)
     }
     return srv
 }

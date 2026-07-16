@@ -1516,6 +1516,28 @@ fn prepare_raw_dispatch(
         return d
     }
 
+    // CORS preflight — respond immediately without hitting backend.
+    if is_cors_preflight(method) == 1 {
+        let _ = raw_http_respond_full(c, method, 204, "text/plain", cors_headers(), "")
+        let mut dc = empty
+        dc.err = 0
+        dc.servers = srv_list
+        dc.backends = be_list
+        dc.buckets = rate_list
+        return dc
+    }
+
+    // Static file serving — try root directory before proxying.
+    if serve_static_file(c, method, path, fe.root) == 1 {
+        let mut ds = empty
+        ds.err = 0
+        ds.bytes_out = 1
+        ds.servers = srv_list
+        ds.backends = be_list
+        ds.buckets = rate_list
+        return ds
+    }
+
     if fe.rate_limit > 0 {
         let ri = rate_find(rate_list, fe.name)
         if ri >= 0 {

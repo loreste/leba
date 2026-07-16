@@ -84,10 +84,13 @@ fn stats_auth_placeholder(user: string, pass: string) -> int {
         return 1
     }
     if str_eq(user, "admin") {
-        if str_eq(pass, "leba") {
-            return 1
-        }
+        if str_eq(pass, "leba") { return 1 }
+        if str_eq(pass, "admin") { return 1 }
+        if str_eq(pass, "password") { return 1 }
+        if str_eq(pass, "changeme") { return 1 }
     }
+    if str_eq(pass, "password") { return 1 }
+    if str_eq(pass, "changeme") { return 1 }
     return 0
 }
 
@@ -346,20 +349,25 @@ fn doctor_world(w: World) -> DoctorReport {
 
     if has_stats_frontend == 1 {
         if len(w.admin_users) == 0 {
-            builder_write(b, "WARN   stats frontend has no auth configured\n")
-            builder_write(b, "  fix:  add `auth user:strong-password:admin` or `admin_user user pass role` under the stats frontend\n")
-            warnings = warnings + 1
+            if str_eq(w.stats_user, "") {
+                builder_write(b, "ERROR  stats frontend has no auth configured — admin API will reject all requests\n")
+                builder_write(b, "  fix:  add `auth user:strong-password:admin` or `admin_user_hash USER HASH ROLE`\n")
+                errors = errors + 1
+            } else {
+                builder_write(b, "WARN   stats frontend uses inline credentials; prefer admin_user_hash with hashed passwords\n")
+                warnings = warnings + 1
+            }
         } else {
             for _, au in range w.admin_users {
                 if stats_auth_placeholder(au.user, au.pass) == 1 {
-                    builder_write(b, "WARN   stats auth uses placeholder/demo credentials\n")
-                    builder_write(b, "  fix:  replace stats credentials before exposing the admin port\n")
-                    warnings = warnings + 1
+                    builder_write(b, "ERROR  stats auth uses placeholder/demo credentials — not safe for production\n")
+                    builder_write(b, "  fix:  replace with strong credentials or use admin_user_hash with hashed passwords\n")
+                    errors = errors + 1
                 }
                 if stats_hash_placeholder(au.pass_hash) == 1 {
-                    builder_write(b, "WARN   stats auth hash uses placeholder value\n")
-                    builder_write(b, "  fix:  replace admin_users_file hashes before exposing the admin port\n")
-                    warnings = warnings + 1
+                    builder_write(b, "ERROR  stats auth hash uses placeholder value — not safe for production\n")
+                    builder_write(b, "  fix:  use `leba admin hash-password PASSWORD` and store the generated hash\n")
+                    errors = errors + 1
                 }
                 if admin_hash_shape_ok(au.pass_hash) == 0 {
                     builder_write(b, f"ERROR  admin user {au.user} has malformed password hash\n")

@@ -242,10 +242,11 @@ fn log_info(msg: string) {
 }
 
 fn log_event(level: string, event: string, detail: string) {
+    let ts = time_format(now_ms())
     if not str_eq(detail, "") {
-        print(f"[leba] level={level} event={event} {detail}")
+        print(f"[leba] ts={ts} level={level} event={event} {detail}")
     } else {
-        print(f"[leba] level={level} event={event}")
+        print(f"[leba] ts={ts} level={level} event={event}")
     }
 }
 

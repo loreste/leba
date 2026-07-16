@@ -217,20 +217,20 @@ fn TestDoctorUnknownBalance() {
     assert(str_contains(rep.text, "balance"))
 }
 
-fn TestDoctorWarnsStatsAuthPlaceholders() {
+fn TestDoctorRejectsStatsAuthPlaceholders() {
     let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend stats\n  bind 2\n  mode stats\n  auth CHANGE_ME_ADMIN:CHANGE_ME_PASSWORD:admin\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
     let w = parse_config_text(raw)
     let rep = doctor_world(w)
-    assert_eq(rep.ok, 1)
+    assert_eq(rep.ok, 0)
     assert(str_contains(rep.text, "placeholder/demo credentials"))
 }
 
-fn TestDoctorWarnsStatsWithoutAuth() {
+fn TestDoctorRejectsStatsWithoutAuth() {
     let raw = "frontend web\n  bind 1\n  mode http\n  default_backend api\nfrontend stats\n  bind 2\n  mode stats\nbackend api\n  server a 127.0.0.1:1 weight 1 check\n  server b 127.0.0.1:2 weight 1 check\n"
     let w = parse_config_text(raw)
     let rep = doctor_world(w)
-    assert_eq(rep.ok, 1)
-    assert(str_contains(rep.text, "stats frontend has no auth"))
+    assert_eq(rep.ok, 0)
+    assert(str_contains(rep.text, "no auth configured"))
 }
 
 fn TestDoctorRejectsUnknownAdminRole() {

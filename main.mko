@@ -229,7 +229,24 @@ fn main() {
     if stats_idx >= 0 {
         stats_fe = frontends[stats_idx]
     }
-    let stats_fd = http_bind_addr(stats_fe.bind_host, w.stats_port)
+    let mut stats_tls = 0
+    let mut stats_tls_srv = tls_server_new("", "")
+    if str_len(stats_fe.tls_cert) > 0 {
+        stats_tls = 1
+        if str_len(stats_fe.tls_client_ca) > 0 {
+            stats_tls_srv = tls_server_new_mtls(stats_fe.tls_cert, stats_fe.tls_key, stats_fe.tls_client_ca)
+            log_info_event("stats_mtls_enabled", f"client_ca={stats_fe.tls_client_ca}")
+        } else {
+            stats_tls_srv = tls_server_new(stats_fe.tls_cert, stats_fe.tls_key)
+            log_info_event("stats_tls_enabled", f"cert={stats_fe.tls_cert}")
+        }
+    }
+    let mut stats_fd = 0
+    if stats_tls == 1 {
+        stats_fd = tcp_listen_addr(stats_fe.bind_host, w.stats_port)
+    } else {
+        stats_fd = http_bind_addr(stats_fe.bind_host, w.stats_port)
+    }
     let mut tcp_fds = make([]int, 0, len(tcp_fes))
     let mut ti_bind = 0
     while ti_bind < len(tcp_fes) {
@@ -580,19 +597,37 @@ fn main() {
                 if rfd == stats_fd {
                     let sc = tcp_accept_nb(stats_fd)
                     if sc >= 0 {
-                        if len(pending_clients) >= pending_limit {
-                            log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=stats")
-                            let _ = tcp_close(sc)
+                        if stats_tls == 1 {
+                            // TLS stats: accept + handle inline (short-lived).
+                            let _ = io_set_nonblocking(sc, 0)
+                            let _ = tcp_set_timeout(sc, 3000)
+                            let sconn = tls_accept(stats_tls_srv, sc)
+                            let sraw = tls_read(sconn, 65536)
+                            if not str_eq(sraw, "") {
+                                let srp = handle_stats_tls_conn(sconn, sraw, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir)
+                                frontends = srp.frontends
+                                backends = srp.backends
+                                servers = srp.servers
+                                routes = srp.routes
+                                acls = srp.acls
+                            }
+                            let _ = tls_conn_close(sconn)
+                            completed = completed + 1
                         } else {
-                            let _ = tcp_set_timeout(sc, 1000)
-                            let _ = io_set_nonblocking(sc, 1)
-                            pending_clients = append(pending_clients, PendingClient {
-                                fd: sc,
-                                kind: 1,
-                                frontend_idx: -1,
-                                deadline_ms: now_ms() + 3000,
-                                buffer: ""
-                            })
+                            if len(pending_clients) >= pending_limit {
+                                log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=stats")
+                                let _ = tcp_close(sc)
+                            } else {
+                                let _ = tcp_set_timeout(sc, 1000)
+                                let _ = io_set_nonblocking(sc, 1)
+                                pending_clients = append(pending_clients, PendingClient {
+                                    fd: sc,
+                                    kind: 1,
+                                    frontend_idx: -1,
+                                    deadline_ms: now_ms() + 3000,
+                                    buffer: ""
+                                })
+                            }
                         }
                     }
                 }
@@ -964,7 +999,12 @@ fn main() {
     if has_server_watch == 1 {
         let _ = watch_close(server_watch)
     }
-    let _ = http_close_listener(stats_fd)
+    if stats_tls == 1 {
+        let _ = tcp_close(stats_fd)
+        let _ = tls_server_free(stats_tls_srv)
+    } else {
+        let _ = http_close_listener(stats_fd)
+    }
     clear_drain(drain_token)
     log_info_event("runtime_stop", f"completed={completed}")
     print("ok")

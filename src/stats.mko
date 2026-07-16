@@ -354,7 +354,7 @@ fn admin_auth_required(user: string, pass: string) -> int {
 
 fn admin_auth_ok(auth_header: string, user: string, pass: string) -> int {
     if admin_auth_required(user, pass) == 0 {
-        return 1
+        return 0
     }
     if str_eq(auth_header, basic_auth_header(user, pass)) {
         return 1
@@ -437,10 +437,11 @@ fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: strin
     if len(users) > 0 {
         return ""
     }
+    // No auto-login: if no auth is configured, deny access.
+    if admin_auth_required(fallback_user, fallback_pass) == 0 {
+        return ""
+    }
     if admin_auth_ok(auth_header, fallback_user, fallback_pass) == 1 {
-        if admin_auth_required(fallback_user, fallback_pass) == 0 {
-            return "admin"
-        }
         return "admin"
     }
     return ""
@@ -580,6 +581,125 @@ fn stats_raw_respond_ct(fd: int, method: string, status: int, content_type: stri
 
 fn stats_raw_respond_json(fd: int, method: string, status: int, body: string) -> int {
     return stats_raw_respond_ct(fd, method, status, "application/json; charset=utf-8", body)
+}
+
+fn stats_build_response(method: string, status: int, content_type: string, body: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, f"HTTP/1.1 {status} {stats_http_reason(status)}\r\nContent-Type: {content_type}\r\nContent-Length: {str_len(body)}\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return builder_string(b)
+}
+
+fn stats_tls_respond_ct(conn: TlsConn, method: string, status: int, content_type: string, body: string) -> int {
+    return tls_write(conn, stats_build_response(method, status, content_type, body))
+}
+
+fn stats_tls_respond_json(conn: TlsConn, method: string, status: int, body: string) -> int {
+    return stats_tls_respond_ct(conn, method, status, "application/json; charset=utf-8", body)
+}
+
+// TLS-aware stats/admin handler — same logic as handle_stats_raw_conn but over TLS.
+fn handle_stats_tls_conn(
+    conn: TlsConn,
+    raw: string,
+    st: LiveStats,
+    frontends: []Frontend,
+    backends: []Backend,
+    servers: []Server,
+    routes: []Route,
+    acls: []AclRule,
+    stats_user: string,
+    stats_pass: string,
+    admin_users: []AdminUser,
+    state_file: string,
+    state_key: string,
+    config_path: string,
+    config_dir: string
+) -> StatsConnResult {
+    let parsed = http_parse(raw)
+    let method = http_parsed_method(parsed)
+    let path = http_parsed_path(parsed)
+    let ponly = path_only(path)
+    let req_id = admin_audit_id()
+    let auth_hdr = http_parsed_header(parsed, "Authorization")
+    let auth_payload = basic_auth_payload(auth_hdr)
+    let auth_user = basic_auth_user(auth_payload)
+
+    if http_parsed_ok(parsed) == 0 {
+        let _ = stats_tls_respond_json(conn, "GET", 400, "{\"error\":\"bad request\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/health") {
+        let _ = stats_tls_respond_json(conn, method, 200, "{\"ok\":true,\"service\":\"leba\",\"admin\":true}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/livez") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+    if str_eq(ponly, "/readyz") {
+        let ar = handle_admin(method, ponly, servers, backends, config_dir)
+        let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
+        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+    }
+
+    let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
+    if str_eq(role, "") {
+        log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
+        let _ = stats_tls_respond_json(conn, method, 401, "{\"error\":\"unauthorized\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/") {
+        let body = webadmin_html()
+        let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/admin/ui") {
+        let body = webadmin_html()
+        let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    let need = admin_path_required_role(method, ponly)
+    if admin_role_allows(role, need) == 0 {
+        log_admin_audit(req_id, auth_user, role, method, ponly, 403, "forbidden")
+        let _ = stats_tls_respond_json(conn, method, 403, "{\"error\":\"forbidden\"}\n")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let ar = handle_admin_state(method, ponly, path, servers, frontends, backends, routes, acls, config_path, config_dir)
+    if ar.handled == 1 {
+        if ar.status == 200 {
+            if admin_path_mutates_state(ponly) == 1 {
+                let _ = save_runtime_state_file(state_file, config_dir, ar.servers, state_key)
+            }
+        }
+        let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
+        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+    }
+
+    if str_eq(ponly, "/stats") {
+        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let _ = stats_tls_respond_json(conn, method, 200, body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/metrics") {
+        let body = metrics_text(st, frontends, backends, servers)
+        let _ = stats_tls_respond_ct(conn, method, 200, "text/plain; version=0.0.4; charset=utf-8", body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    let _ = stats_tls_respond_ct(conn, method, 404, "text/plain; charset=utf-8", "not found\n")
+    log_admin_audit(req_id, auth_user, role, method, ponly, 404, "not_found")
+    return stats_conn_result(frontends, backends, servers, routes, acls)
 }
 
 fn handle_stats_raw_conn(

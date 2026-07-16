@@ -140,7 +140,7 @@ fn TestMetricsEscapesLabels() {
 
 fn TestAdminBasicAuthHelpers() {
     assert_eq(admin_auth_required("", ""), 0)
-    assert_eq(admin_auth_ok("", "", ""), 1)
+    assert_eq(admin_auth_ok("", "", ""), 0)
     assert_eq(admin_auth_required("admin", "leba"), 1)
     let h = basic_auth_header("admin", "leba")
     assert(str_contains(h, "Basic "))

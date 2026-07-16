@@ -1,124 +1,105 @@
 # Leba
 
-Leba is a small Linux load balancer written in
-[Mako](https://github.com/loreste/mako).
-
-This project exists to demonstrate what the Mako language can do in a real
-systems program: sockets, TLS, HTTP parsing, concurrency, config parsing,
-runtime state, tests, and a small built-in operator interface. It is also a
-working load balancer for the features described below, but it should be read
-as an honest engineering project and a language showcase, not as a finished
-platform.
-
-Repository:
+Leba is a load balancer written in [Mako](https://github.com/loreste/mako),
+showcasing what the language can do in a real systems program.
 
 ```bash
 gh repo clone loreste/leba
 ```
 
-## What It Is
+## Features
 
-Leba accepts traffic on configured frontends, chooses backend servers, forwards
-requests or streams, and exposes runtime controls through a local admin
-surface.
+### Load Balancing
+- Round-robin, least-connection, IP-hash, weighted, random, SIP Call-ID,
+  and consistent-hash algorithms
+- Sticky cookie session persistence
+- Per-server weight and maxconn limits
+- Per-backend maxconn limits
+- Connection draining (graceful removal from pool)
 
-Current focus areas:
+### Protocol Support
+- HTTP/1.1 reverse proxy
+- HTTP/2 over TLS (ALPN `h2`) with stream multiplexing
+- HTTP/3/QUIC ingress (requires quiche-linked Mako build)
+- WebSocket tunneling (Upgrade: websocket pass-through)
+- TCP forwarding (databases, Redis, etc.)
+- UDP/SIP signaling with Call-ID affinity
+- HTTPS redirect (`redirect https [code]`)
+- Static file serving (`root /path/to/files`)
+- CORS preflight handling (auto 204 for OPTIONS)
 
-- HTTP reverse proxying for straightforward request/response traffic.
-- TLS termination for HTTP frontends.
-- HTTP/2 ingress over TLS (ALPN `h2`) with stream multiplexing, request
-  bodies, and multi-request connections.
-- HTTP/3/QUIC ingress when Mako is built with quiche (`protocols …,h3`).
-- TCP forwarding for database-like services and other stream protocols.
-- SIP signaling forwarding over TCP or UDP with `Call-ID` affinity.
-- Routing by host, path, path prefix, method, and defaults.
-- Backend selection with round-robin, least-connection, weighted, random,
-  IP-hash, and SIP `Call-ID` strategies.
-- Health checks, rate limits, max connection limits, sticky cookies, and
-  request-size limits.
-- Runtime server actions: drain, ready, disable, enable, and reload
-  `servers_file` entries.
-- Built-in stats/admin frontend with RBAC, JSON stats, text metrics, probes,
-  and an HTML admin UI.
-- Admin vhost setup for domains, backends, backend servers, and certificate
-  paths.
-- CLI commands for config validation, request explanation, and admin actions.
-- Linux service files and deployment examples.
+### TLS & Security
+- TLS termination for HTTP frontends
+- mTLS with client certificate validation (`tls_client_ca`)
+- TLS on the admin/stats frontend
+- Encrypted state file at rest (AES-128-GCM via `state_key`)
+- ACL engine: deny/allow by path, host, method, header, source IP
+- IP allowlist/blocklist via `src` ACL rules
+- Per-frontend and per-client-IP rate limiting (token bucket)
+- Request body size limits
+- Directory traversal prevention for static file serving
+- RBAC for admin API (viewer, operator, admin roles)
+- Password hashing (argon2id, SHA-256, PBKDF2)
+- No auto-login: unconfigured auth denies access
+- WWW-Authenticate header on 401 responses (browser login dialog)
 
-## Why We Built It
+### Health Checks
+- Active HTTP path probes with configurable interval and timeout
+- Active TCP connect probes
+- Rise/fall thresholds to prevent flapping
+- Passive health detection (auto-mark DOWN after consecutive 5xx)
 
-Leba was built to push Mako against a practical networking workload.
+### Observability
+- JSON structured logs with RFC 3339 timestamps
+- Access logs to stdout and optional file (`access_log_file`)
+- W3C traceparent propagation (UUID v7 trace IDs)
+- Prometheus text metrics (`/metrics`)
+- JSON stats API (`/stats`)
+- Admin audit logging with request IDs and roles
+- Kubernetes-style probes (`/readyz`, `/livez`)
 
-The goal is to make the language prove itself in code that has to parse config,
-open sockets, handle concurrent traffic, call into runtime libraries, maintain
-state, expose a UI/API, and survive adversarial tests. The project gives Mako a
-concrete benchmark for ergonomics and runtime capability while producing a tool
-that can be inspected, run, and improved.
+### Admin & Operations
+- Built-in web admin dashboard (SPA)
+- REST API for drain, ready, disable, enable, reload
+- Vhost management API (create domains, backends, certificates)
+- Config doctor with validation and fix suggestions
+- Request explainer (dry-run routing decisions)
+- CLI for all admin operations
+- Hot reload via SIGHUP (servers_file changes)
+- File watch for automatic servers_file reload
+- Cooperative drain on SIGTERM/SIGINT (session cancel tokens)
+- Process-level connection budget (Limits API)
+- Runtime state persistence with optional encryption
 
-## Status
-
-Leba is early software. It has automated tests and has been exercised on Linux,
-but it is still evolving quickly.
-
-Known limits:
-
-- Linux is the intended runtime target. macOS is used for development and
-  testing.
-- HTTP/2 covers multiplexed request/response proxying; long-lived streaming and
-  server push are not goals.
-- HTTP/3 requires a quiche-linked Mako build (`MAKO_QUICHE_ROOT` or system
-  quiche). Upstream is still plain HTTP/1.1.
-- Config changes generally require restart. Some admin changes, such as server
-  state and vhost route/backend updates, apply live.
-- Certificate path changes are saved by the admin UI/API, but replacing an
-  active TLS context requires restart.
-- SIP support is signaling-focused; media relay is not implemented.
-- Operators should test with their own traffic before exposing it to critical
-  production paths.
+### Configuration
+- Line-oriented config with section-based grammar
+- Environment variable expansion (`$VAR` and `${VAR}`)
+- Include directive for multi-file configs
+- Duration parsing (`30s`, `2m`), size parsing (`1MB`), rate parsing (`1000/s`)
+- Header manipulation rules (`request_header_set`, `response_header_set`,
+  `request_header_del`, `response_header_add`)
 
 ## Build
-
-Install or build Mako first, then clone this repository:
 
 ```bash
 gh repo clone loreste/leba
 cd leba
 make build
-```
-
-Run the tests:
-
-```bash
 make test
 ```
 
-Validate the sample config:
+## Quick Start
 
 ```bash
-./leba doctor configs/leba.conf
+./leba doctor configs/leba.conf   # validate config
+./leba -f configs/leba.conf       # run
 ```
 
-Run locally:
+Sample frontends:
+- HTTP: `http://127.0.0.1:18080/`
+- Admin: `http://127.0.0.1:18404/`
 
-```bash
-./leba -f configs/leba.conf
-```
-
-The sample HTTP frontend listens on:
-
-```text
-http://127.0.0.1:18080/
-```
-
-The sample stats/admin frontend listens on:
-
-```text
-http://127.0.0.1:18404/
-```
-
-## Configuration
-
-A small HTTP setup:
+## Configuration Example
 
 ```text
 defaults
@@ -133,121 +114,99 @@ defaults
 frontend web
   bind 80
   mode http
+  rate_limit 5000/s
+  root /var/www/static
+  access_log_file /var/log/leba/access.log
+  deny src 10.0.0.99
+  allow src 10.0.0.
   route host app.example.com -> app
+  route default -> app
+  request_header_set X-Forwarded-Proto https
+  response_header_set X-Frame-Options DENY
+
+frontend secure
+  bind 443
+  mode http
+  tls_cert /etc/leba/certs/server.crt
+  tls_key /etc/leba/certs/server.key
+  protocols http/1.1,h2
   route default -> app
 
 backend app
-  balance round_robin
-  server app1 127.0.0.1:8080 check
-  server app2 127.0.0.1:8081 check
+  balance least_conn
+  health_path /health
+  health_interval 2s
+  server app1 127.0.0.1:8080 weight 100 check
+  server app2 127.0.0.1:8081 weight 100 check
 
 frontend stats
-  bind 127.0.0.1:18404
+  bind 127.0.0.1:9443
   mode stats
-  admin_users_file /etc/leba/admin-users.conf
+  tls_cert /etc/leba/certs/admin.crt
+  tls_key /etc/leba/certs/admin.key
+  tls_client_ca /etc/leba/certs/client-ca.pem
+  admin_user_hash admin $argon2id$... admin
 ```
 
-See `docs/CONFIG_REFERENCE.md` for the fuller configuration reference.
+## Admin API
 
-## Admin
+The `mode stats` frontend serves:
 
-The `mode stats` frontend serves the operator surface:
-
-- `GET /` for the built-in admin UI.
-- `GET /stats` for runtime JSON.
-- `GET /metrics` for text metrics.
-- `GET /readyz` and `GET /livez` for probes.
-- `GET /admin/servers` for server state.
-- `POST /admin/drain/{backend}/{server}`.
-- `POST /admin/ready/{backend}/{server}`.
-- `POST /admin/disable/{backend}/{server}`.
-- `POST /admin/enable/{backend}/{server}`.
-- `POST /admin/reload-servers`.
-- `GET /admin/vhosts`.
-- `POST /admin/vhost-create`.
-- `POST /admin/vhost-cert`.
-
-When admin users are configured, the dashboard, stats, metrics, and admin
-actions require HTTP Basic auth. Roles are `viewer`, `operator`, and `admin`.
-
-Example admin user file:
-
-```text
-admin $argon2id$v=19$m=19456,t=2,p=1$SALT$HASH admin
-viewer leba-kdf-v1:ITERATIONS:SALT_HEX:HASH_HEX viewer
-operator leba-kdf-v1:ITERATIONS:SALT_HEX:HASH_HEX operator
-```
-
-Generate a password hash:
-
-```bash
-./leba admin hash-password 'strong-password'
-```
+| Endpoint | Method | Role | Description |
+|----------|--------|------|-------------|
+| `/` | GET | viewer | Admin dashboard |
+| `/stats` | GET | viewer | Runtime JSON |
+| `/metrics` | GET | viewer | Prometheus text metrics |
+| `/readyz` | GET | public | Readiness probe |
+| `/livez` | GET | public | Liveness probe |
+| `/admin/servers` | GET | viewer | Server state |
+| `/admin/drain/{be}/{srv}` | POST | operator | Drain server |
+| `/admin/ready/{be}/{srv}` | POST | operator | Mark ready |
+| `/admin/disable/{be}/{srv}` | POST | operator | Force DOWN |
+| `/admin/enable/{be}/{srv}` | POST | operator | Force UP |
+| `/admin/reload-servers` | POST | operator | Reload servers_file |
+| `/admin/vhosts` | GET | viewer | List vhosts |
+| `/admin/vhost-create` | POST | admin | Create vhost |
+| `/admin/vhost-cert` | POST | admin | Update certificate paths |
 
 ## CLI
 
 ```text
 leba -f <config> [-n MAX]                 Run the proxy
-leba doctor <config>                      Validate config and print fixes
-leba check <config>                       Alias for doctor
-leba explain <config> METHOD PATH [HOST]  Dry-run routing and ACL decisions
-leba admin servers [ADDR] [USER:PASS]     List runtime servers
-leba admin stats [ADDR] [USER:PASS]       Fetch /stats
-leba admin reload-servers [ADDR] [AUTH]   Reload servers_file backends
+leba doctor <config>                      Validate config
+leba explain <config> METHOD PATH [HOST]  Dry-run routing
+leba admin servers [ADDR] [USER:PASS]     List servers
 leba admin drain BE SRV [ADDR] [AUTH]     Drain a server
-leba admin ready BE SRV [ADDR] [AUTH]     Mark server ready
-leba admin disable BE SRV [ADDR] [AUTH]   Force DOWN
-leba admin enable BE SRV [ADDR] [AUTH]    Force UP
-leba admin hash-password PASSWORD         Print a password hash
+leba admin ready BE SRV [ADDR] [AUTH]     Mark ready
+leba admin hash-password PASSWORD         Generate hash
 leba version                              Print version
-leba help                                 Print help
 ```
 
-The admin CLI can target a local port, remote endpoint, NAT, or port-forward:
+## Deployment
 
 ```bash
-export LEBA_ADMIN_ADDR=127.0.0.1:18404
-export LEBA_ADMIN_AUTH=admin:strong-password
-./leba admin servers
+leba doctor /etc/leba/leba.conf    # validate
+leba -f /etc/leba/leba.conf        # run
 ```
 
-## Linux Deployment
-
-Deployment examples live under `deploy/linux/`.
-
 Typical paths:
-
 ```text
 /usr/local/bin/leba
 /etc/leba/leba.conf
 /etc/leba/admin-users.conf
 /var/lib/leba/state
+/var/log/leba/access.log
 ```
 
-Validate before running:
+## Status
 
-```bash
-leba doctor /etc/leba/leba.conf
-```
+Leba is working software with 80+ automated tests. It handles HTTP/1-3, TCP,
+UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind real traffic.
 
-Then start it with your service manager.
-
-## Documentation
-
-- `docs/CONFIG_REFERENCE.md`
-- `docs/ADMIN_API.md`
-- `docs/SECURITY.md`
-- `docs/PAINPOINTS.md`
-
-## Project Values
-
-Leba tries to be:
-
-- clear in configuration,
-- explicit about limits,
-- observable by default,
-- easy to test,
-- useful as a Mako systems-programming example.
-
-The project will keep changing as Mako changes. That is intentional: Leba is
-both a tool and a proving ground for the language.
+Known limits:
+- HTTP/2 covers multiplexed request/response; long-lived streaming and server
+  push are not goals.
+- HTTP/3 requires a quiche-linked build. Upstream is HTTP/1.1.
+- SIP support is signaling-focused; media relay is not implemented.
+- No response compression (gzip/brotli) or response caching yet.
+- No WAF/request body inspection yet.

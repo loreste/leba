@@ -680,6 +680,17 @@ fn resolve_content_type(headers: string, body: string) -> string {
     return guess_content_type(body)
 }
 
+fn cors_headers() -> string {
+    return "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS, PATCH\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, traceparent\r\nAccess-Control-Max-Age: 86400\r\n"
+}
+
+fn is_cors_preflight(method: string) -> int {
+    if str_eq(method, "OPTIONS") {
+        return 1
+    }
+    return 0
+}
+
 // Whitelist of upstream response headers safe/useful to forward.
 fn is_pass_header_name(name_lower: string) -> int {
     if str_eq(name_lower, "location") {

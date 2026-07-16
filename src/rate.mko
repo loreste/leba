@@ -112,3 +112,38 @@ fn rate_build_index(buckets: []RateBucket) -> map[string]int {
 fn rate_find_indexed(index: map[string]int, frontend: string) -> int {
     return index[frontend] - 1
 }
+
+// ---------------------------------------------------------------------------
+// Per-client-IP rate limiting
+// Uses the existing []RateBucket with frontend field set to the client IP.
+// ---------------------------------------------------------------------------
+
+fn client_rate_find(buckets: []RateBucket, client_ip: string) -> int {
+    for i, b in range buckets {
+        if str_eq(b.frontend, client_ip) {
+            return i
+        }
+    }
+    return -1
+}
+
+fn client_rate_check(buckets: []RateBucket, client_ip: string, rate_per_sec: int) -> int {
+    let idx = client_rate_find(buckets, client_ip)
+    if idx < 0 {
+        return 0
+    }
+    return rate_would_deny(buckets[idx])
+}
+
+fn client_rate_take_ip(buckets: []RateBucket, client_ip: string, rate_per_sec: int) -> []RateBucket {
+    let mut out = buckets
+    let idx = client_rate_find(out, client_ip)
+    if idx < 0 {
+        out = append(out, rate_new(client_ip, rate_per_sec))
+        let ni = len(out) - 1
+        out[ni] = rate_take(out[ni])
+    } else {
+        out[idx] = rate_take(out[idx])
+    }
+    return out
+}

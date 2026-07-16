@@ -131,3 +131,28 @@ fn backend_up_count(servers: []Server, backend: string) -> int {
     }
     return n
 }
+
+fn apply_passive_health(servers: []Server, idx: int, status: int, fall: int) -> []Server {
+    if idx < 0 { return servers }
+    if idx >= len(servers) { return servers }
+    let mut out = servers
+    let mut s = out[idx]
+    if status >= 500 {
+        s.fails = s.fails + 1
+        if s.alive == 1 {
+            if s.fails >= fall {
+                s.alive = 0
+                s.fails = 0
+                log_warn_event("passive_health_down", f"server {s.backend}/{s.name} marked DOWN after {fall} consecutive 5xx")
+            }
+        }
+    } else {
+        if status > 0 {
+            if s.fails > 0 {
+                s.fails = 0
+            }
+        }
+    }
+    out[idx] = s
+    return out
+}

@@ -199,6 +199,28 @@ fn pick_server(
             }
             return pool[len(pool) - 1]
         }
+        "consistent_hash" => {
+            let mut best = pool[0]
+            let mut best_hash = 0
+            let key_hash = hash_str(client_key)
+            for _, si in range pool {
+                let mut node_hash = hash_str(f"{servers[si].name}-{client_key}")
+                if node_hash < 0 { node_hash = 0 - node_hash }
+                let dist = node_hash - key_hash
+                let mut abs_dist = dist
+                if abs_dist < 0 { abs_dist = 0 - abs_dist }
+                if best_hash == 0 {
+                    best = si
+                    best_hash = abs_dist
+                } else {
+                    if abs_dist < best_hash {
+                        best = si
+                        best_hash = abs_dist
+                    }
+                }
+            }
+            return best
+        }
         _ => {
             // round_robin (default) — weighted smooth-ish: skip by cycling
             let mut start = be.rr_idx % len(pool)

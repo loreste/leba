@@ -54,6 +54,13 @@ struct AclRule {
     value: string
 }
 
+struct HeaderRule {
+    direction: string
+    action: string
+    name: string
+    value: string
+}
+
 struct AdminUser {
     user: string
     pass: string

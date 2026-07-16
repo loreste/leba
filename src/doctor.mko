@@ -31,6 +31,7 @@ fn balance_known(b: string) -> int {
         "sip_call_id" => { return 1 }
         "weighted" => { return 1 }
         "random" => { return 1 }
+        "consistent_hash" => { return 1 }
         _ => { return 0 }
     }
     return 0
@@ -415,7 +416,7 @@ fn doctor_world(w: World) -> DoctorReport {
         }
         if balance_known(be.balance) == 0 {
             builder_write(b, f"ERROR  backend {be.name} unknown balance `{be.balance}`\n")
-            builder_write(b, "  fix:  round_robin | least_conn | ip_hash | sip_call_id | weighted | random\n")
+            builder_write(b, "  fix:  round_robin | least_conn | ip_hash | sip_call_id | weighted | random | consistent_hash\n")
             errors = errors + 1
         }
         let sc = server_count(w.servers, be.name)

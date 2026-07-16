@@ -96,6 +96,8 @@ struct Frontend {
     backend: string
     xff: int
     access_log: int
+    access_log_file: string
+    root: string
     // 1 = answer with HTTP→HTTPS redirect (no backend). code defaults to 301.
     redirect_https: int
     redirect_code: int
@@ -252,6 +254,8 @@ fn frontend_new(name: string) -> Frontend {
         backend: "",
         xff: 1,
         access_log: 1,
+        access_log_file: "",
+        root: "",
         redirect_https: 0,
         redirect_code: 301
     }

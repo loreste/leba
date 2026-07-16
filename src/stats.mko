@@ -583,6 +583,16 @@ fn stats_raw_respond_json(fd: int, method: string, status: int, body: string) ->
     return stats_raw_respond_ct(fd, method, status, "application/json; charset=utf-8", body)
 }
 
+fn stats_raw_respond_401(fd: int, method: string) -> int {
+    let body = "{\"error\":\"unauthorized\"}\n"
+    let mut b = str_builder()
+    builder_write(b, f"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\nWWW-Authenticate: Basic realm=\"leba\"\r\nContent-Length: {str_len(body)}\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return tcp_write(fd, builder_string(b))
+}
+
 fn stats_build_response(method: string, status: int, content_type: string, body: string) -> string {
     let mut b = str_builder()
     builder_write(b, f"HTTP/1.1 {status} {stats_http_reason(status)}\r\nContent-Type: {content_type}\r\nContent-Length: {str_len(body)}\r\nConnection: close\r\n\r\n")
@@ -598,6 +608,16 @@ fn stats_tls_respond_ct(conn: TlsConn, method: string, status: int, content_type
 
 fn stats_tls_respond_json(conn: TlsConn, method: string, status: int, body: string) -> int {
     return stats_tls_respond_ct(conn, method, status, "application/json; charset=utf-8", body)
+}
+
+fn stats_tls_respond_401(conn: TlsConn, method: string) -> int {
+    let body = "{\"error\":\"unauthorized\"}\n"
+    let mut b = str_builder()
+    builder_write(b, f"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json; charset=utf-8\r\nWWW-Authenticate: Basic realm=\"leba\"\r\nContent-Length: {str_len(body)}\r\nConnection: close\r\n\r\n")
+    if not str_eq(method, "HEAD") {
+        builder_write(b, body)
+    }
+    return tls_write(conn, builder_string(b))
 }
 
 // TLS-aware stats/admin handler — same logic as handle_stats_raw_conn but over TLS.
@@ -650,7 +670,7 @@ fn handle_stats_tls_conn(
     let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
     if str_eq(role, "") {
         log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
-        let _ = stats_tls_respond_json(conn, method, 401, "{\"error\":\"unauthorized\"}\n")
+        let _ = stats_tls_respond_401(conn, method)
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
 
@@ -751,7 +771,7 @@ fn handle_stats_raw_conn(
     let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
     if str_eq(role, "") {
         log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
-        let _ = stats_raw_respond_json(fd, method, 401, "{\"error\":\"unauthorized\"}\n")
+        let _ = stats_raw_respond_401(fd, method)
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
 
@@ -862,7 +882,7 @@ fn handle_stats_conn(
     let role = admin_auth_role(http_header(c, "Authorization"), admin_users, stats_user, stats_pass)
     if str_eq(role, "") {
         log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
-        let _ = http_respond_json(c, 401, "{\"error\":\"unauthorized\"}\n")
+        let _ = http_respond_ct(c, 401, "application/json; charset=utf-8", "{\"error\":\"unauthorized\"}\n")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
 

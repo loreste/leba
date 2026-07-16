@@ -869,6 +869,17 @@ fn parse_config_text(raw: string) -> World {
                                                         fe.access_log = 1
                                                     }
                                                 } else {
+                                                if str_eq(head, "access_log_file") {
+                                                    if len(fields) >= 2 {
+                                                        fe.access_log_file = fields[1]
+                                                        fe.access_log = 1
+                                                    }
+                                                } else {
+                                                if str_eq(head, "root") {
+                                                    if len(fields) >= 2 {
+                                                        fe.root = fields[1]
+                                                    }
+                                                } else {
                                                 if str_eq(head, "auth") {
                                                     // auth user:pass[:role] for stats
                                                     if len(fields) >= 2 {
@@ -965,6 +976,8 @@ fn parse_config_text(raw: string) -> World {
                         }
                     }
                 }
+            }
+            }
             }
             }
             }

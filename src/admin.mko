@@ -681,17 +681,36 @@ fn handle_admin_state(
     // Config read/write (admin only)
     if str_eq(path, "/admin/config") {
         if str_eq(method, "GET") {
-            let content = read_file(config_path)
+            let raw = read_file(config_path)
+            // Redact sensitive fields from display
+            let mut content = raw
+            // Mask auth lines: show user and role but hide password/hash
+            let lines = str_split(content, "\n")
             let mut b = str_builder()
-            builder_write(b, "{\"path\":\"")
-            builder_write(b, json_escape(config_path))
-            builder_write(b, "\",\"content\":\"")
-            builder_write(b, json_escape(content))
-            builder_write(b, "\"}\n")
+            for _, line in range lines {
+                if str_has_prefix(str_trim_space(line), "auth ") {
+                    // Show: auth <user> ******** <role>
+                    builder_write(b, "  auth <credentials redacted>\n")
+                } else if str_has_prefix(str_trim_space(line), "auth_hash ") {
+                    builder_write(b, "  auth_hash <credentials redacted>\n")
+                } else if str_has_prefix(str_trim_space(line), "tls_key ") {
+                    builder_write(b, "  tls_key <redacted>\n")
+                } else {
+                    builder_write(b, line)
+                    builder_write(b, "\n")
+                }
+            }
+            let redacted = builder_string(b)
+            let mut out = str_builder()
+            builder_write(out, "{\"path\":\"")
+            builder_write(out, json_escape(config_path))
+            builder_write(out, "\",\"content\":\"")
+            builder_write(out, json_escape(redacted))
+            builder_write(out, "\",\"note\":\"Sensitive fields (auth, tls_key) are redacted. Edit the full file on the server.\"}\n")
             return AdminStateResult {
                 handled: 1,
                 status: 200,
-                body: builder_string(b),
+                body: builder_string(out),
                 servers: servers,
                 frontends: frontends,
                 backends: backends,
@@ -699,36 +718,17 @@ fn handle_admin_state(
                 acls: acls
             }
         }
-        if str_eq(method, "POST") {
-            // Extract content from query param: /admin/config?content=...
-            let mut qs = ""
-            let qmark = str_index(full_path, "?content=")
-            if qmark >= 0 {
-                qs = url_decode(substr(full_path, qmark + 9, len(full_path)))
-            }
-            if len(qs) > 0 {
-                write_file(config_path, qs)
-                return AdminStateResult {
-                    handled: 1,
-                    status: 200,
-                    body: "{\"ok\":true,\"action\":\"config-saved\",\"restart_required\":true}\n",
-                    servers: servers,
-                    frontends: frontends,
-                    backends: backends,
-                    routes: routes,
-                    acls: acls
-                }
-            }
-            return AdminStateResult {
-                handled: 1,
-                status: 400,
-                body: "{\"error\":\"missing content parameter\"}\n",
-                servers: servers,
-                frontends: frontends,
-                backends: backends,
-                routes: routes,
-                acls: acls
-            }
+        // Config write disabled via API for security.
+        // Edit the file on the server and run: systemctl restart leba
+        return AdminStateResult {
+            handled: 1,
+            status: 403,
+            body: "{\"error\":\"config write disabled via API for security. Edit the file on the server directly.\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
         }
     }
 

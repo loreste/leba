@@ -868,10 +868,13 @@ fn login_page_html() -> string {
 }
 
 fn admin_ui_html() -> string {
-    // Try external UI file first (allows updates without rebuild)
-    let external = read_file("admin_ui/index.html")
-    if len(external) > 100 {
-        return external
+    // Try external UI file from several locations
+    let paths = ["/opt/leba/admin_ui/index.html", "admin_ui/index.html", "/usr/local/share/leba/admin_ui/index.html"]
+    for _, p in range paths {
+        let content = read_file(p)
+        if len(content) > 100 {
+            return content
+        }
     }
     // Fallback to embedded
     return webadmin_html()

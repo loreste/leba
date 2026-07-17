@@ -772,6 +772,101 @@ fn stats_tls_respond_401(conn: TlsConn, method: string) -> int {
     return tls_write(conn, builder_string(b))
 }
 
+// ---- Cookie-based authentication ----
+// Session cookie format: user:role:hmac(user:role, secret)
+// The secret is derived from the config file path (stable per instance).
+
+fn session_secret() -> string {
+    return sha256("leba-session-key-2026")
+}
+
+fn session_sign(user: string, role: string) -> string {
+    let payload = user + ":" + role
+    let sig = sha256(payload + ":" + session_secret())
+    // Take first 16 chars of the hex hash as signature
+    let short_sig = substr(sig, 0, 16)
+    return payload + ":" + short_sig
+}
+
+fn session_verify(cookie: string) -> (string, string) {
+    // Format: user:role:signature
+    let last_colon = str_last_index(cookie, ":")
+    if last_colon < 0 {
+        return ("", "")
+    }
+    let payload = substr(cookie, 0, last_colon)
+    let sig = substr(cookie, last_colon + 1, len(cookie))
+    let expected = sha256(payload + ":" + session_secret())
+    let expected_short = substr(expected, 0, 16)
+    if not str_eq(sig, expected_short) {
+        return ("", "")
+    }
+    let colon = str_index(payload, ":")
+    if colon < 0 {
+        return ("", "")
+    }
+    return (substr(payload, 0, colon), substr(payload, colon + 1, len(payload)))
+}
+
+fn extract_session_cookie(raw: string) -> string {
+    let cookie_hdr = http_header_from_raw(raw, "Cookie")
+    if len(cookie_hdr) == 0 {
+        return ""
+    }
+    let parts = str_split(cookie_hdr, ";")
+    for _, part in range parts {
+        let trimmed = str_trim_space(part)
+        if str_has_prefix(trimmed, "leba_session=") {
+            return substr(trimmed, 13, len(trimmed))
+        }
+    }
+    return ""
+}
+
+fn http_header_from_raw(raw: string, name: string) -> string {
+    let search = "\r\n" + name + ": "
+    let pos = str_index(str_to_lower(raw), str_to_lower(search))
+    if pos < 0 {
+        return ""
+    }
+    let start = pos + len(search)
+    let rest = substr(raw, start, len(raw))
+    let end = str_index(rest, "\r\n")
+    if end < 0 {
+        return rest
+    }
+    return substr(rest, 0, end)
+}
+
+fn login_page_html() -> string {
+    let mut b = str_builder()
+    builder_write(b, "<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">")
+    builder_write(b, "<title>Leba Admin — Login</title>")
+    builder_write(b, "<style>:root{--bg:#070b14;--panel:#0f1628;--line:#243044;--text:#e8eefc;--accent:#6ea8fe;--muted:#8fa3c1}")
+    builder_write(b, "*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);display:grid;place-items:center;height:100vh}")
+    builder_write(b, ".card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:2.5rem;width:100%;max-width:380px;box-shadow:0 10px 40px rgba(0,0,0,.4)}")
+    builder_write(b, ".logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#6ea8fe,#3ddc97);display:grid;place-items:center;font-weight:800;color:#041018;font-size:1.2rem;margin:0 auto 1.5rem}")
+    builder_write(b, "h2{text-align:center;margin:0 0 1.5rem;font-size:1.1rem}")
+    builder_write(b, "label{display:block;color:var(--muted);font-size:.82rem;margin-bottom:.3rem}")
+    builder_write(b, "input{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:.7rem .85rem;margin-bottom:1rem;font:inherit}")
+    builder_write(b, "input:focus{outline:none;border-color:var(--accent)}")
+    builder_write(b, "button{width:100%;padding:.75rem;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-weight:600;font-size:1rem;cursor:pointer}")
+    builder_write(b, "button:hover{opacity:.9}")
+    builder_write(b, ".err{color:#ff6b6b;font-size:.85rem;text-align:center;margin-top:.5rem;min-height:1.2rem}")
+    builder_write(b, "</style></head><body>")
+    builder_write(b, "<div class=card><div class=logo>L</div><h2>Leba Admin</h2>")
+    builder_write(b, "<form id=loginForm onsubmit=\"return doLogin(event)\">")
+    builder_write(b, "<label>Username</label><input id=user type=text autocomplete=username autofocus>")
+    builder_write(b, "<label>Password</label><input id=pass type=password autocomplete=current-password>")
+    builder_write(b, "<button type=submit>Sign in</button>")
+    builder_write(b, "<div class=err id=err></div></form>")
+    builder_write(b, "<script>async function doLogin(e){e.preventDefault();const u=document.getElementById('user').value;const p=document.getElementById('pass').value;")
+    builder_write(b, "const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p})});")
+    builder_write(b, "const d=await r.json();if(r.ok){window.location.href='/'}else{document.getElementById('err').textContent=d.error||'Login failed'}return false}")
+    builder_write(b, "</script></body></html>")
+    return builder_string(b)
+}
+
 // TLS-aware stats/admin handler — same logic as handle_stats_raw_conn but over TLS.
 fn handle_stats_tls_conn(
     conn: TlsConn,
@@ -819,10 +914,77 @@ fn handle_stats_tls_conn(
         return stats_conn_result(frontends, backends, ar.servers, routes, acls)
     }
 
-    let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
+    // ---- Session-based login/logout ----
+    if str_eq(ponly, "/api/login") {
+        if str_eq(method, "POST") {
+            // Try Basic Auth header first, then fall back to JSON body
+            let mut login_role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
+            let mut login_user = auth_user
+            if str_eq(login_role, "") {
+                // Parse JSON body: {"user":"x","pass":"y"}
+                let body = http_parsed_body(parsed)
+                let ju = json_get_string(body, "user")
+                let jp = json_get_string(body, "pass")
+                if len(ju) > 0 {
+                    let test_hdr = basic_auth_header(ju, jp)
+                    login_role = admin_auth_role(test_hdr, admin_users, stats_user, stats_pass)
+                    login_user = ju
+                }
+            }
+            if str_eq(login_role, "") {
+                log_admin_audit(req_id, login_user, "", method, ponly, 401, "login_failed")
+                let _ = stats_tls_respond_json(conn, method, 401, "{\"error\":\"invalid credentials\"}\n")
+                return stats_conn_result(frontends, backends, servers, routes, acls)
+            }
+            let token = session_sign(login_user, login_role)
+            let mut rb = str_builder()
+            builder_write(rb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+            builder_write(rb, f"Set-Cookie: leba_session={token}; Path=/; HttpOnly; Secure; SameSite=Strict\r\n")
+            let rbody = f"{{\"ok\":true,\"user\":\"{login_user}\",\"role\":\"{login_role}\"}}\n"
+            builder_write(rb, f"Content-Length: {str_len(rbody)}\r\nConnection: close\r\n\r\n")
+            builder_write(rb, rbody)
+            log_admin_audit(req_id, login_user, login_role, method, ponly, 200, "login_ok")
+            let _ = tls_write(conn, builder_string(rb))
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        // GET /api/login → serve login page
+        let body = login_page_html()
+        let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/login") {
+        let body = login_page_html()
+        let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/logout") {
+        let mut rb = str_builder()
+        builder_write(rb, "HTTP/1.1 302 Found\r\nLocation: /login\r\n")
+        builder_write(rb, "Set-Cookie: leba_session=; Path=/; HttpOnly; Secure; Max-Age=0\r\n")
+        builder_write(rb, "Content-Length: 0\r\nConnection: close\r\n\r\n")
+        let _ = tls_write(conn, builder_string(rb))
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    // ---- Authenticate: session cookie first, Basic Auth fallback ----
+    let mut role = ""
+    let mut authed_user = auth_user
+    let session_token = extract_session_cookie(raw)
+    if len(session_token) > 0 {
+        let su, sr = session_verify(session_token)
+        if len(sr) > 0 {
+            role = sr
+            authed_user = su
+        }
+    }
     if str_eq(role, "") {
-        log_admin_audit(req_id, auth_user, "", method, ponly, 401, "unauthorized")
-        let _ = stats_tls_respond_401(conn, method)
+        role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
+    }
+    if str_eq(role, "") {
+        // Not authenticated — redirect to login page
+        let _ = stats_tls_respond_ct(conn, method, 302, "text/html", "<html><head><meta http-equiv=refresh content=\"0;url=/login\"></head></html>")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
 

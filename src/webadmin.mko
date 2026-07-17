@@ -68,14 +68,30 @@ fn wa_css() -> string {
     builder_write(b, "@media(max-width:1000px){.split{grid-template-columns:1fr}}")
     builder_write(b, ".help{font-size:.82rem;color:var(--muted);line-height:1.45}")
     builder_write(b, ".notice{border:1px solid rgba(255,200,87,.35);background:rgba(255,200,87,.08);color:#ffe4a3;border-radius:10px;padding:.75rem;margin:.8rem 0;font-size:.85rem}")
+    // RBAC: hide action elements for viewers
+    builder_write(b, "body.role-viewer .op-only,body.role-viewer .admin-only{display:none!important}")
+    builder_write(b, "body.role-operator .admin-only{display:none!important}")
+    // Role badge
+    builder_write(b, ".role-badge{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .6rem;border-radius:8px;font-size:.78rem;font-weight:600;background:var(--chip);border:1px solid var(--line)}")
+    builder_write(b, ".role-badge.admin{color:var(--accent);border-color:rgba(110,168,254,.3)}")
+    builder_write(b, ".role-badge.operator{color:var(--warn);border-color:rgba(255,200,87,.3)}")
+    builder_write(b, ".role-badge.viewer{color:var(--muted);border-color:var(--line)}")
+    // Chart
+    builder_write(b, ".chart-wrap{height:120px;display:flex;align-items:flex-end;gap:3px;padding:0.5rem 0}")
+    builder_write(b, ".chart-bar{flex:1;background:linear-gradient(180deg,rgba(110,168,254,.7),rgba(110,168,254,.2));border-radius:3px 3px 0 0;min-width:4px;transition:height .3s}")
     return builder_string(b)
 }
 
 fn wa_js() -> string {
     let mut b = str_builder()
     // state + helpers
-    builder_write(b, "let DATA=null,TAB='overview',TIMER=null;")
+    builder_write(b, "let DATA=null,TAB='overview',TIMER=null,ROLE='',USER='',PREV_REQ=0;")
+    builder_write(b, "const RATE_HIST=[];")
     builder_write(b, "const $=s=>document.querySelector(s);")
+    // Fetch role on load
+    builder_write(b, "async function fetchRole(){try{const r=await api('/stats/whoami');ROLE=r.role||'viewer';USER=r.user||'';")
+    builder_write(b, "document.body.className='role-'+ROLE;const rb=$('#roleBadge');")
+    builder_write(b, "if(rb){rb.textContent=USER+' ('+ROLE+')';rb.className='role-badge '+ROLE}}catch(e){}}")
     builder_write(b, "function toast(m,err){const t=$('#toast');t.textContent=m;t.className='toast show'+(err?' err':'');")
     builder_write(b, "setTimeout(()=>t.classList.remove('show'),2800)}")
     builder_write(b, "function fmtBytes(n){n=+n||0;if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(2)+' MB'}")
@@ -96,7 +112,7 @@ fn wa_js() -> string {
     builder_write(b, "const t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){j={raw:t}}")
     builder_write(b, "if(r.status===401&&retry!==0){sessionStorage.removeItem('lebaAuth');if(askAuth())return api(path,method,0)}")
     builder_write(b, "if(!r.ok)throw new Error((j&&j.error)||t||('HTTP '+r.status));return j}")
-    builder_write(b, "async function refresh(){try{DATA=await api('/stats');render();$('#sync').textContent='Live · refreshed '+new Date().toLocaleTimeString()}")
+    builder_write(b, "async function refresh(){try{DATA=await api('/stats');const cur=+(DATA.total_req||0);if(PREV_REQ>0){RATE_HIST.push(cur-PREV_REQ);if(RATE_HIST.length>30)RATE_HIST.shift()}PREV_REQ=cur;render();renderChart();$('#sync').textContent='Live · refreshed '+new Date().toLocaleTimeString()}")
     builder_write(b, "catch(e){toast('Refresh failed: '+e.message,1);$('#sync').textContent='Offline'}}")
     builder_write(b, "async function act(action,be,srv){try{await api('/admin/'+action+'/'+encodeURIComponent(be)+'/'+encodeURIComponent(srv),'POST');")
     builder_write(b, "toast(action+' '+be+'/'+srv+' OK');await refresh()}catch(e){toast(e.message,1)}}")
@@ -137,6 +153,9 @@ fn wa_js() -> string {
 
     // renderers
     builder_write(b, "function nav(tab){TAB=tab;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));render()}")
+    // Live chart renderer
+    builder_write(b, "function renderChart(){const el=$('#rateChart');if(!el)return;const mx=Math.max(1,...RATE_HIST);")
+    builder_write(b, "el.innerHTML=RATE_HIST.map(v=>'<div class=chart-bar style=height:'+Math.max(2,v/mx*100)+'%></div>').join('')}")
     builder_write(b, "function metrics(){const d=DATA||{};const up=d.uptime_ms||0;return `")
     builder_write(b, "<div class=grid>")
     builder_write(b, "<div class=card><div class=label>Requests</div><div class=metric>${d.total_req||0}</div><div class=sub>lifetime</div></div>")
@@ -161,11 +180,13 @@ fn wa_js() -> string {
     builder_write(b, "<a href=/readyz target=_blank>/readyz</a> · <a href=/livez target=_blank>/livez</a> · <a href=/stats target=_blank>/stats</a></div>")
     builder_write(b, "<div class=row><button class=btn onclick=\"nav('servers')\">Manage servers</button>")
     builder_write(b, "<button class=btn onclick=\"nav('explain')\">Explain a request</button>")
-    builder_write(b, "<button class=btn onclick=\"reloadServers()\">Reload servers file</button>")
+    builder_write(b, "<button class=\"btn op-only\" onclick=\"reloadServers()\">Reload servers file</button>")
     builder_write(b, "<button class=btn onclick=\"refresh()\">Refresh now</button></div>")
     builder_write(b, "<h3 style=margin-top:1.2rem>Backends</h3><table><tr><th>Name</th><th>Balance</th><th>Up</th><th>Health</th></tr>")
     builder_write(b, "${(d.backends||[]).map(b=>`<tr><td>${esc(b.name)}</td><td>${esc(b.balance)}</td><td>${b.up}/${b.servers}</td>")
-    builder_write(b, "<td class=mono>${esc(b.health_path)}</td></tr>`).join('')}</table></div></div>`}")
+    builder_write(b, "<td class=mono>${esc(b.health_path)}</td></tr>`).join('')}</table></div></div>")
+    builder_write(b, "<div class=panel><h3>Request rate</h3><div id=rateChart class=chart-wrap></div>")
+    builder_write(b, "<div class=muted style=font-size:.75rem>Samples: ${RATE_HIST.length}</div></div>`}")
 
     builder_write(b, "function viewServers(){const d=DATA||{};return metrics()+`<div class=panel><div class=row style=\"justify-content:space-between;margin-bottom:.8rem\">")
     builder_write(b, "<h3 style=margin:0>Servers</h3><span class=muted>Drain · Ready · Disable · Enable</span></div>")
@@ -173,10 +194,10 @@ fn wa_js() -> string {
     builder_write(b, "${(d.servers||[]).map(s=>`<tr><td>${esc(s.backend)}</td><td><strong>${esc(s.name)}</strong></td>")
     builder_write(b, "<td class=mono>${esc(s.host)}:${s.port}</td><td>${statePill(s)}</td><td>${s.weight}</td><td>${s.conns}</td>")
     builder_write(b, "<td>${s.maxconn||0}</td><td>${s.total_req}</td><td>${s.total_err}</td><td>${fmtBytes(s.total_bytes)}</td><td class=actions>")
-    builder_write(b, "<button class=\"btn sm warn\" onclick=\"act('drain','${esc(s.backend)}','${esc(s.name)}')\">Drain</button>")
-    builder_write(b, "<button class=\"btn sm ok\" onclick=\"act('ready','${esc(s.backend)}','${esc(s.name)}')\">Ready</button>")
-    builder_write(b, "<button class=\"btn sm bad\" onclick=\"act('disable','${esc(s.backend)}','${esc(s.name)}')\">Disable</button>")
-    builder_write(b, "<button class=\"btn sm\" onclick=\"act('enable','${esc(s.backend)}','${esc(s.name)}')\">Enable</button>")
+    builder_write(b, "<button class=\"btn sm warn op-only\" onclick=\"act('drain','${esc(s.backend)}','${esc(s.name)}')\">Drain</button>")
+    builder_write(b, "<button class=\"btn sm ok op-only\" onclick=\"act('ready','${esc(s.backend)}','${esc(s.name)}')\">Ready</button>")
+    builder_write(b, "<button class=\"btn sm bad op-only\" onclick=\"act('disable','${esc(s.backend)}','${esc(s.name)}')\">Disable</button>")
+    builder_write(b, "<button class=\"btn sm op-only\" onclick=\"act('enable','${esc(s.backend)}','${esc(s.name)}')\">Enable</button>")
     builder_write(b, "</td></tr>`).join('')}</table></div>`}")
 
     builder_write(b, "function viewBackends(){const d=DATA||{};return `<div class=panel><h3>Backends</h3>")
@@ -252,8 +273,8 @@ fn wa_js() -> string {
     builder_write(b, "else if(TAB==='api')body.innerHTML=viewApi();")
     builder_write(b, "else body.innerHTML=viewOverview()}")
 
-    builder_write(b, "window.nav=nav;window.act=act;window.refresh=refresh;window.runExplain=runExplain;window.logout=logout;window.saveVhost=saveVhost;window.saveCert=saveCert;")
-    builder_write(b, "refresh();TIMER=setInterval(refresh,2500);")
+    builder_write(b, "window.nav=nav;window.act=act;window.refresh=refresh;window.runExplain=runExplain;window.logout=logout;window.saveVhost=saveVhost;window.saveCert=saveCert;window.reloadServers=reloadServers;")
+    builder_write(b, "fetchRole();refresh();TIMER=setInterval(refresh,2500);")
     return builder_string(b)
 }
 
@@ -280,7 +301,7 @@ fn webadmin_html() -> string {
     builder_write(b, "</div></aside><main class=main>")
     builder_write(b, "<div class=top><div><h2>Control plane</h2>")
     builder_write(b, "<div class=meta id=sync>Connecting…</div></div>")
-    builder_write(b, "<div class=row><button class=btn onclick=refresh()>Refresh</button><button class=btn onclick=logout()>Logout</button>")
+    builder_write(b, "<div class=row><span id=roleBadge class=role-badge></span><button class=btn onclick=refresh()>Refresh</button><button class=btn onclick=logout()>Logout</button>")
     builder_write(b, "<a class=btn href=/stats target=_blank>Raw JSON</a></div></div>")
     builder_write(b, "<div id=view><div class=panel class=muted>Loading cluster state…</div></div>")
     builder_write(b, "</main></div><div id=toast class=toast></div><script>")

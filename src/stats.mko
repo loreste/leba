@@ -705,6 +705,12 @@ fn handle_stats_tls_conn(
         return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
     }
 
+    if str_eq(ponly, "/stats/whoami") {
+        let whoami = "{\"user\":\"" + auth_user + "\",\"role\":\"" + role + "\"}\n"
+        let _ = stats_tls_respond_json(conn, method, 200, whoami)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
     if str_eq(ponly, "/stats") {
         let body = stats_json(st, frontends, backends, servers, routes, acls)
         let _ = stats_tls_respond_json(conn, method, 200, body)
@@ -806,6 +812,12 @@ fn handle_stats_raw_conn(
         return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
     }
 
+    if str_eq(ponly, "/stats/whoami") {
+        let whoami = "{\"user\":\"" + auth_user + "\",\"role\":\"" + role + "\"}\n"
+        let _ = stats_raw_respond_json(fd, method, 200, whoami)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
     if str_eq(ponly, "/stats") {
         let body = stats_json(st, frontends, backends, servers, routes, acls)
         let _ = stats_raw_respond_json(fd, method, 200, body)
@@ -918,6 +930,12 @@ fn handle_stats_conn(
         return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
     }
 
+    if str_eq(ponly, "/stats/whoami") {
+        let whoami = "{\"user\":\"" + auth_user + "\",\"role\":\"" + role + "\"}\n"
+        let _ = http_respond_json(c, 200, whoami)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
     if str_eq(ponly, "/stats") {
         let body = stats_json(st, frontends, backends, servers, routes, acls)
         let _ = http_respond_json(c, 200, body)

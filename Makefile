@@ -34,6 +34,10 @@ test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh
 	./scripts/adversarial_smoke.sh
 
+test-concurrent: build
+	chmod +x scripts/concurrent_smoke.sh
+	./scripts/concurrent_smoke.sh 200
+
 test-haproxy-compare: build
 	chmod +x scripts/haproxy_compare.sh
 	./scripts/haproxy_compare.sh

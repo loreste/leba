@@ -439,7 +439,22 @@ fn servers_json(servers: []Server) -> string {
 }
 
 fn admin_help_json() -> string {
-    return "{\"endpoints\":[\"/admin/servers\",\"/admin/reload-servers\",\"/admin/drain/{backend}/{server}\",\"/admin/ready/{backend}/{server}\",\"/admin/disable/{backend}/{server}\",\"/admin/enable/{backend}/{server}\",\"/readyz\",\"/livez\",\"/health\",\"/stats\",\"/metrics\"],\"note\":\"Use POST for reload-servers/drain/ready/disable/enable\"}\n"
+    return "{\"endpoints\":[\"/admin/servers\",\"/admin/reload-servers\",\"/admin/tls-reload\",\"/admin/vhosts\",\"/admin/vhost-create\",\"/admin/proxy-hosts\",\"/admin/proxy-host\",\"/admin/proxy-host-delete\",\"/admin/drain/{backend}/{server}\",\"/admin/ready/{backend}/{server}\",\"/admin/disable/{backend}/{server}\",\"/admin/enable/{backend}/{server}\",\"/readyz\",\"/livez\",\"/health\",\"/stats\",\"/metrics\"],\"note\":\"Use POST for mutating admin routes\"}\n"
+}
+
+fn remove_host_route(routes: []Route, frontend: string, domain: string) -> []Route {
+    let mut out = make([]Route, 0, len(routes))
+    for _, rt in range routes {
+        if str_eq(rt.kind, "host") {
+            if str_eq(rt.frontend, frontend) {
+                if str_eq(rt.value, domain) {
+                    continue
+                }
+            }
+        }
+        out = append(out, rt)
+    }
+    return out
 }
 
 fn any_ready(servers: []Server) -> int {
@@ -678,6 +693,58 @@ fn handle_admin_state(
     config_path: string,
     config_dir: string
 ) -> AdminStateResult {
+    // Full config reload (operator+). Accept thread applies table swap via full_reload flag.
+    if str_eq(path, "/admin/reload") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        log_info_event("admin_action", "action=reload status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"reload\",\"note\":\"full config table swap; bind changes require restart\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+    // Live TLS certificate reload (operator+). Accept thread applies tls_server_reload.
+    if str_eq(path, "/admin/tls-reload") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        log_info_event("admin_action", "action=tls-reload status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"tls-reload\",\"note\":\"TCP TLS contexts reloaded; H3 may require restart\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
     // Config read/write (admin only)
     if str_eq(path, "/admin/config") {
         if str_eq(method, "GET") {
@@ -757,7 +824,88 @@ fn handle_admin_state(
         }
     }
 
+    // NPM-style alias: GET /admin/proxy-hosts
+    if str_eq(path, "/admin/proxy-hosts") {
+        if not str_eq(method, "GET") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: admin_vhosts_json(frontends, backends, servers, routes),
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/proxy-host-delete") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult {
+                handled: 1,
+                status: 405,
+                body: "{\"error\":\"method not allowed\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_domain(domain) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let out_routes = remove_host_route(routes, frontend, domain)
+        if len(out_routes) == len(routes) {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"proxy host not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if save_managed_vhosts(config_path, config_dir, frontends, backends, servers, out_routes) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut body = str_builder()
+        builder_write(body, "{\"ok\":true,\"action\":\"proxy-host-delete\",\"frontend\":\"")
+        builder_write(body, json_escape(frontend))
+        builder_write(body, "\",\"domain\":\"")
+        builder_write(body, json_escape(domain))
+        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\"}\n")
+        log_info_event("admin_action", "action=proxy-host-delete status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: builder_string(body),
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: out_routes,
+            acls: acls
+        }
+    }
+
+    // POST /admin/vhost-create or /admin/proxy-host — create/update proxy host mapping.
+    let mut is_host_create = 0
     if str_eq(path, "/admin/vhost-create") {
+        is_host_create = 1
+    }
+    if str_eq(path, "/admin/proxy-host") {
+        is_host_create = 1
+    }
+    if is_host_create == 1 {
         if not str_eq(method, "POST") {
             return AdminStateResult {
                 handled: 1,
@@ -822,7 +970,7 @@ fn handle_admin_state(
             return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut body = str_builder()
-        builder_write(body, "{\"ok\":true,\"action\":\"vhost-create\",\"frontend\":\"")
+        builder_write(body, "{\"ok\":true,\"action\":\"proxy-host\",\"frontend\":\"")
         builder_write(body, json_escape(frontend))
         builder_write(body, "\",\"domain\":\"")
         builder_write(body, json_escape(domain))
@@ -832,7 +980,7 @@ fn handle_admin_state(
         builder_write(body, json_escape(server))
         builder_write(body, "\",\"addr\":\"")
         builder_write(body, json_escape(addr))
-        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"restart_required_for_cert\":")
+        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"tls_reload_recommended\":")
         if not str_eq(cert, "") {
             builder_write(body, "true")
         } else {
@@ -843,7 +991,7 @@ fn handle_admin_state(
             }
         }
         builder_write(body, "}\n")
-        log_info_event("admin_action", "action=vhost-create status=200")
+        log_info_event("admin_action", "action=proxy-host status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,

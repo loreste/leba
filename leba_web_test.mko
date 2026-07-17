@@ -292,3 +292,16 @@ fn TestAdminPathMutatesState() {
     assert_eq(admin_path_mutates_state("/admin/servers"), 0)
     assert_eq(admin_path_mutates_state("/stats"), 0)
 }
+
+fn TestSessionSecretPrefersStateKey() {
+    let a = session_secret("key-a")
+    let b = session_secret("key-b")
+    assert(not str_eq(a, b))
+    let token = session_sign("admin", "operator", "key-a")
+    let u, r = session_verify(token, "key-a")
+    assert_eq_str(u, "admin")
+    assert_eq_str(r, "operator")
+    let u2, r2 = session_verify(token, "key-b")
+    assert_eq_str(u2, "")
+    assert_eq_str(r2, "")
+}

@@ -159,6 +159,35 @@ kept in drain state until their sessions finish.
 
 Requires `operator` or `admin`.
 
+### `POST /admin/reload`
+
+Full **config table swap** without process restart: re-reads the main config
+file, runs doctor, preserves server runtime state by `(backend, name)`, re-inits
+pools for address changes, and swaps routes / ACLs / backends / frontends /
+header rules / app auth users.
+
+**Not included in v1:** opening or closing listen sockets (bind changes still
+need a process restart). TLS material on disk still uses `/admin/tls-reload`.
+
+Also triggered by **SIGHUP**. File-watch on `servers_file` remains servers-only.
+
+Requires `operator` or `admin`.
+
+### `POST /admin/tls-reload`
+
+Hot-reloads TLS certificates for HTTP frontends (and the stats frontend when TLS
+is enabled) from the paths already configured on each frontend (`tls_cert` /
+`tls_key`). Uses Mako `tls_server_reload` — no process restart for TCP TLS.
+
+HTTP/3 (QUIC) may still require a process restart depending on the linked
+quiche build. Response notes this.
+
+Requires `operator` or `admin`. Typical ACME deploy-hook:
+
+```bash
+curl -u admin:pass -X POST http://127.0.0.1:8404/admin/tls-reload
+```
+
 ## Virtual Hosts
 
 Virtual hosts are host routes on an existing HTTP frontend. The admin API can
@@ -169,6 +198,19 @@ backend server.
 
 Returns host routes with their backend members and the HTTP frontends that can
 receive vhost mappings.
+
+### `GET /admin/proxy-hosts`
+
+Alias of `GET /admin/vhosts` (NPM-style name).
+
+### `POST /admin/proxy-host`
+
+Alias of `POST /admin/vhost-create` (NPM-style name). Creates or updates a host
+route, backend, and server member; persists to `leba.vhosts.conf`.
+
+### `POST /admin/proxy-host-delete`
+
+Removes a host route. Query parameters: `frontend`, `domain`.
 
 ### `POST /admin/vhost-create`
 

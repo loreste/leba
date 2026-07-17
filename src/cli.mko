@@ -4,7 +4,7 @@ pull "crypto"
 pack cli
 
 fn cli_usage() -> string {
-    return "usage:\n  leba admin servers [host:port] [user:pass]\n  leba admin stats [host:port] [user:pass]\n  leba admin metrics [host:port] [user:pass]\n  leba admin readyz [host:port]\n  leba admin livez [host:port]\n  leba admin reload-servers [host:port] [user:pass]\n  leba admin drain BACKEND SERVER [host:port] [user:pass]\n  leba admin ready BACKEND SERVER [host:port] [user:pass]\n  leba admin disable BACKEND SERVER [host:port] [user:pass]\n  leba admin enable BACKEND SERVER [host:port] [user:pass]\n  leba admin hash-password PASSWORD [ITERATIONS]\n  leba admin hash-password-legacy PASSWORD [ITERATIONS]\n\nenv defaults:\n  LEBA_ADMIN_ADDR=public.example.com:18404\n  LEBA_ADMIN_AUTH=user:strong-password\n"
+    return "usage:\n  leba admin servers [host:port] [user:pass]\n  leba admin stats [host:port] [user:pass]\n  leba admin metrics [host:port] [user:pass]\n  leba admin readyz [host:port]\n  leba admin livez [host:port]\n  leba admin reload-servers [host:port] [user:pass]\n  leba admin tls-reload [host:port] [user:pass]\n  leba admin reload [host:port] [user:pass]\n  leba admin drain BACKEND SERVER [host:port] [user:pass]\n  leba admin ready BACKEND SERVER [host:port] [user:pass]\n  leba admin disable BACKEND SERVER [host:port] [user:pass]\n  leba admin enable BACKEND SERVER [host:port] [user:pass]\n  leba admin hash-password PASSWORD [ITERATIONS]\n  leba admin hash-password-legacy PASSWORD [ITERATIONS]\n\nenv defaults:\n  LEBA_ADMIN_ADDR=public.example.com:18404\n  LEBA_ADMIN_AUTH=user:strong-password\n"
 }
 
 fn cli_legacy_password_hash(pass: string, iterations: int) -> string {
@@ -173,6 +173,12 @@ fn cli_admin_main() -> string {
     }
     if str_eq(cmd, "reload-servers") {
         return cli_http_call("POST", "/admin/reload-servers", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "tls-reload") {
+        return cli_http_call("POST", "/admin/tls-reload", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
+    }
+    if str_eq(cmd, "reload") {
+        return cli_http_call("POST", "/admin/reload", cli_arg_or(3, cli_default_addr()), cli_arg_or(4, cli_default_auth()))
     }
     if str_eq(cmd, "drain") {
         if argc() < 5 {

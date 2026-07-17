@@ -78,8 +78,8 @@ configured runtime state has eligible upstream capacity.
 - SIP-over-TCP and SIP-over-UDP Call-ID affinity are implemented for signaling;
   RTP/media relay is not implemented.
 - Service discovery is supported through `servers_file`; manual protected
-  reload and automatic file watching are implemented when the runtime watcher
-  backend is available.
+  reload (admin API / SIGHUP) and automatic file watching are implemented when
+  the runtime watcher backend is available.
 - The test suite covers important local paths, but your own traffic patterns
   still need staging and validation.
 
@@ -96,5 +96,20 @@ configured runtime state has eligible upstream capacity.
 - [x] SIP-over-UDP signaling proxying.
 - [ ] RTP/media relay.
 - [x] Metrics text endpoint.
+- [x] Upstream connection pools wired (`init_server_pools`).
+- [x] Cleartext client keep-alive (accept-thread sole closer).
+- [x] Retry re-pick across servers (`RetryPlan`).
+- [x] Header rules applied on the data plane.
+- [x] Live TLS cert reload (`POST /admin/tls-reload`).
+- [x] Docker packaging skeleton.
+- [x] Concurrent smoke test (`make test-concurrent`).
+- [x] ACME HTTP-01 webroot serve.
+- [x] Proxy host create/delete API + admin UI.
+- [x] App HTTP Basic (`auth_basic` / `auth_user`).
+- [ ] Built-in ACME client (external lego/acme.sh + hook for now).
+- [x] Config table reload (`SIGHUP` / `POST /admin/reload`; bind rebind later).
+- [x] Redirect hosts + dead hosts (`route … redirect|dead`).
 - [ ] More exhaustive concurrent connection tests.
 - [x] Upstream forwarding of validated trace headers.
+
+Full competitive plan: [`COMPETITIVE_ARCHITECTURE.md`](COMPETITIVE_ARCHITECTURE.md).

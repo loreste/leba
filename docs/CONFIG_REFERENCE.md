@@ -92,6 +92,9 @@ Supported keys:
 | `tls_key` | path | Private key for `tls_cert`. |
 | `protocols` / `alpn` | list | `http/1.1`, `h2`, and `h3` (aliases `http/2`, `http/3`, `quic`). `h2`/`h3` require TLS certs. `h3` also requires a quiche-linked build (`h3_server_available`). |
 | `redirect https` | optional code | Force HTTP→HTTPS with `301` (default) or `302`/`307`/`308`. No backend required. Example: `redirect https` or `redirect https 308`. |
+| `acme_webroot` | path | Directory of ACME HTTP-01 challenge tokens. Serves `GET /.well-known/acme-challenge/<token>` as plain text from `<path>/<token>` (no traversal). Bypasses redirect, rate limit, ACL, and app Basic auth. Inherited from `defaults` when unset. |
+| `auth_basic` | realm string | Require HTTP Basic for all non-ACME requests on this frontend. Example: `auth_basic "My App"`. |
+| `auth_user` | `USER PASS` | Credential for `auth_basic` on this frontend (repeatable). Plaintext in config — prefer network-restricted frontends. |
 | `auth` | `user:pass[:role]` | Backward-compatible stats admin credential. Role defaults to `admin`. |
 | `admin_user` | `user pass role` | Additional stats user. Role is `viewer`, `operator`, or `admin`. |
 | `auth_hash` | `user hash role` | Stats admin credential using Argon2id PHC, `leba-kdf-v1`, or legacy SHA-256. |
@@ -151,6 +154,8 @@ route path_prefix /api -> api
 route host api.example -> api
 route path /health -> health
 route default -> web
+route host old.example redirect https://new.example 308
+route host gone.example dead 410
 ```
 
 The arrow is optional:
@@ -171,6 +176,15 @@ Common match kinds:
 | `path_contains` | Path substring match. |
 | `host` | Host match, with port normalized. |
 | `method` | HTTP method match. |
+
+Special terminal actions (no backend):
+
+```text
+route host old.example redirect https://new.example [code]   # default 301
+route host gone.example dead [code]                          # default 404; use 410 for Gone
+route host x -> @redirect:https://y.example
+route host x -> @dead:410
+```
 
 ## ACLs
 
@@ -207,7 +221,7 @@ Supported keys:
 
 | Key | Value | Notes |
 |-----|-------|-------|
-| `balance` | policy | `round_robin`, `least_conn`, `ip_hash`, `sip_call_id`, `weighted`, `random`. |
+| `balance` | policy | `round_robin`, `least_conn`, `ip_hash`, `sip_call_id`, `weighted`, `random`, `consistent_hash`. |
 | `servers_file` | path | Loads server lines at startup and via protected admin reload. |
 | `health_path` | path or `tcp` | HTTP path or TCP connect probe. |
 | `health_interval` | duration | Probe interval. |
@@ -302,8 +316,9 @@ leba admin reload-servers 127.0.0.1:18404 admin:change-this
 ```
 
 The reload preserves runtime state for retained servers. Removed servers with
-active sessions are kept in drain state until those sessions complete. There is
-no automatic file watcher yet.
+active sessions are kept in drain state until those sessions complete. When the
+runtime file-watch backend is available, Leba also watches `servers_file` paths
+and reloads automatically on change (same path as SIGHUP).
 
 The leading `server` keyword is optional in server files. Relative paths resolve
 relative to the config file directory.

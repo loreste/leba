@@ -1,7 +1,10 @@
 # Build cache and artifacts
 .mako/
 /leba
+/leba-*
+/main.c
 *.o
+*.dSYM/
 
 # Local TLS material
 certs/

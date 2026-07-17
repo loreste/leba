@@ -689,14 +689,19 @@ fn TestSampleConfigDoctor() {
 }
 
 fn TestTupleChannelDoneRoundTrip() {
-    let ch = chan_open[(int, int, int, int, int)](2)
-    let _ = ch.send((1, 502, 3, 99, 0))
-    let err, status, si, bytes, retries = ch.recv()
+    let ch = chan_open[(int, int, int, int, int, int, int, int, int, int)](2)
+    let _ = ch.send((1, 502, 3, 4, 99, 0, 7, 1, 0, 2))
+    let err, status, conn_si, served_si, bytes, retries, fd, ka, fe, kan = ch.recv()
     assert_eq(err, 1)
     assert_eq(status, 502)
-    assert_eq(si, 3)
+    assert_eq(conn_si, 3)
+    assert_eq(served_si, 4)
     assert_eq(bytes, 99)
     assert_eq(retries, 0)
+    assert_eq(fd, 7)
+    assert_eq(ka, 1)
+    assert_eq(fe, 0)
+    assert_eq(kan, 2)
 }
 
 fn TestTupleChannelDoneAndStats() {
@@ -737,4 +742,138 @@ fn TestCliAddressNormalizationForNat() {
     assert_eq(cli_addr_port("http://edge.example.com:18404/admin/servers"), 18404)
     assert_eq_str(cli_addr_host("edge.example.com"), "edge.example.com")
     assert_eq(cli_addr_port("edge.example.com"), 18404)
+}
+
+fn TestHeaderRulesRenderAndMerge() {
+    let mut rules = make([]HeaderRule, 0, 4)
+    rules = append(rules, HeaderRule { direction: "request", action: "set", name: "X-Forwarded-Proto", value: "https" })
+    rules = append(rules, HeaderRule { direction: "response", action: "set", name: "X-Frame-Options", value: "DENY" })
+    let req_extra, resp_extra = render_header_extras(rules)
+    assert(str_contains(req_extra, "X-Forwarded-Proto: https"))
+    assert(str_contains(resp_extra, "X-Frame-Options: DENY"))
+    let merged = merge_response_extras("\r\nLocation: /", resp_extra)
+    assert(str_contains(merged, "Location: /"))
+    assert(str_contains(merged, "X-Frame-Options: DENY"))
+}
+
+fn TestClientWantsKeepalive() {
+    assert_eq(client_wants_keepalive("HTTP/1.1", ""), 1)
+    assert_eq(client_wants_keepalive("HTTP/1.1", "close"), 0)
+    assert_eq(client_wants_keepalive("HTTP/1.0", ""), 0)
+    assert_eq(client_wants_keepalive("HTTP/1.0", "keep-alive"), 1)
+}
+
+fn TestRetryPlanPicksAlternates() {
+    let mut servers = make([]Server, 0, 3)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    servers = append(servers, server_new("c", "127.0.0.1", 3, 100, 1, "api"))
+    let be = backend_new("api")
+    let plan = build_retry_plan(servers, be, "client", "", "", 0, 2)
+    assert(plan.n >= 2)
+    assert_eq(plan.h0.server_idx, 0)
+    assert(plan.h1.server_idx != 0)
+}
+
+fn TestRedirectAndDeadRouteParse() {
+    let raw = "frontend web\n  bind 80\n  mode http\n  route host old.example redirect https://new.example 308\n  route host gone.example dead 410\n  route default -> app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    let rep = doctor_world(w)
+    assert_eq(rep.ok, 1)
+    let mut found_r = 0
+    let mut found_d = 0
+    for _, r in range w.routes {
+        if str_eq(r.action, "redirect") {
+            assert_eq_str(r.target, "https://new.example")
+            assert_eq(r.code, 308)
+            found_r = 1
+        }
+        if str_eq(r.action, "dead") {
+            assert_eq(r.code, 410)
+            found_d = 1
+        }
+    }
+    assert_eq(found_r, 1)
+    assert_eq(found_d, 1)
+    let ri = select_route_idx(w.routes, "web", "/", "old.example")
+    assert(ri >= 0)
+    assert_eq_str(w.routes[ri].action, "redirect")
+    let ri2 = select_route_idx(w.routes, "web", "/", "gone.example")
+    assert_eq_str(w.routes[ri2].action, "dead")
+}
+
+fn TestFullConfigReloadPreservesServerState() {
+    let raw = "frontend web\n  bind 18080\n  mode http\n  route default -> app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    let mut servers = w.servers
+    servers = server_conn_delta(servers, 0, 3)
+    servers = set_server_drain(servers, 0, 1)
+    servers = mark_server_req(servers, 0, 0, 0)
+    // mark_server_req increments total_req; force extra counts via loop
+    let mut i = 0
+    while i < 98 {
+        servers = mark_server_req(servers, 0, 0, 0)
+        i = i + 1
+    }
+    let path = "/tmp/leba_reload_test.conf"
+    let _ = write_file(path, raw)
+    let fr = full_config_reload(path, servers)
+    assert_eq(fr.ok, 1)
+    assert_eq(fr.servers[0].drain, 1)
+    assert_eq(fr.servers[0].total_req, 99)
+    assert_eq(fr.servers[0].conns, 3)
+}
+
+fn TestAppBasicAuthParseAndCheck() {
+    let raw = "frontend web\n  bind 80\n  mode http\n  auth_basic \"My App\"\n  auth_user alice secret\n  auth_user bob hunter2\n  default_backend app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.frontends[0].auth_basic_realm, "My App")
+    assert_eq(len(w.app_auth_users), 2)
+    assert_eq(app_basic_auth_ok("", "web", "My App", w.app_auth_users), 0)
+    let good = "Basic " + base64_encode("alice:secret")
+    assert_eq(app_basic_auth_ok(good, "web", "My App", w.app_auth_users), 1)
+    let bad = "Basic " + base64_encode("alice:wrong")
+    assert_eq(app_basic_auth_ok(bad, "web", "My App", w.app_auth_users), 0)
+    // No realm → always ok
+    assert_eq(app_basic_auth_ok("", "web", "", w.app_auth_users), 1)
+}
+
+fn TestAcmeWebrootParseAndInherit() {
+    let raw = "defaults\n  acme_webroot /var/lib/leba/acme\nfrontend web\n  bind 80\n  mode http\n  default_backend app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.defaults.acme_webroot, "/var/lib/leba/acme")
+    assert_eq_str(w.frontends[0].acme_webroot, "/var/lib/leba/acme")
+    let raw2 = "defaults\n  acme_webroot /var/lib/leba/acme\nfrontend web\n  bind 80\n  mode http\n  acme_webroot /tmp/challenges\n  default_backend app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w2 = parse_config_text(raw2)
+    assert_eq_str(w2.frontends[0].acme_webroot, "/tmp/challenges")
+}
+
+fn TestRemoveHostRoute() {
+    let mut routes = make([]Route, 0, 2)
+    routes = append(routes, route_new("web", "host", "a.example", "app"))
+    routes = append(routes, route_new("web", "host", "b.example", "app"))
+    routes = append(routes, route_new("web", "default", "", "app"))
+    let out = remove_host_route(routes, "web", "a.example")
+    assert_eq(len(out), 2)
+    let out2 = remove_host_route(out, "web", "missing.example")
+    assert_eq(len(out2), 2)
+}
+
+fn TestApplyDoneSplitConnVsHealth() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    servers = server_conn_delta(servers, 0, 1)
+    assert_eq(servers[0].conns, 1)
+    // hop0 reserved, hop1 served successfully
+    servers = apply_done_servers_conn(0, servers)
+    servers = apply_done_servers_health(0, 200, 1, 42, servers)
+    assert_eq(servers[0].conns, 0)
+    assert_eq(servers[1].conns, 0)
+    assert_eq(servers[1].total_req, 1)
+    assert_eq(servers[0].total_req, 0)
 }

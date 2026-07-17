@@ -249,7 +249,11 @@ function viewHosts(){
       </td></tr>`;
     });
     if(!srvs.length)h+='<tr><td colspan=6 class="muted">No servers</td></tr>';
-    h+='</table></div>';
+    h+=`</table>
+      <div class="row op-only" style="justify-content:flex-end;margin-top:.75rem">
+        <button class="btn sm bad" onclick="deleteHost('${esc(r.frontend)}','${esc(r.value)}')">Delete host</button>
+      </div>
+    </div>`;
   });
   if(!hosts.length)h+='<div class="panel"><p class="muted">No proxy hosts configured. Click + Add proxy host to get started.</p></div>';
   return h;
@@ -267,10 +271,13 @@ function viewBackends(){
 
 function viewFrontends(){
   if(!DATA)return '';const d=DATA;
-  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS</th><th>Rate limit</th><th>Max conns</th></tr>';
+  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS</th><th>Auth</th><th>ACME</th><th>Rate</th><th>Maxconn</th></tr>';
   (d.frontends||[]).forEach(f=>{
     h+=`<tr><td><strong>${esc(f.name)}</strong></td><td>:${f.port}</td><td><span class="pill">${esc(f.mode)}</span></td>
-    <td>${f.tls_cert?'<span class="pill up">ON</span>':'off'}</td><td>${f.rate_limit||0}/s</td><td>${f.maxconn||0}</td></tr>`;
+    <td>${f.tls_cert?'<span class="pill up">ON</span>':'off'}</td>
+    <td>${f.auth_basic_realm?'<span class="pill warn">Basic</span>':'off'}</td>
+    <td>${f.acme_webroot?'<span class="pill up" title="'+esc(f.acme_webroot)+'">webroot</span>':'—'}</td>
+    <td>${f.rate_limit||0}/s</td><td>${f.maxconn||0}</td></tr>`;
   });
   h+='</table></div>';
   h+='<div class="panel"><h3>Routes</h3><table><tr><th>Frontend</th><th>Kind</th><th>Match</th><th>Backend</th><th>Status</th></tr>';
@@ -304,18 +311,28 @@ async function loadAnalyticsData(){
 }
 
 function viewConfig(){
+  const fes=DATA?.frontends||[];
+  const acme=fes.filter(f=>f.acme_webroot);
+  const basic=fes.filter(f=>f.auth_basic_realm);
   return `<div class="panel"><h3>Security status</h3>
   <table><tr><th>Setting</th><th>Status</th></tr>
-  <tr><td>TLS</td><td>${(DATA?.frontends||[]).some(f=>f.tls_cert)?'<span class="pill up">ENABLED</span>':'<span class="pill down">OFF</span>'}</td></tr>
-  <tr><td>Authentication</td><td><span class="pill up">SESSION COOKIE</span></td></tr>
+  <tr><td>TLS</td><td>${fes.some(f=>f.tls_cert)?'<span class="pill up">ENABLED</span>':'<span class="pill down">OFF</span>'}</td></tr>
+  <tr><td>Admin auth</td><td><span class="pill up">SESSION COOKIE</span></td></tr>
+  <tr><td>App HTTP Basic</td><td>${basic.length?'<span class="pill up">'+basic.length+' frontend(s)</span>':'off'}</td></tr>
+  <tr><td>ACME webroot</td><td>${acme.length?'<span class="pill up">'+acme.map(f=>esc(f.name)).join(', ')+'</span>':'not set'}</td></tr>
   <tr><td>RBAC</td><td><span class="pill up">ENFORCED</span></td></tr>
   <tr><td>Config API write</td><td><span class="pill up">DISABLED</span></td></tr>
   <tr><td>Audit logging</td><td><span class="pill up">ON</span></td></tr></table></div>
+  <div class="panel"><h3>ACME / TLS ops</h3><div class="muted" style="line-height:1.6">
+  <p>HTTP-01: set <code>acme_webroot /path</code>, point lego/certbot at the same path.</p>
+  <p>After renew: <code>curl -u user:pass -X POST /admin/tls-reload</code> or <code>leba admin tls-reload</code>.</p>
+  <p>See <code>docs/ACME.md</code>.</p>
+  <button class="btn primary op-only" onclick="tlsReload()">Live-reload TLS certs</button>
+  </div></div>
   <div class="panel"><h3>Admin guide</h3><div class="muted" style="line-height:1.6">
-  <p><strong>Change password:</strong> <code>leba admin hash-password NEW_PASS</code>, update config, restart.</p>
-  <p><strong>Add user:</strong> Add <code>admin_user_hash name HASH role</code> to stats frontend in config.</p>
-  <p><strong>IP restriction:</strong> Add <code>allow</code> / <code>deny</code> ACL rules to stats frontend.</p>
-  <p><strong>Edit config:</strong> SSH to server, edit <code>/opt/leba/mako-lang.conf</code>, run <code>systemctl restart leba</code>.</p>
+  <p><strong>App Basic auth:</strong> <code>auth_basic "Realm"</code> + <code>auth_user name pass</code> on a frontend.</p>
+  <p><strong>IP access list:</strong> <code>allow src …</code> / <code>deny src …</code> ACL rules on the frontend.</p>
+  <p><strong>Change admin password:</strong> <code>leba admin hash-password NEW_PASS</code>.</p>
   </div></div>`;
 }
 
@@ -332,7 +349,9 @@ function viewAPI(){
   <tr><td>POST</td><td class="mono">/admin/ready/{be}/{srv}</td><td>Mark server ready</td></tr>
   <tr><td>POST</td><td class="mono">/admin/disable/{be}/{srv}</td><td>Force server down</td></tr>
   <tr><td>POST</td><td class="mono">/admin/enable/{be}/{srv}</td><td>Force server up</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/vhost-create</td><td>Add a proxy host</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/proxy-host</td><td>Add a proxy host</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/proxy-host-delete</td><td>Delete a proxy host</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/tls-reload</td><td>Live-reload TLS certificates</td></tr>
   <tr><td>POST</td><td class="mono">/admin/reload-servers</td><td>Reload servers file</td></tr>
   <tr><td>GET</td><td class="mono">/metrics</td><td>Prometheus text format</td></tr>
   <tr><td>GET</td><td class="mono">/readyz</td><td>Readiness probe</td></tr>
@@ -352,11 +371,26 @@ async function addHost(){
   const cert=$('#vhCert')?.value||'',key=$('#vhKey')?.value||'';
   if(!domain||!be||!srv||!addr){toast('Fill in domain, backend, server, and address',1);return}
   try{
-    const p='/admin/vhost-create?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+    const p='/admin/proxy-host?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
       '&backend='+encodeURIComponent(be)+'&server='+encodeURIComponent(srv)+'&addr='+encodeURIComponent(addr)+
       '&cert='+encodeURIComponent(cert)+'&key='+encodeURIComponent(key);
-    await api(p,'POST');toast('Created proxy host: '+domain);$('#addForm').style.display='none';await refresh();
+    const r=await api(p,'POST');toast('Created proxy host: '+domain);
+    if(r.tls_reload_recommended)toast('Cert paths saved — run TLS reload',0);
+    $('#addForm').style.display='none';await refresh();
   }catch(e){toast('Failed: '+e.message,1)}
+}
+
+async function deleteHost(fe,domain){
+  if(!confirm('Delete proxy host '+domain+'?'))return;
+  try{
+    await api('/admin/proxy-host-delete?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain),'POST');
+    toast('Deleted '+domain);await refresh();
+  }catch(e){toast(e.message,1)}
+}
+
+async function tlsReload(){
+  try{await api('/admin/tls-reload','POST');toast('TLS reload requested');}
+  catch(e){toast(e.message,1)}
 }
 
 async function doLogout(){window.location.href='/logout'}

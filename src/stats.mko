@@ -433,6 +433,12 @@ fn stats_json(
         builder_write(b, json_escape(fe.tls_cert))
         builder_write(b, "\",\"access_log\":")
         builder_write(b, int_to_string(fe.access_log))
+        builder_write(b, ",\"acme_webroot\":\"")
+        builder_write(b, json_escape(fe.acme_webroot))
+        builder_write(b, "\",\"auth_basic_realm\":\"")
+        builder_write(b, json_escape(fe.auth_basic_realm))
+        builder_write(b, "\",\"redirect_https\":")
+        builder_write(b, int_to_string(fe.redirect_https))
         builder_write(b, "}")
     }
     builder_write(b, "],\"backends\":[")
@@ -662,7 +668,19 @@ fn admin_path_mutates_state(path: string) -> int {
     if str_eq(path, "/admin/vhost-create") {
         return 1
     }
+    if str_eq(path, "/admin/proxy-host") {
+        return 1
+    }
+    if str_eq(path, "/admin/proxy-host-delete") {
+        return 1
+    }
     if str_eq(path, "/admin/vhost-cert") {
+        return 1
+    }
+    if str_eq(path, "/admin/tls-reload") {
+        return 1
+    }
+    if str_eq(path, "/admin/reload") {
         return 1
     }
     return 0
@@ -674,6 +692,10 @@ struct StatsConnResult {
     servers: []Server
     routes: []Route
     acls: []AclRule
+    // 1 = accept thread should call tls_server_reload on HTTP TLS listeners.
+    tls_reload: int
+    // 1 = accept thread should full_config_reload from config_path.
+    full_reload: int
 }
 
 fn stats_conn_result(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route, acls: []AclRule) -> StatsConnResult {
@@ -682,7 +704,9 @@ fn stats_conn_result(frontends: []Frontend, backends: []Backend, servers: []Serv
         backends: backends,
         servers: servers,
         routes: routes,
-        acls: acls
+        acls: acls,
+        tls_reload: 0,
+        full_reload: 0
     }
 }
 
@@ -774,21 +798,34 @@ fn stats_tls_respond_401(conn: TlsConn, method: string) -> int {
 
 // ---- Cookie-based authentication ----
 // Session cookie format: user:role:hmac(user:role, secret)
-// The secret is derived from the config file path (stable per instance).
+// Secret material: state_key (preferred) or LEBA_SESSION_SECRET env.
+// Never use a fixed hard-coded key in production.
 
-fn session_secret() -> string {
-    return sha256("leba-session-key-2026")
+fn session_secret_material(state_key: string) -> string {
+    if not str_eq(state_key, "") {
+        return state_key
+    }
+    let env_sec = env_get("LEBA_SESSION_SECRET")
+    if not str_eq(env_sec, "") {
+        return env_sec
+    }
+    // Last-resort local-dev default. Doctor warns when state_key and env are empty.
+    return "leba-session-insecure-default"
 }
 
-fn session_sign(user: string, role: string) -> string {
+fn session_secret(state_key: string) -> string {
+    return sha256("leba-session:" + session_secret_material(state_key))
+}
+
+fn session_sign(user: string, role: string, state_key: string) -> string {
     let payload = user + ":" + role
-    let sig = sha256(payload + ":" + session_secret())
+    let sig = sha256(payload + ":" + session_secret(state_key))
     // Take first 16 chars of the hex hash as signature
     let short_sig = substr(sig, 0, 16)
     return payload + ":" + short_sig
 }
 
-fn session_verify(cookie: string) -> (string, string) {
+fn session_verify(cookie: string, state_key: string) -> (string, string) {
     // Format: user:role:signature
     let last_colon = str_last_index(cookie, ":")
     if last_colon < 0 {
@@ -796,7 +833,7 @@ fn session_verify(cookie: string) -> (string, string) {
     }
     let payload = substr(cookie, 0, last_colon)
     let sig = substr(cookie, last_colon + 1, len(cookie))
-    let expected = sha256(payload + ":" + session_secret())
+    let expected = sha256(payload + ":" + session_secret(state_key))
     let expected_short = substr(expected, 0, 16)
     if not str_eq(sig, expected_short) {
         return ("", "")
@@ -949,7 +986,7 @@ fn handle_stats_tls_conn(
                 let _ = stats_tls_respond_json(conn, method, 401, "{\"error\":\"invalid credentials\"}\n")
                 return stats_conn_result(frontends, backends, servers, routes, acls)
             }
-            let token = session_sign(login_user, login_role)
+            let token = session_sign(login_user, login_role, state_key)
             let mut rb = str_builder()
             builder_write(rb, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
             builder_write(rb, f"Set-Cookie: leba_session={token}; Path=/; HttpOnly; Secure; SameSite=Strict\r\n")
@@ -986,7 +1023,7 @@ fn handle_stats_tls_conn(
     let mut authed_user = auth_user
     let session_token = extract_session_cookie(raw)
     if len(session_token) > 0 {
-        let su, sr = session_verify(session_token)
+        let su, sr = session_verify(session_token, state_key)
         if len(sr) > 0 {
             role = sr
             authed_user = su
@@ -1029,7 +1066,18 @@ fn handle_stats_tls_conn(
         }
         let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        if str_eq(ponly, "/admin/tls-reload") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/reload") {
+            if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        return scr
     }
 
     if str_eq(ponly, "/stats/whoami") {
@@ -1142,7 +1190,18 @@ fn handle_stats_raw_conn(
         }
         let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        if str_eq(ponly, "/admin/tls-reload") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/reload") {
+            if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        return scr
     }
 
     if str_eq(ponly, "/stats/whoami") {
@@ -1266,7 +1325,18 @@ fn handle_stats_conn(
         }
         let _ = http_respond_json(c, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        return stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        if str_eq(ponly, "/admin/tls-reload") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/reload") {
+            if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        return scr
     }
 
     if str_eq(ponly, "/stats/whoami") {

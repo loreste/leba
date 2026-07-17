@@ -45,6 +45,12 @@ struct Route {
     kind: string
     value: string
     backend: string
+    // "" = reverse-proxy to backend; "redirect" | "dead" = terminal actions (no upstream).
+    action: string
+    // redirect target URL (absolute or path).
+    target: string
+    // HTTP status for redirect/dead (0 = default 301 / 404).
+    code: int
 }
 
 struct AclRule {
@@ -66,6 +72,13 @@ struct AdminUser {
     pass: string
     pass_hash: string
     role: string
+}
+
+// Per-frontend HTTP Basic credentials for proxied applications (data plane).
+struct AppAuthUser {
+    frontend: string
+    user: string
+    pass: string
 }
 
 struct UdpFlow {
@@ -98,6 +111,10 @@ struct Frontend {
     access_log: int
     access_log_file: string
     root: string
+    // Directory of ACME HTTP-01 challenge tokens (token file name = path suffix).
+    acme_webroot: string
+    // Non-empty = require HTTP Basic for all non-ACME requests on this frontend.
+    auth_basic_realm: string
     // 1 = answer with HTTP→HTTPS redirect (no backend). code defaults to 301.
     redirect_https: int
     redirect_code: int
@@ -131,6 +148,8 @@ struct PendingClient {
     frontend_idx: int
     deadline_ms: int
     buffer: string
+    // Requests already completed on this keep-alive connection (0 for new accepts).
+    ka_count: int
 }
 
 // --- global defaults & live stats ------------------------------------------
@@ -143,6 +162,7 @@ struct Defaults {
     retries: int
     workers: int
     request_body_limit_bytes: int
+    acme_webroot: string
 }
 
 struct LiveStats {
@@ -177,7 +197,8 @@ fn defaults_new() -> Defaults {
         maxconn: 10000,
         retries: 1,
         workers: 32,
-        request_body_limit_bytes: 1048576
+        request_body_limit_bytes: 1048576,
+        acme_webroot: ""
     }
 }
 
@@ -256,8 +277,18 @@ fn frontend_new(name: string) -> Frontend {
         access_log: 1,
         access_log_file: "",
         root: "",
+        acme_webroot: "",
+        auth_basic_realm: "",
         redirect_https: 0,
         redirect_code: 301
+    }
+}
+
+fn app_auth_user_new(frontend: string, user: string, pass: string) -> AppAuthUser {
+    return AppAuthUser {
+        frontend: frontend,
+        user: user,
+        pass: pass
     }
 }
 
@@ -266,7 +297,42 @@ fn route_new(frontend: string, kind: string, value: string, backend: string) -> 
         frontend: frontend,
         kind: kind,
         value: value,
-        backend: backend
+        backend: backend,
+        action: "",
+        target: "",
+        code: 0
+    }
+}
+
+fn route_redirect_new(frontend: string, kind: string, value: string, target: string, code: int) -> Route {
+    let mut c = code
+    if c <= 0 {
+        c = 301
+    }
+    return Route {
+        frontend: frontend,
+        kind: kind,
+        value: value,
+        backend: "",
+        action: "redirect",
+        target: target,
+        code: c
+    }
+}
+
+fn route_dead_new(frontend: string, kind: string, value: string, code: int) -> Route {
+    let mut c = code
+    if c <= 0 {
+        c = 404
+    }
+    return Route {
+        frontend: frontend,
+        kind: kind,
+        value: value,
+        backend: "",
+        action: "dead",
+        target: "",
+        code: c
     }
 }
 

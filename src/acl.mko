@@ -167,21 +167,39 @@ fn acl_build_index(acls: []AclRule) -> map[string][]int {
     return idx
 }
 
-fn select_backend(routes: []Route, frontend: string, path: string, host: string, fallback: string) -> string {
+// Returns matching route index, or -1. Prefer non-default first match; default last.
+fn select_route_idx(routes: []Route, frontend: string, path: string, host: string) -> int {
     let p = path_only(path)
-    let mut default_be = fallback
-    for _, r in range routes {
+    let mut default_idx = 0 - 1
+    for i, r in range routes {
         if not str_eq(r.frontend, frontend) {
             continue
         }
         if str_eq(r.kind, "default") {
-            default_be = r.backend
+            default_idx = i
             continue
         }
-        // reuse match_kind so empty prefixes / host rules stay consistent with ACLs
         if match_kind(r.kind, r.value, p, host, "GET", "") == 1 {
-            return r.backend
+            return i
         }
     }
-    return default_be
+    return default_idx
+}
+
+fn select_backend(routes: []Route, frontend: string, path: string, host: string, fallback: string) -> string {
+    let ri = select_route_idx(routes, frontend, path, host)
+    if ri < 0 {
+        return fallback
+    }
+    let r = routes[ri]
+    if str_eq(r.action, "redirect") {
+        return ""
+    }
+    if str_eq(r.action, "dead") {
+        return ""
+    }
+    if str_eq(r.backend, "") {
+        return fallback
+    }
+    return r.backend
 }

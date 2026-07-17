@@ -34,7 +34,7 @@ fn main() {
     let mut max_req = 0
     if argc() > 1 {
         if str_eq(arg_get(1), "version") {
-            print("leba 0.7.1")
+            print("leba 0.9.0")
             print("concurrency: crew worker pool")
             return
         }
@@ -91,7 +91,7 @@ fn main() {
         }
     }
     log_info_event("config_load", f"path={path}")
-    let w = parse_config_file(path)
+    let mut w = parse_config_file(path)
     if w.ok == 0 {
         log_error_event("config_parse_failed", f"path={path} error=\"{w.error}\"")
         print(w.error)
@@ -106,12 +106,16 @@ fn main() {
         return
     }
     log_info_event("doctor_passed", f"path={path} warnings={rep.warnings}")
-    let mut servers = w.servers
+    let mut servers = init_server_pools(w.servers, w.backends)
     let mut backends = w.backends
     let mut frontends = w.frontends
     let mut routes = w.routes
     let mut acls = w.acls
+    let mut header_rules = w.header_rules
+    let mut app_auth_users = w.app_auth_users
+    let mut config_path = path
     let config_dir = path_dir(path)
+    log_info_event("server_pools_ready", f"servers={len(servers)}")
     let mut server_watch = watch_new()
     let mut has_server_watch = 0
     if watch_available() == 1 {
@@ -173,8 +177,10 @@ fn main() {
     }
 
     let slots = chan_new(workers)
-    let done = chan_open[(int, int, int, int, int)](workers * 2)
+    // done: err, status, conn_si, served_si, bytes, retries, client_fd, keep_alive, frontend_idx, ka_count
+    let done = chan_open[(int, int, int, int, int, int, int, int, int, int)](workers * 2)
     fill_slots(slots, workers)
+    let max_keepalive_requests = 1000
     let mut stats_fe = frontend_new("stats")
     let mut http_listeners = make([]HttpListener, 0, len(http_fes))
     let mut h3_listeners = make([]H3Listener, 0, len(http_fes))
@@ -449,32 +455,105 @@ fn main() {
                 }
                 continue
             }
-            let mut reload_reason = ""
+            let mut full_reload_reason = ""
+            let mut servers_reload_reason = ""
             if signal_fired("HUP") == 1 {
-                reload_reason = "signal=HUP"
+                full_reload_reason = "signal=HUP"
             }
             if has_server_watch == 1 {
                 let changed = watch_poll(server_watch, 0)
                 if not str_eq(changed, "") {
-                    reload_reason = f"watch_path={changed}"
+                    servers_reload_reason = f"watch_path={changed}"
                 }
             }
-            if not str_eq(reload_reason, "") {
-                let rr = reload_servers_files(backends, servers, config_dir)
-                if rr.ok == 1 {
-                    servers = rr.servers
-                    log_info_event("servers_file_reloaded", f"{reload_reason} loaded={rr.loaded} servers={len(servers)}")
+            // Full table reload (routes/acls/backends/servers/headers/auth) — not bind rebind.
+            if not str_eq(full_reload_reason, "") {
+                let fr = full_config_reload(config_path, servers)
+                if fr.ok == 1 {
+                    servers = fr.servers
+                    backends = fr.backends
+                    frontends = fr.frontends
+                    routes = fr.routes
+                    acls = fr.acls
+                    header_rules = fr.header_rules
+                    app_auth_users = fr.app_auth_users
+                    w.admin_users = fr.admin_users
+                    w.stats_user = fr.stats_user
+                    w.stats_pass = fr.stats_pass
+                    w.stats_port = fr.stats_port
+                    w.state_file = fr.state_file
+                    w.state_key = fr.state_key
+                    buckets = rate_init_all(frontends)
+                    // Refresh Frontend objects on http_listeners without rebinding sockets.
+                    let mut hi = 0
+                    while hi < len(http_listeners) {
+                        let mut hl = http_listeners[hi]
+                        let mut fi = 0
+                        while fi < len(frontends) {
+                            if str_eq(frontends[fi].name, hl.frontend.name) {
+                                if frontends[fi].bind_port == hl.frontend.bind_port {
+                                    hl.frontend = frontends[fi]
+                                }
+                            }
+                            fi = fi + 1
+                        }
+                        http_listeners[hi] = hl
+                        hi = hi + 1
+                    }
+                    log_info_event("config_reloaded", f"{full_reload_reason} servers={len(servers)} routes={len(routes)} backends={len(backends)}")
                 } else {
-                    log_warn_event("servers_file_reload_failed", f"{reload_reason} error=\"{json_escape(rr.error)}\"")
+                    log_warn_event("config_reload_failed", f"{full_reload_reason} error=\"{json_escape(fr.error)}\"")
+                }
+            } else {
+                if not str_eq(servers_reload_reason, "") {
+                    let rr = reload_servers_files(backends, servers, config_dir)
+                    if rr.ok == 1 {
+                        servers = init_server_pools(rr.servers, backends)
+                        log_info_event("servers_file_reloaded", f"{servers_reload_reason} loaded={rr.loaded} servers={len(servers)}")
+                    } else {
+                        log_warn_event("servers_file_reload_failed", f"{servers_reload_reason} error=\"{json_escape(rr.error)}\"")
+                    }
                 }
             }
             if inflight > 0 {
                 if chan_len(done) > 0 {
-                    let d_err, d_st, d_si, d_bytes, d_retries = done.recv()
-                    servers = apply_done_servers(d_err, d_st, d_si, d_bytes, servers)
-                    st = apply_done(d_err, d_si, d_bytes, d_retries, servers, st)
+                    let d_err, d_st, d_conn_si, d_served_si, d_bytes, d_retries, d_fd, d_ka, d_fe_idx, d_ka_n = done.recv()
+                    servers = apply_done_servers_conn(d_conn_si, servers)
+                    servers = apply_done_servers_health(d_err, d_st, d_served_si, d_bytes, servers)
+                    st = apply_done(d_err, d_served_si, d_bytes, d_retries, servers, st)
                     inflight = inflight - 1
                     completed = completed + 1
+                    // D21: accept thread is sole closer for cleartext HTTP fds (d_fd >= 0).
+                    if d_fd >= 0 {
+                        let mut do_ka = 0
+                        if d_ka == 1 {
+                            if d_err == 0 {
+                                if d_ka_n < max_keepalive_requests {
+                                    if len(pending_clients) < pending_limit {
+                                        if d_fe_idx >= 0 {
+                                            do_ka = 1
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if do_ka == 1 {
+                            let mut idle_ms = d.timeout_client_ms
+                            if idle_ms <= 0 {
+                                idle_ms = 30000
+                            }
+                            pending_clients = append(pending_clients, PendingClient {
+                                fd: d_fd,
+                                kind: 2,
+                                frontend_idx: d_fe_idx,
+                                deadline_ms: now_ms() + idle_ms,
+                                buffer: "",
+                                ka_count: d_ka_n
+                            })
+                        } else {
+                            let _ = tcp_close(d_fd)
+                        }
+                    }
                 }
             }
             if max_req > 0 {
@@ -535,6 +614,42 @@ fn main() {
                                 servers = srp.servers
                                 routes = srp.routes
                                 acls = srp.acls
+                                if srp.tls_reload == 1 {
+                                    let mut ri = 0
+                                    while ri < len(http_listeners) {
+                                        if http_listeners[ri].tls == 1 {
+                                            let fe = http_listeners[ri].frontend
+                                            let rc = tls_server_reload(http_listeners[ri].tls_srv, fe.tls_cert, fe.tls_key)
+                                            if rc == 0 {
+                                                log_info_event("tls_reloaded", f"frontend={fe.name}")
+                                            } else {
+                                                log_warn_event("tls_reload_failed", f"frontend={fe.name} code={rc}")
+                                            }
+                                        }
+                                        ri = ri + 1
+                                    }
+                                }
+                                if srp.full_reload == 1 {
+                                    let fr = full_config_reload(config_path, servers)
+                                    if fr.ok == 1 {
+                                        servers = fr.servers
+                                        backends = fr.backends
+                                        frontends = fr.frontends
+                                        routes = fr.routes
+                                        acls = fr.acls
+                                        header_rules = fr.header_rules
+                                        app_auth_users = fr.app_auth_users
+                                        w.admin_users = fr.admin_users
+                                        w.stats_user = fr.stats_user
+                                        w.stats_pass = fr.stats_pass
+                                        w.state_file = fr.state_file
+                                        w.state_key = fr.state_key
+                                        buckets = rate_init_all(frontends)
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)}")
+                                    } else {
+                                        log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
+                                    }
+                                }
                                 let _ = tcp_close(pc.fd)
                                 completed = completed + 1
                             } else {
@@ -542,7 +657,7 @@ fn main() {
                                     if pc.frontend_idx < len(http_listeners) {
                                         let ph = http_listeners[pc.frontend_idx]
                                         let raw_reqp = parse_raw_request(raw_pending)
-                                        let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets)
+                                        let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets, header_rules, app_auth_users, pc.frontend_idx, pc.ka_count)
                                         servers = dp.servers
                                         backends = dp.backends
                                         buckets = dp.buckets
@@ -562,8 +677,10 @@ fn main() {
                                                 ))
                                             } else {
                                                 let _ = pool.kick(worker_raw_upstream(
-                                                    dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
-                                                    dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.access_log_file, dp.orig_host, slots, done
+                                                    dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id,
+                                                    dp.retry_plan, dp.timeout_ms, dp.access_log, dp.access_log_file, dp.orig_host,
+                                                    dp.req_extra_headers, dp.resp_extra_headers, dp.client_ka, dp.frontend_idx, dp.ka_count,
+                                                    slots, done
                                                 ))
                                             }
                                         }
@@ -608,6 +725,48 @@ fn main() {
                                 servers = srp.servers
                                 routes = srp.routes
                                 acls = srp.acls
+                                if srp.tls_reload == 1 {
+                                    let mut ri = 0
+                                    while ri < len(http_listeners) {
+                                        if http_listeners[ri].tls == 1 {
+                                            let fe = http_listeners[ri].frontend
+                                            let rc = tls_server_reload(http_listeners[ri].tls_srv, fe.tls_cert, fe.tls_key)
+                                            if rc == 0 {
+                                                log_info_event("tls_reloaded", f"frontend={fe.name}")
+                                            } else {
+                                                log_warn_event("tls_reload_failed", f"frontend={fe.name} code={rc}")
+                                            }
+                                        }
+                                        ri = ri + 1
+                                    }
+                                    if stats_tls == 1 {
+                                        let rc2 = tls_server_reload(stats_tls_srv, stats_fe.tls_cert, stats_fe.tls_key)
+                                        if rc2 == 0 {
+                                            log_info_event("tls_reloaded", "frontend=stats")
+                                        }
+                                    }
+                                }
+                                if srp.full_reload == 1 {
+                                    let fr = full_config_reload(config_path, servers)
+                                    if fr.ok == 1 {
+                                        servers = fr.servers
+                                        backends = fr.backends
+                                        frontends = fr.frontends
+                                        routes = fr.routes
+                                        acls = fr.acls
+                                        header_rules = fr.header_rules
+                                        app_auth_users = fr.app_auth_users
+                                        w.admin_users = fr.admin_users
+                                        w.stats_user = fr.stats_user
+                                        w.stats_pass = fr.stats_pass
+                                        w.state_file = fr.state_file
+                                        w.state_key = fr.state_key
+                                        buckets = rate_init_all(frontends)
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)}")
+                                    } else {
+                                        log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
+                                    }
+                                }
                             }
                             let _ = tls_conn_close(sconn)
                             completed = completed + 1
@@ -623,7 +782,8 @@ fn main() {
                                     kind: 1,
                                     frontend_idx: -1,
                                     deadline_ms: now_ms() + 3000,
-                                    buffer: ""
+                                    buffer: "",
+                                    ka_count: 0
                                 })
                             }
                         }
@@ -665,7 +825,7 @@ fn main() {
                                         buckets: buckets
                                     }
                                     if str_eq(proto, "h2") {
-                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets)
+                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules)
                                         servers = tr.servers
                                         backends = tr.backends
                                         buckets = tr.buckets
@@ -689,7 +849,7 @@ fn main() {
                                         let raw_req = parse_raw_request(raw_bytes)
                                         // WSS: tunnel Upgrade: websocket off the accept thread
                                         if str_eq(raw_req.upgrade, "websocket") {
-                                            let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets)
+                                            let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules)
                                             servers = dp.servers
                                             backends = dp.backends
                                             buckets = dp.buckets
@@ -742,7 +902,7 @@ fn main() {
                                             }
                                         } else {
                                             // Dispatch TLS HTTP to worker (TlsConn ownership moves).
-                                            let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets)
+                                            let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules)
                                             servers = dp_tls.servers
                                             backends = dp_tls.backends
                                             buckets = dp_tls.buckets
@@ -782,7 +942,8 @@ fn main() {
                                                         traceparent, traceparent_trace_id(traceparent), traceparent_span_id(traceparent),
                                                         dp_tls.up_host, dp_tls.up_port, dp_tls.up_pool,
                                                         dp_tls.timeout_ms, dp_tls.retries, dp_tls.server_idx,
-                                                        dp_tls.access_log, raw_req.host, slots, done
+                                                        dp_tls.access_log, raw_req.host,
+                                                        dp_tls.req_extra_headers, dp_tls.resp_extra_headers, slots, done
                                                     ))
                                                 }
                                             }
@@ -799,7 +960,8 @@ fn main() {
                                                 kind: 2,
                                                 frontend_idx: hi_match,
                                                 deadline_ms: now_ms() + 3000,
-                                                buffer: ""
+                                                buffer: "",
+                                                ka_count: 0
                                             })
                                         }
                                     }
@@ -825,7 +987,7 @@ fn main() {
                             } else {
                                 let raw = h3_stream_read(h3l.handle, sid)
                                 let req = parse_raw_request(raw)
-                                let tr = handle_h3_proxy_request(h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets)
+                                let tr = handle_h3_proxy_request(h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets, header_rules)
                                 servers = tr.servers
                                 backends = tr.backends
                                 buckets = tr.buckets
@@ -954,9 +1116,16 @@ fn main() {
         let drain_deadline = now_ms() + 5000
         while inflight > 0 {
             if chan_len(done) > 0 {
-                let dr_err, dr_st, dr_si, dr_bytes, dr_retries = done.recv()
-                servers = apply_done_servers(dr_err, dr_st, dr_si, dr_bytes, servers)
-                st = apply_done(dr_err, dr_si, dr_bytes, dr_retries, servers, st)
+                let dr_err, dr_st, dr_conn_si, dr_served_si, dr_bytes, dr_retries, dr_fd, dr_ka, dr_fe, dr_kan = done.recv()
+                servers = apply_done_servers_conn(dr_conn_si, servers)
+                servers = apply_done_servers_health(dr_err, dr_st, dr_served_si, dr_bytes, servers)
+                st = apply_done(dr_err, dr_served_si, dr_bytes, dr_retries, servers, st)
+                if dr_fd >= 0 {
+                    let _ = tcp_close(dr_fd)
+                }
+                let _ = dr_ka
+                let _ = dr_fe
+                let _ = dr_kan
                 inflight = inflight - 1
             } else {
                 if now_ms() > drain_deadline {

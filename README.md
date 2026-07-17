@@ -34,7 +34,9 @@ gh repo clone loreste/leba
 - TLS on the admin/stats frontend
 - Encrypted state file at rest (AES-128-GCM via `state_key`)
 - ACL engine: deny/allow by path, host, method, header, source IP
-- IP allowlist/blocklist via `src` ACL rules
+- IP allowlist/blocklist via `src` ACL rules (access lists)
+- Application HTTP Basic (`auth_basic` + `auth_user` on frontends)
+- ACME HTTP-01 webroot (`acme_webroot`) + live TLS reload
 - Per-frontend and per-client-IP rate limiting (token bucket)
 - Request body size limits
 - Directory traversal prevention for static file serving
@@ -171,8 +173,12 @@ The `mode stats` frontend serves:
 | `/admin/enable/{be}/{srv}` | POST | operator | Force UP |
 | `/admin/reload-servers` | POST | operator | Reload servers_file |
 | `/admin/vhosts` | GET | viewer | List vhosts |
-| `/admin/vhost-create` | POST | admin | Create vhost |
-| `/admin/vhost-cert` | POST | admin | Update certificate paths |
+| `/admin/vhost-create` | POST | operator | Create vhost |
+| `/admin/vhost-cert` | POST | operator | Update certificate paths |
+| `/admin/tls-reload` | POST | operator | Live-reload TLS certs from disk |
+| `/admin/proxy-hosts` | GET | viewer | List proxy hosts (alias of vhosts) |
+| `/admin/proxy-host` | POST | operator | Create/update proxy host |
+| `/admin/proxy-host-delete` | POST | operator | Delete proxy host by domain |
 
 ## CLI
 
@@ -205,13 +211,23 @@ Typical paths:
 
 ## Status
 
-Leba is working software with 80+ automated tests. It handles HTTP/1-3, TCP,
-UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind real traffic.
+Leba is working software with 80+ automated tests (v0.9.0). It handles
+HTTP/1-3, TCP, UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind
+real traffic.
+
+**Competitive roadmap:** see [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md)
+for the plan to beat NPM / reach HAProxy Enterprise-class ops (ACME, hitless
+reload, multi-node, WAF adapter). Phase 0 (trust) is in progress.
 
 Known limits:
 - HTTP/2 covers multiplexed request/response; long-lived streaming and server
   push are not goals.
-- HTTP/3 requires a quiche-linked build. Upstream is HTTP/1.1.
+- HTTP/3 requires a quiche-linked build. Upstream prefers keep-alive pools when
+  `init_server_pools` is active; otherwise falls back to per-request connect.
 - SIP support is signaling-focused; media relay is not implemented.
+- Full config **table** reload is implemented (`SIGHUP` / `POST /admin/reload`);
+  listen socket rebind still requires restart.
+- No built-in Let's Encrypt client; use external ACME + `acme_webroot` +
+  `POST /admin/tls-reload` (see [`docs/ACME.md`](docs/ACME.md)).
 - No response compression (gzip/brotli) or response caching yet.
 - No WAF/request body inspection yet.

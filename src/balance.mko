@@ -278,3 +278,144 @@ fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
     out[idx] = s
     return out
 }
+
+// --- Retry plan (kick-safe fixed-width POD; no arrays across pool.kick) -----
+
+struct RetryHop {
+    host: string
+    port: int
+    pool: int
+    server_idx: int
+}
+
+struct RetryPlan {
+    n: int
+    h0: RetryHop
+    h1: RetryHop
+    h2: RetryHop
+    h3: RetryHop
+}
+
+fn retry_hop_empty() -> RetryHop {
+    return RetryHop {
+        host: "",
+        port: 0,
+        pool: 0 - 1,
+        server_idx: 0 - 1
+    }
+}
+
+fn retry_plan_empty() -> RetryPlan {
+    let z = retry_hop_empty()
+    return RetryPlan {
+        n: 0,
+        h0: z,
+        h1: z,
+        h2: z,
+        h3: z
+    }
+}
+
+fn retry_hop_from_server(s: Server, si: int) -> RetryHop {
+    return RetryHop {
+        host: s.host,
+        port: s.port,
+        pool: s.pool,
+        server_idx: si
+    }
+}
+
+fn retry_plan_hop(plan: RetryPlan, i: int) -> RetryHop {
+    if i == 0 {
+        return plan.h0
+    }
+    if i == 1 {
+        return plan.h1
+    }
+    if i == 2 {
+        return plan.h2
+    }
+    if i == 3 {
+        return plan.h3
+    }
+    return retry_hop_empty()
+}
+
+fn retry_plan_set_hop(plan: RetryPlan, i: int, hop: RetryHop) -> RetryPlan {
+    let mut out = plan
+    if i == 0 {
+        out.h0 = hop
+    } else if i == 1 {
+        out.h1 = hop
+    } else if i == 2 {
+        out.h2 = hop
+    } else if i == 3 {
+        out.h3 = hop
+    }
+    return out
+}
+
+fn retry_plan_contains(plan: RetryPlan, n: int, si: int) -> int {
+    let mut i = 0
+    while i < n {
+        if retry_plan_hop(plan, i).server_idx == si {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Build up to 1 + min(retries, 3) hops. Only hop0 holds maxconn reservation.
+// primary_si must already be chosen (or -1 for empty plan).
+fn build_retry_plan(
+    servers: []Server,
+    be_in: Backend,
+    client_key: string,
+    sticky_name: string,
+    sticky_val: string,
+    primary_si: int,
+    max_retries: int
+) -> RetryPlan {
+    let mut plan = retry_plan_empty()
+    if primary_si < 0 {
+        return plan
+    }
+    if primary_si >= len(servers) {
+        return plan
+    }
+    plan = retry_plan_set_hop(plan, 0, retry_hop_from_server(servers[primary_si], primary_si))
+    plan.n = 1
+    let mut extra = max_retries
+    if extra < 0 {
+        extra = 0
+    }
+    if extra > 3 {
+        extra = 3
+    }
+    let mut be = be_in
+    // Prefer alternate eligible servers not already in the plan.
+    let mut tries = 0
+    while plan.n < 1 + extra {
+        if tries > 32 {
+            break
+        }
+        tries = tries + 1
+        // Force non-sticky pick by clearing sticky_val after hop0.
+        let si = pick_server(servers, be, client_key, "", "")
+        if si < 0 {
+            break
+        }
+        if retry_plan_contains(plan, plan.n, si) == 1 {
+            // Advance RR so we don't spin forever on the same pick.
+            be = next_rr(be)
+            continue
+        }
+        plan = retry_plan_set_hop(plan, plan.n, retry_hop_from_server(servers[si], si))
+        plan.n = plan.n + 1
+        be = next_rr(be)
+    }
+    let _ = sticky_name
+    let _ = sticky_val
+    return plan
+}

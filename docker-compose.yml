@@ -1,0 +1,35 @@
+# Leba — NPM-style compose stack.
+# Mount certs at ./certs and set LEBA_ADMIN_AUTH for the admin API.
+services:
+  leba:
+    build: .
+    image: leba:local
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "8404:8404"
+    environment:
+      LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
+      LEBA_SESSION_SECRET: "${LEBA_SESSION_SECRET:-change-me-session-secret}"
+    volumes:
+      - ./certs:/etc/leba/certs:ro
+      - leba-state:/var/lib/leba
+      - leba-logs:/var/log/leba
+    # Optional lego sidecar profile: docker compose --profile acme up
+    profiles: []
+
+  lego:
+    image: goacme/lego:latest
+    profiles: ["acme"]
+    volumes:
+      - ./certs:/certs
+      - ./deploy/docker/lego-deploy-hook.sh:/hooks/deploy.sh:ro
+    environment:
+      LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
+      LEBA_ADMIN_URL: "http://leba:8404"
+    entrypoint: ["/bin/sh", "-c", "echo 'Run lego manually with --http.webroot or DNS and --run-hook /hooks/deploy.sh'; sleep infinity"]
+
+volumes:
+  leba-state:
+  leba-logs:

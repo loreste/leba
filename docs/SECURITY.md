@@ -88,6 +88,14 @@ Current hardening:
 - trace headers are validated before use and forwarded upstream only after
   validation or regeneration.
 
+## Session Cookies
+
+Admin UI session cookies are signed with material from, in order:
+
+1. `state_key` in defaults (preferred),
+2. `LEBA_SESSION_SECRET` environment variable,
+3. an insecure local-dev default (doctor warns when neither 1 nor 2 is set).
+
 ## Remaining Security Work
 
 These are still open:

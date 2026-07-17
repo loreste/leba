@@ -60,18 +60,32 @@ fn apply_done(
     return out
 }
 
-fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Server) -> []Server {
+// Release maxconn reservation on hop0 (conn_si). Does not touch health/stats.
+fn apply_done_servers_conn(conn_si: int, servers: []Server) -> []Server {
+    if conn_si < 0 {
+        return servers
+    }
+    return server_conn_delta(servers, conn_si, 0 - 1)
+}
+
+// Mark request/bytes/errors and passive health on the hop that answered (or last tried).
+fn apply_done_servers_health(err: int, status: int, served_si: int, bytes: int, servers: []Server) -> []Server {
     let mut srv = servers
-    if si >= 0 {
-        srv = server_conn_delta(srv, si, 0 - 1)
+    if served_si >= 0 {
         if err == 0 {
-            srv = mark_server_req(srv, si, bytes, 0)
+            srv = mark_server_req(srv, served_si, bytes, 0)
         } else {
-            srv = mark_server_req(srv, si, 0, 1)
+            srv = mark_server_req(srv, served_si, 0, 1)
         }
         // Passive health: track upstream status and auto-mark DOWN after
         // consecutive 5xx responses (fall threshold defaults to 3).
-        srv = apply_passive_health(srv, si, status, 3)
+        srv = apply_passive_health(srv, served_si, status, 3)
     }
     return srv
+}
+
+// Legacy single-si helper: conn release + health on the same index (pre-retry-plan paths).
+fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Server) -> []Server {
+    let mut srv = apply_done_servers_conn(si, servers)
+    return apply_done_servers_health(err, status, si, bytes, srv)
 }

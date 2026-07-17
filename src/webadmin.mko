@@ -152,9 +152,9 @@ fn wa_js() -> string {
     builder_write(b, "$('#exOut').textContent=out}")
 
     // renderers
-    builder_write(b, "function nav(tab){TAB=tab;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));render()}")
+    builder_write(b, "function nav(tab){TAB=tab;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));const v=$('#view');if(v)delete v.dataset.loaded;render()}")
     // Analytics loader
-    builder_write(b, "async function loadAnalytics(){const body=$('#main');body.innerHTML='<div class=panel><h3>Loading analytics...</h3></div>';")
+    builder_write(b, "async function loadAnalytics(){const body=$('#view');if(!body)return;body.innerHTML='<div class=panel><h3>Loading analytics...</h3></div>';")
     builder_write(b, "try{const d=await api('/stats/analytics');let h='<div class=grid style=grid-template-columns:repeat(4,1fr)>';")
     builder_write(b, "h+='<div class=card><div class=label>Total requests</div><div class=metric>'+(d.total_lines||0)+'</div></div>';")
     builder_write(b, "h+='<div class=card><div class=label>2xx OK</div><div class=metric style=color:var(--ok)>'+(d.status&&d.status['2xx']||0)+'</div></div>';")
@@ -290,7 +290,7 @@ fn wa_js() -> string {
     builder_write(b, "else if(TAB==='frontends')body.innerHTML=viewFrontends();")
     builder_write(b, "else if(TAB==='vhosts')body.innerHTML=viewVhosts();")
     builder_write(b, "else if(TAB==='explain')body.innerHTML=viewExplain();")
-    builder_write(b, "else if(TAB==='analytics'){loadAnalytics()}")
+    builder_write(b, "else if(TAB==='analytics'){if(!body.dataset.loaded){loadAnalytics();body.dataset.loaded='1'}}")
     builder_write(b, "else if(TAB==='api')body.innerHTML=viewApi();")
     builder_write(b, "else body.innerHTML=viewOverview()}")
 

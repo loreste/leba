@@ -153,6 +153,21 @@ fn wa_js() -> string {
 
     // renderers
     builder_write(b, "function nav(tab){TAB=tab;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));const v=$('#view');if(v)delete v.dataset.loaded;render()}")
+    // Config editor
+    builder_write(b, "async function loadConfig(){const body=$('#view');if(!body)return;body.innerHTML='<div class=panel>Loading config...</div>';")
+    builder_write(b, "try{const d=await api('/admin/config');")
+    builder_write(b, "body.innerHTML='<div class=panel><div class=row style=justify-content:space-between;margin-bottom:1rem><h3 style=margin:0>Configuration</h3>")
+    builder_write(b, "<div class=row><span class=muted>'+esc(d.path)+'</span>")
+    builder_write(b, "<button class=\"btn primary\" onclick=saveConfig()>Save & restart</button></div></div>")
+    builder_write(b, "<textarea id=cfgEditor style=width:100%;height:60vh;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:1rem;font-family:ui-monospace,Consolas,monospace;font-size:.85rem;resize:vertical;tab-size:2>'+esc(d.content)+'</textarea>")
+    builder_write(b, "<div class=notice style=margin-top:1rem>Changes require a restart to take effect. The running config will be overwritten.</div></div>'")
+    builder_write(b, "}catch(e){body.innerHTML='<div class=panel><h3>Error</h3><p>'+esc(e.message)+'</p></div>'}}")
+    builder_write(b, "async function saveConfig(){const ta=$('#cfgEditor');if(!ta)return;const content=ta.value;")
+    builder_write(b, "if(!confirm('Save config and schedule restart?'))return;")
+    builder_write(b, "try{const r=await api('/admin/config?content='+encodeURIComponent(content),'POST');")
+    builder_write(b, "toast('Config saved. Restart leba to apply: systemctl restart leba');")
+    builder_write(b, "}catch(e){toast('Save failed: '+e.message,1)}}")
+    builder_write(b, "window.saveConfig=saveConfig;")
     // Analytics loader
     builder_write(b, "async function loadAnalytics(){const body=$('#view');if(!body)return;body.innerHTML='<div class=panel><h3>Loading analytics...</h3></div>';")
     builder_write(b, "try{const d=await api('/stats/analytics');let h='<div class=grid style=grid-template-columns:repeat(4,1fr)>';")
@@ -311,6 +326,7 @@ fn wa_js() -> string {
     builder_write(b, "else if(TAB==='vhosts')body.innerHTML=viewVhosts();")
     builder_write(b, "else if(TAB==='explain')body.innerHTML=viewExplain();")
     builder_write(b, "else if(TAB==='analytics'){if(!body.dataset.loaded){loadAnalytics();body.dataset.loaded='1'}}")
+    builder_write(b, "else if(TAB==='config'){if(!body.dataset.loaded){loadConfig();body.dataset.loaded='1'}}")
     builder_write(b, "else if(TAB==='api')body.innerHTML=viewApi();")
     builder_write(b, "else body.innerHTML=viewOverview()}")
 
@@ -336,6 +352,7 @@ fn webadmin_html() -> string {
     builder_write(b, "<button data-tab=vhosts onclick=\"nav('vhosts')\">Vhosts</button>")
     builder_write(b, "<button data-tab=explain onclick=\"nav('explain')\">Explain request</button>")
     builder_write(b, "<button data-tab=analytics onclick=\"nav('analytics')\">Analytics</button>")
+    builder_write(b, "<button data-tab=config class=admin-only onclick=\"nav('config')\">Config</button>")
     builder_write(b, "<button data-tab=api onclick=\"nav('api')\">API & CLI</button>")
     builder_write(b, "</nav>")
     builder_write(b, "<div style=\"margin-top:2rem;padding:.75rem;border:1px solid var(--line);border-radius:12px\" class=help>")

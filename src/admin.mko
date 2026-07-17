@@ -678,6 +678,60 @@ fn handle_admin_state(
     config_path: string,
     config_dir: string
 ) -> AdminStateResult {
+    // Config read/write (admin only)
+    if str_eq(path, "/admin/config") {
+        if str_eq(method, "GET") {
+            let content = read_file(config_path)
+            let mut b = str_builder()
+            builder_write(b, "{\"path\":\"")
+            builder_write(b, json_escape(config_path))
+            builder_write(b, "\",\"content\":\"")
+            builder_write(b, json_escape(content))
+            builder_write(b, "\"}\n")
+            return AdminStateResult {
+                handled: 1,
+                status: 200,
+                body: builder_string(b),
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        if str_eq(method, "POST") {
+            // Extract content from query param: /admin/config?content=...
+            let mut qs = ""
+            let qmark = str_index(full_path, "?content=")
+            if qmark >= 0 {
+                qs = url_decode(substr(full_path, qmark + 9, len(full_path)))
+            }
+            if len(qs) > 0 {
+                write_file(config_path, qs)
+                return AdminStateResult {
+                    handled: 1,
+                    status: 200,
+                    body: "{\"ok\":true,\"action\":\"config-saved\",\"restart_required\":true}\n",
+                    servers: servers,
+                    frontends: frontends,
+                    backends: backends,
+                    routes: routes,
+                    acls: acls
+                }
+            }
+            return AdminStateResult {
+                handled: 1,
+                status: 400,
+                body: "{\"error\":\"missing content parameter\"}\n",
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+    }
+
     if str_eq(path, "/admin/vhosts") {
         if not str_eq(method, "GET") {
             return AdminStateResult {

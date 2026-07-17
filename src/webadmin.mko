@@ -83,7 +83,7 @@ fn wa_js() -> string {
     builder_write(b, "return h+'h '+m+'m '+ss+'s'}")
     builder_write(b, "function statePill(s){if(+s.drain===1)return'<span class=\"pill drain\">DRAIN</span>';")
     builder_write(b, "if(+s.alive===1)return'<span class=\"pill up\">UP</span>';return'<span class=\"pill down\">DOWN</span>'}")
-    builder_write(b, "function esc(x){return String(x||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]||c))}")
+    builder_write(b, "function esc(x){return String(x||" + "'')" + ".replace(/[&<>" + "\"]/g,c=>({" + "'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'" + "}[c]||c))}")
 
     // API
     builder_write(b, "function authHeaders(){const h={};const a=sessionStorage.getItem('lebaAuth')||'';if(a)h.Authorization=a;return h}")

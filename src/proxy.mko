@@ -1483,7 +1483,11 @@ fn prepare_raw_dispatch(
     }
 
     // Force HTTPS: answer on the cleartext frontend with a scheme redirect.
+    // Exempt /.well-known/acme-challenge/ so ACME HTTP-01 validation works.
     if fe.redirect_https == 1 {
+        if str_has_prefix(path, "/.well-known/acme-challenge/") {
+            // Fall through to normal routing for ACME challenges.
+        } else {
         let _ = raw_http_redirect_https(c, method, host, path, fe.redirect_code)
         let mut dr = empty
         dr.err = 0
@@ -1500,6 +1504,7 @@ fn prepare_raw_dispatch(
             print(access_log_line(method, path, code, "https-redirect", "-", 0, 0, rid, "", ""))
         }
         return dr
+        }
     }
 
     if fe.request_body_limit_bytes > 0 {

@@ -153,6 +153,26 @@ fn wa_js() -> string {
 
     // renderers
     builder_write(b, "function nav(tab){TAB=tab;document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));render()}")
+    // Analytics loader
+    builder_write(b, "async function loadAnalytics(){const body=$('#main');body.innerHTML='<div class=panel><h3>Loading analytics...</h3></div>';")
+    builder_write(b, "try{const d=await api('/stats/analytics');let h='<div class=grid style=grid-template-columns:repeat(4,1fr)>';")
+    builder_write(b, "h+='<div class=card><div class=label>Total requests</div><div class=metric>'+(d.total_lines||0)+'</div></div>';")
+    builder_write(b, "h+='<div class=card><div class=label>2xx OK</div><div class=metric style=color:var(--ok)>'+(d.status&&d.status['2xx']||0)+'</div></div>';")
+    builder_write(b, "h+='<div class=card><div class=label>4xx Client</div><div class=metric style=color:var(--warn)>'+(d.status&&d.status['4xx']||0)+'</div></div>';")
+    builder_write(b, "h+='<div class=card><div class=label>5xx Server</div><div class=metric style=color:var(--bad)>'+(d.status&&d.status['5xx']||0)+'</div></div>';")
+    builder_write(b, "h+='</div>';")
+    builder_write(b, "h+='<div class=panel><h3>Top paths (last 2000 requests)</h3><table><tr><th>#</th><th>Path</th><th>Hits</th><th>Share</th></tr>';")
+    builder_write(b, "const total=d.total_lines||1;(d.top_paths||[]).forEach((p,i)=>{")
+    builder_write(b, "const pct=((p.count/total)*100).toFixed(1);")
+    builder_write(b, "h+='<tr><td>'+(i+1)+'</td><td class=mono>'+esc(p.path)+'</td><td><strong>'+p.count+'</strong></td>';")
+    builder_write(b, "h+='<td><div style=display:flex;align-items:center;gap:.5rem><div style=background:var(--accent);height:8px;border-radius:4px;width:'+pct+'%></div>'+pct+'%</div></td></tr>'});")
+    builder_write(b, "h+='</table></div>';")
+    builder_write(b, "h+='<div class=panel><h3>Status breakdown</h3><div class=row style=gap:2rem>';")
+    builder_write(b, "if(d.status){const s=d.status;const cats=[['2xx',s['2xx'],'--ok'],['3xx',s['3xx'],'--accent'],['4xx',s['4xx'],'--warn'],['404',s['404'],'--warn'],['5xx',s['5xx'],'--bad']];")
+    builder_write(b, "cats.forEach(c=>{if(c[1])h+='<div><span style=color:var('+c[2]+');font-size:1.5rem;font-weight:700>'+c[1]+'</span><div class=muted>'+c[0]+'</div></div>'})}")
+    builder_write(b, "h+='</div></div>';")
+    builder_write(b, "h+='<div class=muted style=margin-top:1rem>Data from last 2000 journald entries · Total bytes: '+fmtBytes(d.total_bytes||0)+'</div>';")
+    builder_write(b, "body.innerHTML=h}catch(e){body.innerHTML='<div class=panel><h3>Error loading analytics</h3><p>'+esc(e.message)+'</p></div>'}}")
     // Live chart renderer
     builder_write(b, "function renderChart(){const el=$('#rateChart');if(!el)return;const mx=Math.max(1,...RATE_HIST);")
     builder_write(b, "el.innerHTML=RATE_HIST.map(v=>'<div class=chart-bar style=height:'+Math.max(2,v/mx*100)+'%></div>').join('')}")
@@ -270,6 +290,7 @@ fn wa_js() -> string {
     builder_write(b, "else if(TAB==='frontends')body.innerHTML=viewFrontends();")
     builder_write(b, "else if(TAB==='vhosts')body.innerHTML=viewVhosts();")
     builder_write(b, "else if(TAB==='explain')body.innerHTML=viewExplain();")
+    builder_write(b, "else if(TAB==='analytics'){loadAnalytics()}")
     builder_write(b, "else if(TAB==='api')body.innerHTML=viewApi();")
     builder_write(b, "else body.innerHTML=viewOverview()}")
 
@@ -294,6 +315,7 @@ fn webadmin_html() -> string {
     builder_write(b, "<button data-tab=frontends onclick=\"nav('frontends')\">Frontends & routes</button>")
     builder_write(b, "<button data-tab=vhosts onclick=\"nav('vhosts')\">Vhosts</button>")
     builder_write(b, "<button data-tab=explain onclick=\"nav('explain')\">Explain request</button>")
+    builder_write(b, "<button data-tab=analytics onclick=\"nav('analytics')\">Analytics</button>")
     builder_write(b, "<button data-tab=api onclick=\"nav('api')\">API & CLI</button>")
     builder_write(b, "</nav>")
     builder_write(b, "<div style=\"margin-top:2rem;padding:.75rem;border:1px solid var(--line);border-radius:12px\" class=help>")

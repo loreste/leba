@@ -122,6 +122,158 @@ fn prom_line0(b: StrBuilder, name: string, value: int) {
     builder_write(b, f"{name} {value}\n")
 }
 
+// Analytics: parse access log and aggregate top paths, status codes, hosts.
+// Reads the journald-formatted access log lines from leba.
+fn analytics_json() -> string {
+    let mut b = str_builder()
+    builder_write(b, "{")
+    // Read recent access log entries from journald
+    let lines = exec_output("journalctl -u leba --no-pager -n 2000 -o cat 2>/dev/null | grep '\\[access\\]'")
+    let parts = str_split(lines, "\n")
+    let total = len(parts)
+
+    // Count by path
+    let mut path_counts = make(map[string]int)
+    // Count by status
+    let mut s200 = 0
+    let mut s301 = 0
+    let mut s400 = 0
+    let mut s404 = 0
+    let mut s5xx = 0
+    let mut total_bytes = 0
+
+    for _, line in range parts {
+        if len(line) < 10 {
+            continue
+        }
+        // Parse: [access] id=... METHOD /path status=NNN ... bytes=NNN
+        let mut method_start = str_index(line, "GET ")
+        if method_start < 0 {
+            method_start = str_index(line, "POST ")
+            if method_start < 0 {
+                method_start = str_index(line, "HEAD ")
+                if method_start < 0 {
+                    continue
+                }
+            }
+        }
+        // Extract path
+        let after_method = substr(line, method_start, len(line))
+        let space = str_index(after_method, " ")
+        if space < 0 {
+            continue
+        }
+        let rest = substr(after_method, space + 1, len(after_method))
+        let path_end = str_index(rest, " ")
+        if path_end < 0 {
+            continue
+        }
+        let path = substr(rest, 0, path_end)
+        // Normalize: strip query string
+        let qmark = str_index(path, "?")
+        let mut clean_path = path
+        if qmark >= 0 {
+            clean_path = substr(path, 0, qmark)
+        }
+        // Count path
+        path_counts[clean_path] = path_counts[clean_path] + 1
+        // Extract status
+        let status_pos = str_index(line, "status=")
+        if status_pos >= 0 {
+            let status_str = substr(line, status_pos + 7, status_pos + 10)
+            let mut status_end = str_index(status_str, " ")
+            if status_end < 0 {
+                status_end = len(status_str)
+            }
+            let sc = substr(status_str, 0, status_end)
+            if str_eq(sc, "200") {
+                s200 = s200 + 1
+            }
+            if str_eq(sc, "301") {
+                s301 = s301 + 1
+            }
+            if str_has_prefix(sc, "4") {
+                s400 = s400 + 1
+                if str_eq(sc, "404") {
+                    s404 = s404 + 1
+                }
+            }
+            if str_has_prefix(sc, "5") {
+                s5xx = s5xx + 1
+            }
+        }
+        // Extract bytes
+        let bytes_pos = str_index(line, "bytes=")
+        if bytes_pos >= 0 {
+            let bytes_str = substr(line, bytes_pos + 6, len(line))
+            let mut bytes_end = str_index(bytes_str, " ")
+            if bytes_end < 0 {
+                bytes_end = len(bytes_str)
+            }
+            match parse_int(substr(bytes_str, 0, bytes_end)) {
+                Ok(bval) => { total_bytes = total_bytes + bval },
+                Err(_) => {},
+            }
+        }
+    }
+
+    // Build top paths (sorted by count, top 20)
+    let path_keys = maps_keys(path_counts)
+    // Simple selection sort for top N
+    let mut top_paths = make([]string, 0, 20)
+    let mut top_counts = make([]int, 0, 20)
+    let mut used = make(map[string]int)
+    let n_top = 20
+    for i in range n_top {
+        let mut best_path = ""
+        let mut best_count = 0
+        for _, p in range path_keys {
+            if used[p] == 1 {
+                continue
+            }
+            if path_counts[p] > best_count {
+                best_count = path_counts[p]
+                best_path = p
+            }
+        }
+        if best_count == 0 {
+            break
+        }
+        top_paths = append(top_paths, best_path)
+        top_counts = append(top_counts, best_count)
+        used[best_path] = 1
+    }
+
+    // Write JSON
+    builder_write(b, "\"total_lines\":")
+    builder_write(b, int_to_string(total))
+    builder_write(b, ",\"status\":{\"2xx\":")
+    builder_write(b, int_to_string(s200))
+    builder_write(b, ",\"3xx\":")
+    builder_write(b, int_to_string(s301))
+    builder_write(b, ",\"4xx\":")
+    builder_write(b, int_to_string(s400))
+    builder_write(b, ",\"404\":")
+    builder_write(b, int_to_string(s404))
+    builder_write(b, ",\"5xx\":")
+    builder_write(b, int_to_string(s5xx))
+    builder_write(b, "},\"total_bytes\":")
+    builder_write(b, int_to_string(total_bytes))
+    builder_write(b, ",\"top_paths\":[")
+    for i, p in range top_paths {
+        if i > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, "{\"path\":\"")
+        builder_write(b, json_escape(p))
+        builder_write(b, "\",\"count\":")
+        builder_write(b, int_to_string(top_counts[i]))
+        builder_write(b, "}")
+    }
+    builder_write(b, "]}\n")
+    return builder_string(b)
+}
+
 fn metrics_text(
     st: LiveStats,
     frontends: []Frontend,
@@ -711,6 +863,12 @@ fn handle_stats_tls_conn(
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
+    if str_eq(ponly, "/stats/analytics") {
+        let body = analytics_json()
+        let _ = stats_tls_respond_json(conn, method, 200, body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
     if str_eq(ponly, "/stats") {
         let body = stats_json(st, frontends, backends, servers, routes, acls)
         let _ = stats_tls_respond_json(conn, method, 200, body)
@@ -815,6 +973,12 @@ fn handle_stats_raw_conn(
     if str_eq(ponly, "/stats/whoami") {
         let whoami = "{\"user\":\"" + auth_user + "\",\"role\":\"" + role + "\"}\n"
         let _ = stats_raw_respond_json(fd, method, 200, whoami)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/stats/analytics") {
+        let body = analytics_json()
+        let _ = stats_raw_respond_json(fd, method, 200, body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
@@ -933,6 +1097,12 @@ fn handle_stats_conn(
     if str_eq(ponly, "/stats/whoami") {
         let whoami = "{\"user\":\"" + auth_user + "\",\"role\":\"" + role + "\"}\n"
         let _ = http_respond_json(c, 200, whoami)
+        log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+    if str_eq(ponly, "/stats/analytics") {
+        let body = analytics_json()
+        let _ = http_respond_json(c, 200, body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }

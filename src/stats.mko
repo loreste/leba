@@ -867,6 +867,16 @@ fn login_page_html() -> string {
     return builder_string(b)
 }
 
+fn admin_ui_html() -> string {
+    // Try external UI file first (allows updates without rebuild)
+    let external = read_file("admin_ui/index.html")
+    if len(external) > 100 {
+        return external
+    }
+    // Fallback to embedded
+    return webadmin_html()
+}
+
 // TLS-aware stats/admin handler — same logic as handle_stats_raw_conn but over TLS.
 fn handle_stats_tls_conn(
     conn: TlsConn,
@@ -989,13 +999,13 @@ fn handle_stats_tls_conn(
     }
 
     if str_eq(ponly, "/") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/admin/ui") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
@@ -1102,13 +1112,13 @@ fn handle_stats_raw_conn(
     }
 
     if str_eq(ponly, "/") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = stats_raw_respond_ct(fd, method, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/admin/ui") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = stats_raw_respond_ct(fd, method, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
@@ -1225,13 +1235,13 @@ fn handle_stats_conn(
     }
 
     if str_eq(ponly, "/") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = http_respond_ct(c, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/admin/ui") {
-        let body = webadmin_html()
+        let body = admin_ui_html()
         let _ = http_respond_ct(c, 200, "text/html; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)

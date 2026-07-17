@@ -173,7 +173,7 @@ fn main() {
     }
 
     let slots = chan_new(workers)
-    let done = chan_new(workers * 2)
+    let done = chan_open[(int, int, int, int, int)](workers * 2)
     fill_slots(slots, workers)
     let mut stats_fe = frontend_new("stats")
     let mut http_listeners = make([]HttpListener, 0, len(http_fes))
@@ -469,14 +469,12 @@ fn main() {
                 }
             }
             if inflight > 0 {
-                match done.try_recv() {
-                    Ok(v) => {
-                        servers = apply_done_servers(v, servers)
-                        st = apply_done(v, servers, st)
-                        inflight = inflight - 1
-                        completed = completed + 1
-                    }
-                    Err(_) => {}
+                if chan_len(done) > 0 {
+                    let d_err, d_st, d_si, d_bytes, d_retries = done.recv()
+                    servers = apply_done_servers(d_err, d_st, d_si, d_bytes, servers)
+                    st = apply_done(d_err, d_si, d_bytes, d_retries, servers, st)
+                    inflight = inflight - 1
+                    completed = completed + 1
                 }
             }
             if max_req > 0 {
@@ -953,16 +951,19 @@ fn main() {
                 ei = ei + 1
             }
         }
+        let drain_deadline = now_ms() + 5000
         while inflight > 0 {
-            match done.recv_timeout(5000) {
-                Ok(v) => {
-                    servers = apply_done_servers(v, servers)
-                    st = apply_done(v, servers, st)
-                    inflight = inflight - 1
-                }
-                Err(_) => {
+            if chan_len(done) > 0 {
+                let dr_err, dr_st, dr_si, dr_bytes, dr_retries = done.recv()
+                servers = apply_done_servers(dr_err, dr_st, dr_si, dr_bytes, servers)
+                st = apply_done(dr_err, dr_si, dr_bytes, dr_retries, servers, st)
+                inflight = inflight - 1
+            } else {
+                if now_ms() > drain_deadline {
                     log_warn_event("drain_timeout", f"inflight={inflight} action=force_exit")
                     inflight = 0
+                } else {
+                    let _ = sleep_ms(10)
                 }
             }
         }

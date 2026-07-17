@@ -36,14 +36,13 @@ fn clear_drain(token: string) {
 }
 
 fn apply_done(
-    v: int,
+    err: int,
+    si: int,
+    bytes: int,
+    retries: int,
     servers: []Server,
     st: LiveStats
 ) -> LiveStats {
-    let err = unpack_done_err(v)
-    let si = unpack_done_si(v)
-    let bytes = unpack_done_bytes(v)
-    let retries = unpack_done_retries(v)
     // servers mutated by caller after server_conn_delta — we only touch stats here
     let mut out = st
     out.total_req = out.total_req + 1
@@ -61,11 +60,7 @@ fn apply_done(
     return out
 }
 
-fn apply_done_servers(v: int, servers: []Server) -> []Server {
-    let err = unpack_done_err(v)
-    let status = unpack_done_status(v)
-    let si = unpack_done_si(v)
-    let bytes = unpack_done_bytes(v)
+fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Server) -> []Server {
     let mut srv = servers
     if si >= 0 {
         srv = server_conn_delta(srv, si, 0 - 1)

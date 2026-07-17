@@ -1079,33 +1079,6 @@ fn parse_raw_request(raw: string) -> RawRequest {
     }
 }
 
-fn pack_done_retry(err: int, status: int, si: int, bytes: int, retries: int) -> int {
-    let mut e = 0
-    if err != 0 { e = 1 }
-    let mut st = status
-    if st < 0 { st = 0 }
-    if st > 999 { st = 999 }
-    let mut six = si + 1
-    if six < 0 { six = 0 }
-    if six > 4095 { six = 4095 }
-    let mut b = bytes
-    if b < 0 { b = 0 }
-    if b > 50000000 { b = 50000000 }
-    let mut r = retries
-    if r < 0 { r = 0 }
-    if r > 1000 { r = 1000 }
-    return e + st * 2 + six * 2000 + b * 8192000 + r * 409600008192000
-}
-
-fn pack_done(err: int, status: int, si: int, bytes: int) -> int {
-    return pack_done_retry(err, status, si, bytes, 0)
-}
-
-fn unpack_done_err(v: int) -> int { return v % 2 }
-fn unpack_done_status(v: int) -> int { return (v / 2) % 1000 }
-fn unpack_done_si(v: int) -> int { let six = (v / 2000) % 4096; return six - 1 }
-fn unpack_done_bytes(v: int) -> int { return (v / 8192000) % 50000001 }
-fn unpack_done_retries(v: int) -> int { return v / 409600008192000 }
 
 fn find_backend(backends: []Backend, name: string) -> int {
     let mut i = 0
@@ -1434,6 +1407,7 @@ fn prepare_raw_dispatch(
     let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
+    let client_ip = tcp_peer_addr(c)
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -1565,7 +1539,7 @@ fn prepare_raw_dispatch(
         return d
     }
 
-    if acl_decide(acls, fe.name, path, host, method) == 1 {
+    if acl_decide_full(acls, fe.name, path, host, method, client_ip) == 1 {
         log_proxy_reject("acl_denied", method, path, host, "status=403")
         let _ = raw_http_respond_method(c, method, 403, "forbidden\n")
         let mut d = empty
@@ -2199,7 +2173,7 @@ fn worker_upstream(
     access_log: int,
     orig_host: string,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let mut res = FwdResult {}
     if pool >= 0 {
@@ -2269,7 +2243,7 @@ fn worker_upstream(
         print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
     }
     let _ = http_close(c)
-    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = done.send((err, st, server_idx, bytes, res.retries))
     let _ = slots.send(1)
     return err
 }
@@ -2292,7 +2266,7 @@ fn worker_raw_upstream(
     access_log: int,
     orig_host: string,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let mut res = FwdResult {}
     if pool >= 0 {
@@ -2357,7 +2331,7 @@ fn worker_raw_upstream(
         print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
     }
     let _ = tcp_close(c)
-    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = done.send((err, st, server_idx, bytes, res.retries))
     let _ = slots.send(1)
     return err
 }
@@ -2384,7 +2358,7 @@ fn worker_tls_upstream(
     access_log: int,
     orig_host: string,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let mut res = FwdResult {}
     if pool >= 0 {
@@ -2443,7 +2417,7 @@ fn worker_tls_upstream(
         print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
     }
     let _ = tls_conn_close(conn)
-    let _ = done.send(pack_done_retry(err, st, server_idx, bytes, res.retries))
+    let _ = done.send((err, st, server_idx, bytes, res.retries))
     let _ = slots.send(1)
     return err
 }
@@ -2625,14 +2599,14 @@ fn worker_ws_upstream(
     frontend_name: string,
     path: string,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let _ = frontend_name
     let up = tcp_connect(host, port)
     if up < 0 {
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
         let _ = tcp_close(c)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2644,7 +2618,7 @@ fn worker_ws_upstream(
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
         let _ = tcp_close(c)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2653,7 +2627,7 @@ fn worker_ws_upstream(
         let _ = raw_http_respond_method(c, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
         let _ = tcp_close(c)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2663,7 +2637,7 @@ fn worker_ws_upstream(
         let _ = tcp_write_all(c, resp)
         let _ = tcp_close(up)
         let _ = tcp_close(c)
-        let _ = done.send(pack_done(0, status, server_idx, str_len(resp)))
+        let _ = done.send((0, status, server_idx, str_len(resp), 0))
         let _ = slots.send(1)
         return 0
     }
@@ -2717,7 +2691,7 @@ fn worker_ws_upstream(
         let rid = make_req_id()
         print(f"[access] id={rid} WS {path} upstream={host}:{port} bytes={nbytes}")
     }
-    let _ = done.send(pack_done(0, 101, server_idx, nbytes))
+    let _ = done.send((0, 101, server_idx, nbytes, 0))
     let _ = slots.send(1)
     return 0
 }
@@ -2734,14 +2708,14 @@ fn worker_ws_tls_upstream(
     access_log: int,
     path: string,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let cfd = tls_conn_fd(conn)
     let up = tcp_connect(host, port)
     if up < 0 {
         let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
         let _ = tls_conn_close(conn)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2751,7 +2725,7 @@ fn worker_ws_tls_upstream(
         let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
         let _ = tls_conn_close(conn)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2760,7 +2734,7 @@ fn worker_ws_tls_upstream(
         let _ = tls_http_respond_method(conn, "GET", 502, "bad gateway\n")
         let _ = tcp_close(up)
         let _ = tls_conn_close(conn)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2769,7 +2743,7 @@ fn worker_ws_tls_upstream(
         let _ = tls_write(conn, resp)
         let _ = tcp_close(up)
         let _ = tls_conn_close(conn)
-        let _ = done.send(pack_done(0, status, server_idx, str_len(resp)))
+        let _ = done.send((0, status, server_idx, str_len(resp), 0))
         let _ = slots.send(1)
         return 0
     }
@@ -2777,7 +2751,7 @@ fn worker_ws_tls_upstream(
     if w0 < 0 {
         let _ = tcp_close(up)
         let _ = tls_conn_close(conn)
-        let _ = done.send(pack_done(1, 502, server_idx, 0))
+        let _ = done.send((1, 502, server_idx, 0, 0))
         let _ = slots.send(1)
         return 1
     }
@@ -2828,7 +2802,7 @@ fn worker_ws_tls_upstream(
         let rid = make_req_id()
         print(f"[access] id={rid} WSS {path} upstream={host}:{port} bytes={nbytes}")
     }
-    let _ = done.send(pack_done(0, 101, server_idx, nbytes))
+    let _ = done.send((0, 101, server_idx, nbytes, 0))
     let _ = slots.send(1)
     return 0
 }
@@ -2984,7 +2958,7 @@ fn worker_tcp_upstream(
     server_idx: int,
     access_log: int,
     slots: chan[int],
-    done: chan[int]
+    done: chan[(int, int, int, int, int)]
 ) -> int {
     let bytes = proxy_tcp_session(c, host, port, idle_ms, initial_data)
     let mut err = 0
@@ -2995,7 +2969,7 @@ fn worker_tcp_upstream(
         let rid = make_req_id()
         print(f"[access] id={rid} TCP frontend={frontend} upstream={host}:{port} bytes={bytes}")
     }
-    let _ = done.send(pack_done(err, 200, server_idx, bytes))
+    let _ = done.send((err, 200, server_idx, bytes, 0))
     let _ = slots.send(1)
     return err
 }

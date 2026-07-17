@@ -688,24 +688,20 @@ fn TestSampleConfigDoctor() {
     assert(len(w.frontends) >= 1)
 }
 
-fn TestPackDoneRoundTrip() {
-    let v = pack_done(1, 502, 3, 99)
-    assert_eq(unpack_done_err(v), 1)
-    assert_eq(unpack_done_status(v), 502)
-    assert_eq(unpack_done_si(v), 3)
-    assert_eq(unpack_done_bytes(v), 99)
-    assert_eq(unpack_done_retries(v), 0)
+fn TestTupleChannelDoneRoundTrip() {
+    let ch = chan_open[(int, int, int, int, int)](2)
+    let _ = ch.send((1, 502, 3, 99, 0))
+    let err, status, si, bytes, retries = ch.recv()
+    assert_eq(err, 1)
+    assert_eq(status, 502)
+    assert_eq(si, 3)
+    assert_eq(bytes, 99)
+    assert_eq(retries, 0)
 }
 
-fn TestPackDoneRetryRoundTripAndStats() {
-    let v = pack_done_retry(0, 200, 1, 123, 2)
-    assert_eq(unpack_done_err(v), 0)
-    assert_eq(unpack_done_status(v), 200)
-    assert_eq(unpack_done_si(v), 1)
-    assert_eq(unpack_done_bytes(v), 123)
-    assert_eq(unpack_done_retries(v), 2)
+fn TestTupleChannelDoneAndStats() {
     let servers = make([]Server, 0, 0)
-    let st = apply_done(v, servers, stats_new())
+    let st = apply_done(0, 1, 123, 2, servers, stats_new())
     assert_eq(st.retries, 2)
 }
 

@@ -730,6 +730,36 @@ fn serve_static_file(c: int, method: string, path: string, root: string) -> int 
     return 1
 }
 
+// Apply header manipulation rules to build extra headers for requests/responses.
+fn apply_request_headers(rules: []HeaderRule, existing: string) -> string {
+    if len(rules) == 0 {
+        return existing
+    }
+    let mut b = str_builder()
+    builder_write(b, existing)
+    for _, r in range rules {
+        if str_eq(r.direction, "request") {
+            if str_eq(r.action, "set") {
+                builder_write(b, f"{r.name}: {r.value}\r\n")
+            }
+        }
+    }
+    return builder_string(b)
+}
+
+fn apply_response_headers(rules: []HeaderRule) -> string {
+    if len(rules) == 0 {
+        return ""
+    }
+    let mut b = str_builder()
+    for _, r in range rules {
+        if str_eq(r.direction, "response") {
+            builder_write(b, f"{r.name}: {r.value}\r\n")
+        }
+    }
+    return builder_string(b)
+}
+
 fn cors_headers() -> string {
     return "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS, PATCH\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, traceparent\r\nAccess-Control-Max-Age: 86400\r\n"
 }

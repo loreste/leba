@@ -45,6 +45,63 @@ struct ParseState {
     stats_pass: string
 }
 
+// Expand $VAR and ${VAR} in config values using environment variables.
+fn expand_env(s: string) -> string {
+    if not str_contains(s, "$") {
+        return s
+    }
+    let mut b = str_builder()
+    let data = bytes(s)
+    let mut i = 0
+    while i < len(data) {
+        if int(data[i]) == 36 {
+            let mut var_start = i + 1
+            let mut braced = 0
+            if var_start < len(data) {
+                if int(data[var_start]) == 123 {
+                    braced = 1
+                    var_start = var_start + 1
+                }
+            }
+            let mut var_end = var_start
+            while var_end < len(data) {
+                let c = int(data[var_end])
+                if braced == 1 {
+                    if c == 125 {
+                        let var_name = substr(s, var_start, var_end)
+                        builder_write(b, env_get(var_name))
+                        i = var_end + 1
+                        var_end = len(data) + 1
+                    } else {
+                        var_end = var_end + 1
+                    }
+                } else {
+                    let mut is_ident = 0
+                    if c >= 65 { if c <= 90 { is_ident = 1 } }
+                    if c >= 97 { if c <= 122 { is_ident = 1 } }
+                    if c >= 48 { if c <= 57 { is_ident = 1 } }
+                    if c == 95 { is_ident = 1 }
+                    if is_ident == 1 {
+                        var_end = var_end + 1
+                    } else {
+                        builder_write(b, env_get(substr(s, var_start, var_end)))
+                        i = var_end
+                        var_end = len(data) + 1
+                    }
+                }
+            }
+            if var_end == len(data) {
+                builder_write(b, env_get(substr(s, var_start, var_end)))
+                i = var_end
+            }
+        } else {
+            builder_write_byte(b, data[i])
+            i = i + 1
+        }
+    }
+    return builder_string(b)
+}
+
 fn apply_frontend_bind(fe: Frontend, raw: string) -> Frontend {
     let mut out = fe
     if str_has_prefix(raw, ":") {
@@ -111,6 +168,7 @@ struct World {
     servers: []Server
     routes: []Route
     acls: []AclRule
+    header_rules: []HeaderRule
     admin_users: []AdminUser
     admin_users_file: string
     state_file: string
@@ -137,6 +195,7 @@ fn world_new() -> World {
         servers: make([]Server, 0, 16),
         routes: make([]Route, 0, 16),
         acls: make([]AclRule, 0, 16),
+        header_rules: make([]HeaderRule, 0, 8),
         admin_users: make([]AdminUser, 0, 4),
         admin_users_file: "",
         state_file: "",
@@ -720,7 +779,7 @@ fn parse_config_text(raw: string) -> World {
                     if str_eq(head, "state_key") {
                         w.state_key = fields[1]
                     } else {
-                        w.defaults = apply_defaults_kv(w.defaults, head, fields[1])
+                        w.defaults = apply_defaults_kv(w.defaults, head, expand_env(fields[1]))
                     }
                 }
             }
@@ -880,6 +939,26 @@ fn parse_config_text(raw: string) -> World {
                                                         fe.root = fields[1]
                                                     }
                                                 } else {
+                                                if str_eq(head, "request_header_set") {
+                                                    if len(fields) >= 3 {
+                                                        w.header_rules = append(w.header_rules, HeaderRule { direction: "request", action: "set", name: fields[1], value: fields[2] })
+                                                    }
+                                                } else {
+                                                if str_eq(head, "response_header_set") {
+                                                    if len(fields) >= 3 {
+                                                        w.header_rules = append(w.header_rules, HeaderRule { direction: "response", action: "set", name: fields[1], value: fields[2] })
+                                                    }
+                                                } else {
+                                                if str_eq(head, "response_header_add") {
+                                                    if len(fields) >= 3 {
+                                                        w.header_rules = append(w.header_rules, HeaderRule { direction: "response", action: "add", name: fields[1], value: fields[2] })
+                                                    }
+                                                } else {
+                                                if str_eq(head, "request_header_del") {
+                                                    if len(fields) >= 2 {
+                                                        w.header_rules = append(w.header_rules, HeaderRule { direction: "request", action: "del", name: fields[1], value: "" })
+                                                    }
+                                                } else {
                                                 if str_eq(head, "auth") {
                                                     // auth user:pass[:role] for stats
                                                     if len(fields) >= 2 {
@@ -983,6 +1062,10 @@ fn parse_config_text(raw: string) -> World {
             }
             }
             }
+            }
+            }
+            }
+            }
             let mut fes = w.frontends
             fes[fi] = fe
             w.frontends = fes
@@ -1002,7 +1085,7 @@ fn parse_config_text(raw: string) -> World {
                 }
             } else {
                 if len(fields) >= 2 {
-                    be = apply_backend_kv(be, head, fields[1])
+                    be = apply_backend_kv(be, head, expand_env(fields[1]))
                 }
             }
             bes[bi] = be

@@ -83,7 +83,7 @@ fn wa_js() -> string {
     builder_write(b, "return h+'h '+m+'m '+ss+'s'}")
     builder_write(b, "function statePill(s){if(+s.drain===1)return'<span class=\"pill drain\">DRAIN</span>';")
     builder_write(b, "if(+s.alive===1)return'<span class=\"pill up\">UP</span>';return'<span class=\"pill down\">DOWN</span>'}")
-    builder_write(b, "function esc(x){return String(x??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]))}")
+    builder_write(b, "function esc(x){return String(x||'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]||c))}")
 
     // API
     builder_write(b, "function authHeaders(){const h={};const a=sessionStorage.getItem('lebaAuth')||'';if(a)h.Authorization=a;return h}")
@@ -95,7 +95,7 @@ fn wa_js() -> string {
     builder_write(b, "if(r.status===401&&retry!==0){sessionStorage.removeItem('lebaAuth');if(askAuth())return api(path,method,0)}")
     builder_write(b, "if(!r.ok)throw new Error((j&&j.error)||t||('HTTP '+r.status));return j}")
     builder_write(b, "async function refresh(){try{DATA=await api('/stats');render();$('#sync').textContent='Live · refreshed '+new Date().toLocaleTimeString()}")
-    builder_write(b, ".catch(e=>{toast('Refresh failed: '+e.message,1);$('#sync').textContent='Offline'})}")
+    builder_write(b, "catch(e){toast('Refresh failed: '+e.message,1);$('#sync').textContent='Offline'}}")
     builder_write(b, "async function act(action,be,srv){try{await api('/admin/'+action+'/'+encodeURIComponent(be)+'/'+encodeURIComponent(srv),'POST');")
     builder_write(b, "toast(action+' '+be+'/'+srv+' OK');await refresh()}catch(e){toast(e.message,1)}}")
     builder_write(b, "async function reloadServers(){try{const r=await api('/admin/reload-servers','POST');")
@@ -181,7 +181,7 @@ fn wa_js() -> string {
     builder_write(b, "<table><tr><th>Name</th><th>Balance</th><th>Servers</th><th>Up</th><th>Health path</th><th>Interval</th><th>Retries</th></tr>")
     builder_write(b, "${(d.backends||[]).map(b=>`<tr><td><strong>${esc(b.name)}</strong></td><td>${esc(b.balance)}</td>")
     builder_write(b, "<td>${b.servers}</td><td>${b.up}</td><td class=mono>${esc(b.health_path)}</td>")
-    builder_write(b, "<td>${b.health_interval_ms||'—'}ms</td><td>${b.retries??'—'}</td></tr>`).join('')}</table></div>")
+    builder_write(b, "<td>${b.health_interval_ms||'—'}ms</td><td>${b.retries||'—'}</td></tr>`).join('')}</table></div>")
     builder_write(b, "<div class=panel><h3>Server distribution</h3><table><tr><th>Backend</th><th>Members</th></tr>")
     builder_write(b, "${(d.backends||[]).map(b=>{const mem=(d.servers||[]).filter(s=>s.backend===b.name).map(s=>s.name+(+s.drain?'(D)':(+s.alive?'':'(!)'))+(s.maxconn?` max=${s.maxconn}`:'')).join(', ');")
     builder_write(b, "return `<tr><td>${esc(b.name)}</td><td class=mono>${esc(mem||'—')}</td></tr>`}).join('')}</table></div>`}")

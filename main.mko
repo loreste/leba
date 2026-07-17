@@ -34,7 +34,7 @@ fn main() {
     let mut max_req = 0
     if argc() > 1 {
         if str_eq(arg_get(1), "version") {
-            print("leba 0.5.0")
+            print("leba 0.6.0")
             print("concurrency: crew worker pool")
             return
         }
@@ -563,7 +563,7 @@ fn main() {
                                             } else {
                                                 let _ = pool.kick(worker_raw_upstream(
                                                     dp.c, dp.method, dp.path, dp.body, dp.cookie, dp.traceparent, dp.trace_id, dp.span_id, dp.up_host, dp.up_port,
-                                                    dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.orig_host, slots, done
+                                                    dp.up_pool, dp.timeout_ms, dp.retries, dp.server_idx, dp.access_log, dp.access_log_file, dp.orig_host, slots, done
                                                 ))
                                             }
                                         }

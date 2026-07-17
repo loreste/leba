@@ -136,6 +136,7 @@ struct Dispatch {
     retries: int
     server_idx: int
     access_log: int
+    access_log_file: string = ""
     err: int
     denied: int
     rate_limited: int
@@ -1205,6 +1206,7 @@ fn prepare_dispatch(
         retries: 0,
         server_idx: -1,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 1,
         denied: 0,
         rate_limited: 0,
@@ -1377,6 +1379,7 @@ fn prepare_dispatch(
         retries: be.retries,
         server_idx: si,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 0,
         denied: 0,
         rate_limited: 0,
@@ -1429,6 +1432,7 @@ fn prepare_raw_dispatch(
         retries: 0,
         server_idx: -1,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 1,
         denied: 0,
         rate_limited: 0,
@@ -1526,6 +1530,20 @@ fn prepare_raw_dispatch(
                 return d
             }
             rate_list[ri] = rate_take(rate_list[ri])
+        }
+        // Per-client-IP rate limiting (uses same bucket array, keyed by IP).
+        if not str_eq(client_ip, "") {
+            if client_rate_check(rate_list, client_ip, fe.rate_limit) == 1 {
+                log_proxy_reject("client_rate_limited", method, path, host, f"status=429 src={client_ip}")
+                let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
+                let mut d = empty
+                d.rate_limited = 1
+                d.servers = srv_list
+                d.backends = be_list
+                d.buckets = rate_list
+                return d
+            }
+            rate_list = client_rate_take_ip(rate_list, client_ip, fe.rate_limit)
         }
     }
 
@@ -1647,6 +1665,7 @@ fn prepare_raw_dispatch(
         retries: be.retries,
         server_idx: si,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 0,
         denied: 0,
         rate_limited: 0,
@@ -2264,6 +2283,7 @@ fn worker_raw_upstream(
     retries: int,
     server_idx: int,
     access_log: int,
+    access_log_file: string,
     orig_host: string,
     slots: chan[int],
     done: chan[(int, int, int, int, int)]
@@ -2328,7 +2348,11 @@ fn worker_raw_upstream(
     }
     if access_log == 1 {
         let rid = make_req_id()
-        print(access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id))
+        let line = access_log_line(method, path, st, host, int_to_string(server_idx), 0, bytes, rid, trace_id, span_id)
+        print(line)
+        if not str_eq(access_log_file, "") {
+            let _ = append_file(access_log_file, f"{line}\n")
+        }
     }
     let _ = tcp_close(c)
     let _ = done.send((err, st, server_idx, bytes, res.retries))
@@ -2455,6 +2479,7 @@ fn prepare_ws_dispatch(
         retries: 0,
         server_idx: 0 - 1,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 1,
         denied: 0,
         rate_limited: 0,
@@ -2551,6 +2576,7 @@ fn prepare_ws_dispatch(
         retries: be.retries,
         server_idx: si,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 0,
         denied: 0,
         rate_limited: 0,
@@ -2834,6 +2860,7 @@ fn prepare_tcp_dispatch(
         retries: 0,
         server_idx: -1,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 1,
         denied: 0,
         rate_limited: 0,
@@ -2937,6 +2964,7 @@ fn prepare_tcp_dispatch(
         retries: 0,
         server_idx: si,
         access_log: fe.access_log,
+        access_log_file: fe.access_log_file,
         err: 0,
         denied: 0,
         rate_limited: 0,

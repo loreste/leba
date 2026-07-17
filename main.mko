@@ -34,7 +34,7 @@ fn main() {
     let mut max_req = 0
     if argc() > 1 {
         if str_eq(arg_get(1), "version") {
-            print("leba 0.6.0")
+            print("leba 0.7.0")
             print("concurrency: crew worker pool")
             return
         }

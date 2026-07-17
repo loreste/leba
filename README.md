@@ -59,9 +59,14 @@ gh repo clone loreste/leba
 - Kubernetes-style probes (`/readyz`, `/livez`)
 
 ### Admin & Operations
-- Built-in web admin dashboard (SPA)
+- Built-in web admin dashboard with RBAC (viewer, operator, admin)
+- Standalone admin UI with proxy host management cards
+- Session-based authentication with secure cookies
+- Analytics dashboard with top paths and status breakdown
+- Live request rate chart with 30-sample history
+- Config viewer with sensitive field redaction
 - REST API for drain, ready, disable, enable, reload
-- Vhost management API (create domains, backends, certificates)
+- Vhost and proxy host management API
 - Config doctor with validation and fix suggestions
 - Request explainer (dry-run routing decisions)
 - CLI for all admin operations

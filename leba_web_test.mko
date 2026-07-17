@@ -37,7 +37,7 @@ fn TestStatsJsonShape() {
     assert(str_contains(j, "\"routes\""))
     assert(str_contains(j, "\"acls\""))
     assert(str_contains(j, "\"servers\""))
-    assert(str_contains(j, "0.7.0"))
+    assert(str_contains(j, "0.7.1"))
     assert(str_contains(j, "rate_limit"))
     assert(str_contains(j, "request_body_limit_bytes"))
     assert(str_contains(j, "health_interval_ms"))

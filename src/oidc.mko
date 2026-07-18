@@ -36,46 +36,38 @@ fn oidc_ca_pem(cfg: OidcConfig) -> string {
 }
 
 // Parse https://host[:port]/path (also used by tests).
-fn oidc_parse_https_url(url: string) -> (string, int, string) {
-    let mut u = str_trim_space(url)
-    if str_has_prefix(u, "https://") {
-        u = substr(u, 8, str_len(u))
-    } else {
-        if str_has_prefix(u, "http://") {
-            // allow http IdP only for lab; port default 80
-            u = substr(u, 7, str_len(u))
-            let slash = str_index(u, "/")
-            let mut hostport = u
-            let mut path = "/"
-            if slash >= 0 {
-                hostport = substr(u, 0, slash)
-                path = substr(u, slash, str_len(u))
-            }
-            let colon = str_last_index(hostport, ":")
-            if colon > 0 {
-                return (substr(hostport, 0, colon), to_int(substr(hostport, colon + 1, str_len(hostport))), path)
-            }
-            return (hostport, 80, path)
-        }
-        return ("", 0, "")
-    }
-    let slash = str_index(u, "/")
-    let mut hostport = u
-    let mut path = "/"
-    if slash >= 0 {
-        hostport = substr(u, 0, slash)
-        path = substr(u, slash, str_len(u))
-    }
+fn oidc_parse_https_hostport(hostport: string, default_port: int, path: string) -> (string, int, string) {
     let colon = str_last_index(hostport, ":")
     if colon > 0 {
-        // avoid IPv6 ambiguity: only treat as port if right side is all digits
-        let port_s = substr(hostport, colon + 1, str_len(hostport))
+        let port_s = own_string(substr(hostport, colon + 1, str_len(hostport)))
         let p = to_int(port_s)
         if p > 0 {
-            return (substr(hostport, 0, colon), p, path)
+            return (own_string(substr(hostport, 0, colon)), p, own_string(path))
         }
     }
-    return (hostport, 443, path)
+    return (own_string(hostport), default_port, own_string(path))
+}
+
+fn oidc_parse_https_rest(rest: string, default_port: int) -> (string, int, string) {
+    let slash = str_index(rest, "/")
+    if slash >= 0 {
+        let hostport = own_string(substr(rest, 0, slash))
+        let path = own_string(substr(rest, slash, str_len(rest)))
+        return oidc_parse_https_hostport(hostport, default_port, path)
+    }
+    return oidc_parse_https_hostport(rest, default_port, "/")
+}
+
+fn oidc_parse_https_url(url: string) -> (string, int, string) {
+    let u = own_string(str_trim_space(url))
+    if str_has_prefix(u, "https://") {
+        return oidc_parse_https_rest(substr(u, 8, str_len(u)), 443)
+    }
+    if str_has_prefix(u, "http://") {
+        // allow http IdP only for lab; port default 80
+        return oidc_parse_https_rest(substr(u, 7, str_len(u)), 80)
+    }
+    return ("", 0, "")
 }
 
 fn oidc_load_client(cfg: OidcConfig) -> TlsClient {

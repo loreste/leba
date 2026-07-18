@@ -57,7 +57,7 @@ fn stick_table_set_abs(
             return (table, entry_count)
         }
     }
-    let mut out = table
+    let mut out = maps_clone(table)
     let mut count = entry_count
     let mut max = max_size
     if max <= 0 {
@@ -84,7 +84,7 @@ fn stick_table_delete(table: map[string]string, key: string, entry_count: int) -
     if str_eq(key, "") {
         return (table, entry_count)
     }
-    let mut out = table
+    let mut out = maps_clone(table)
     let existing = out[key]
     if str_eq(existing, "") {
         return (out, entry_count)
@@ -147,7 +147,7 @@ fn peers_apply_line(
     hello_ok: int
 ) -> PeersApplyResult {
     let mut out = PeersApplyResult {
-        table: table,
+        table: maps_clone(table),
         count: entry_count,
         close: 0,
         reply: "",

@@ -42,8 +42,8 @@ fn apply_probe_result(
     if idx >= len(servers) {
         return servers
     }
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     s.last_check_ms = now_ms()
     if ok == 1 {
         s.fails = 0
@@ -182,15 +182,20 @@ fn dns_member_name(parent: string, ip: string) -> string {
 
 fn dns_split_ips(all: string) -> []string {
     let mut out = make([]string, 0, 8)
-    if str_eq(all, "") {
-        return out
-    }
-    let parts = str_split(all, ",")
-    for _, p in range parts {
-        let ip = str_trim_space(p)
-        if not str_eq(ip, "") {
-            out = append(out, ip)
+    // Avoid str_split here: on Mako 0.2.4 its temporary array may contain
+    // borrowed slices whose cleanup conflicts with the source string.
+    let n = str_len(all)
+    let mut start = 0
+    let mut i = 0
+    while i <= n {
+        if i == n or str_byte_at(all, i) == 44 {
+            let ip = str_trim_space(substr(all, start, i))
+            if str_len(ip) > 0 {
+                out = append(out, own_string(ip))
+            }
+            start = i + 1
         }
+        i = i + 1
     }
     return out
 }
@@ -408,9 +413,9 @@ fn dns_build_srv_query(name: string, id: int) -> string {
 
 // Parse dig/host +short SRV lines: "priority weight port target."
 fn dns_parse_srv_text(text: string) -> []DnsSrvRecord {
-    let mut out = make([]DnsSrvRecord, 0, 8)
+    let mut acc = DnsSrvRecordList { rows: make([]DnsSrvRecord, 0, 8) }
     if str_eq(text, "") {
-        return out
+        return dns_srv_records_copy(acc.rows)
     }
     let lines = str_split(text, "\n")
     for _, line in range lines {
@@ -450,24 +455,24 @@ fn dns_parse_srv_text(text: string) -> []DnsSrvRecord {
         if str_eq(target, ".") {
             continue
         }
-        out = append(out, dns_srv_record_new(pri, w, port, target))
+        acc.rows = append(acc.rows, dns_srv_record_clone(dns_srv_record_new(pri, w, port, target)))
     }
-    return out
+    return dns_srv_records_copy(acc.rows)
 }
 
 fn dns_parse_srv_wire(msg: string, qid: int) -> []DnsSrvRecord {
-    let mut out = make([]DnsSrvRecord, 0, 8)
+    let mut acc = DnsSrvRecordList { rows: make([]DnsSrvRecord, 0, 8) }
     if str_len(msg) < 12 {
-        return out
+        return dns_srv_records_copy(acc.rows)
     }
     let rid = dns_be16_at(msg, 0)
     if rid != qid {
-        return out
+        return dns_srv_records_copy(acc.rows)
     }
     let flags = dns_be16_at(msg, 2)
     // RCODE
     if flags % 16 != 0 {
-        return out
+        return dns_srv_records_copy(acc.rows)
     }
     let qd = dns_be16_at(msg, 4)
     let an = dns_be16_at(msg, 6)
@@ -505,7 +510,7 @@ fn dns_parse_srv_wire(msg: string, qid: int) -> []DnsSrvRecord {
                 if port > 0 {
                     if not str_eq(target, "") {
                         if not str_eq(target, ".") {
-                            out = append(out, dns_srv_record_new(pri, w, port, target))
+                            acc.rows = append(acc.rows, dns_srv_record_clone(dns_srv_record_new(pri, w, port, target)))
                         }
                     }
                 }
@@ -514,7 +519,7 @@ fn dns_parse_srv_wire(msg: string, qid: int) -> []DnsSrvRecord {
         off = off + rdlen
         ai = ai + 1
     }
-    return out
+    return dns_srv_records_copy(acc.rows)
 }
 
 fn dns_lookup_srv_wire(name: string) -> []DnsSrvRecord {
@@ -563,17 +568,18 @@ fn dns_lookup_srv(name: string) -> []DnsSrvRecord {
 }
 
 fn dns_srv_member_name(parent: string, target: string, port: int) -> string {
-    let mut safe = target
-    safe = str_replace(safe, ".", "_")
-    safe = str_replace(safe, ":", "_")
-    safe = str_replace(safe, "[", "")
-    safe = str_replace(safe, "]", "")
+    // Keep each replacement in a fresh binding. Assigning a replacement back
+    // into a string temporary makes Mako 0.2.4 free the new value too early.
+    let a = str_replace(target, ".", "_")
+    let b = str_replace(a, ":", "_")
+    let c = str_replace(b, "[", "")
+    let safe = str_replace(c, "]", "")
     return parent + "-" + safe + "-" + int_to_string(port)
 }
 
 // Sort SRV by priority ascending (stable enough for small N via selection).
 fn dns_srv_sort(recs: []DnsSrvRecord) -> []DnsSrvRecord {
-    let mut out = recs
+    let mut out = dns_srv_records_copy(recs)
     let n = len(out)
     let mut i = 0
     while i < n {
@@ -612,11 +618,18 @@ fn find_server_by_name(servers: []Server, backend: string, name: string) -> int 
     return 0 - 1
 }
 
+fn dns_srv_lookup_name(s: Server) -> string {
+    if str_len(s.resolve_name) > 0 {
+        return own_string(s.resolve_name)
+    }
+    return own_string(s.host)
+}
+
 // Re-resolve server hostnames marked with `resolve`.
 // - default: update single server host to preferred IP
 // - expand: template is not pickable; create/update synthetic members per A/AAAA
 fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Server {
-    let mut out = servers
+    let mut out = server_array_clone(servers)
     let now = now_ms()
     for _, be in range backends {
         let mut interval = be.resolve_interval_ms
@@ -625,7 +638,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
         }
         // Pass 1: single-IP resolve (no expand)
         for si in range len(out) {
-            let s = out[si]
+            let s = server_clone(out[si])
             if not str_eq(s.backend, be.name) {
                 continue
             }
@@ -638,9 +651,9 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             if not str_eq(s.resolve_parent, "") {
                 continue
             }
-            let mut name = s.resolve_name
+            let mut name = own_string(s.resolve_name)
             if str_eq(name, "") {
-                name = s.host
+                name = own_string(s.host)
             }
             let mut due = force
             if due == 0 {
@@ -655,8 +668,8 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             if due == 0 {
                 continue
             }
-            let ip = dns_resolve_hostname(name)
-            let mut ns = out[si]
+            let ip = dns_resolve_hostname(own_string(name))
+            let mut ns = server_clone(out[si])
             ns.last_resolve_ms = now
             if str_eq(ip, "") {
                 log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} name={name}")
@@ -668,13 +681,13 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 ns.host = ip
                 ns.pool = 0 - 1
             }
-            ns.resolve_name = name
-            out[si] = ns
+            ns.resolve_name = own_string(name)
+            out[si] = server_clone(ns)
         }
         // Pass 2: expand A/AAAA templates → multi members (not SRV)
         let mut ti = 0
         while ti < len(out) {
-            let s = out[ti]
+            let s = server_clone(out[ti])
             if not str_eq(s.backend, be.name) {
                 ti = ti + 1
                 continue
@@ -691,9 +704,9 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 ti = ti + 1
                 continue
             }
-            let mut name = s.resolve_name
+            let mut name = own_string(s.resolve_name)
             if str_eq(name, "") {
-                name = s.host
+                name = own_string(s.host)
             }
             let mut due = force
             if due == 0 {
@@ -709,12 +722,12 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 ti = ti + 1
                 continue
             }
-            let all = dns_lookup_all(name)
-            let ips = dns_split_ips(all)
-            let mut ns = out[ti]
+            let all = dns_lookup_all(own_string(name))
+            let ips = dns_split_ips(own_string(all))
+            let mut ns = server_clone(out[ti])
             ns.last_resolve_ms = now
-            ns.resolve_name = name
-            out[ti] = ns
+            ns.resolve_name = own_string(name)
+            out[ti] = server_clone(ns)
             if len(ips) == 0 {
                 log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} name={name} mode=expand")
                 ti = ti + 1
@@ -722,14 +735,15 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             }
             // Track desired member names
             let mut want = make(map[string]int)
-            for _, ip in range ips {
-                let mname = dns_member_name(s.name, ip)
+            for _, ip0 in range ips {
+                let ip = own_string(ip0)
+                let mname = dns_member_name(own_string(s.name), own_string(ip))
                 want[mname] = 1
                 let ei = find_server_by_name(out, be.name, mname)
                 if ei >= 0 {
-                    let mut child = out[ei]
+                    let mut child = server_clone(out[ei])
                     if not str_eq(child.host, ip) {
-                        child.host = ip
+                        child.host = own_string(ip)
                         child.pool = 0 - 1
                         log_info_event("dns_expanded", f"backend={be.name} member={mname} ip={ip}")
                     }
@@ -738,36 +752,37 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                     child.weight = s.weight
                     child.maxconn = s.maxconn
                     child.check = s.check
-                    child.resolve_parent = s.name
-                    child.resolve_name = name
+                    child.resolve_parent = own_string(s.name)
+                    child.resolve_name = own_string(name)
                     child.resolve = 0
                     child.resolve_expand = 0
                     child.resolve_srv = 0
                     child.last_resolve_ms = now
-                    out[ei] = child
+                    out[ei] = server_clone(child)
                 } else {
-                    let mut child = server_new(mname, ip, s.port, s.weight, s.check, be.name)
+                    let mut child = server_new(own_string(mname), own_string(ip), s.port, s.weight, s.check, own_string(be.name))
                     child.maxconn = s.maxconn
-                    child.resolve_parent = s.name
-                    child.resolve_name = name
+                    child.resolve_parent = own_string(s.name)
+                    child.resolve_name = own_string(name)
                     child.resolve = 0
                     child.resolve_expand = 0
                     child.resolve_srv = 0
                     child.last_resolve_ms = now
-                    out = append(out, child)
+                    out = append(out, server_clone(child))
                     log_info_event("dns_expanded", f"backend={be.name} member={mname} ip={ip} action=add")
                 }
             }
             // Drain/remove obsolete children
             let mut rebuilt = make([]Server, 0, len(out))
-            for _, cur in range out {
+            for ri in range len(out) {
+                let cur = server_clone(out[ri])
                 if str_eq(cur.backend, be.name) {
                     if str_eq(cur.resolve_parent, s.name) {
                         if want[cur.name] != 1 {
                             if cur.conns > 0 {
                                 let mut d = cur
                                 d.drain = 1
-                                rebuilt = append(rebuilt, d)
+                                rebuilt = append(rebuilt, server_clone(d))
                                 log_info_event("dns_expanded", f"backend={be.name} member={cur.name} action=drain_obsolete")
                             } else {
                                 log_info_event("dns_expanded", f"backend={be.name} member={cur.name} action=remove")
@@ -777,7 +792,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                         }
                     }
                 }
-                rebuilt = append(rebuilt, cur)
+                rebuilt = append(rebuilt, server_clone(cur))
             }
             out = rebuilt
             // indices shifted — restart expand scan from 0 for this backend carefully
@@ -787,7 +802,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
         // Pass 3: DNS SRV templates → members (target A/AAAA + SRV port/weight)
         let mut si3 = 0
         while si3 < len(out) {
-            let s = out[si3]
+            let s = server_clone(out[si3])
             if not str_eq(s.backend, be.name) {
                 si3 = si3 + 1
                 continue
@@ -800,10 +815,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 si3 = si3 + 1
                 continue
             }
-            let mut name = s.resolve_name
-            if str_eq(name, "") {
-                name = s.host
-            }
+            let name = dns_srv_lookup_name(s)
             let mut due = force
             if due == 0 {
                 if s.last_resolve_ms == 0 {
@@ -820,10 +832,10 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             }
             let recs0 = dns_lookup_srv(name)
             let recs = dns_srv_sort(recs0)
-            let mut ns = out[si3]
+            let mut ns = server_clone(out[si3])
             ns.last_resolve_ms = now
-            ns.resolve_name = name
-            out[si3] = ns
+            ns.resolve_name = own_string(name)
+            out[si3] = server_clone(ns)
             if len(recs) == 0 {
                 log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} name={name} mode=srv")
                 si3 = si3 + 1
@@ -831,12 +843,13 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             }
             let mut want = make(map[string]int)
             for _, rr in range recs {
-                let ip = dns_resolve_hostname(rr.target)
+                let target = own_string(rr.target)
+                let ip = dns_resolve_hostname(own_string(target))
                 if str_eq(ip, "") {
-                    log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} srv_target={rr.target}")
+                    log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} srv_target={target}")
                     continue
                 }
-                let mname = dns_srv_member_name(s.name, rr.target, rr.port)
+                let mname = dns_srv_member_name(own_string(s.name), target, rr.port)
                 want[mname] = 1
                 let mut w = s.weight
                 if rr.weight > 0 {
@@ -844,10 +857,10 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 }
                 let ei = find_server_by_name(out, be.name, mname)
                 if ei >= 0 {
-                    let mut child = out[ei]
+                    let mut child = server_clone(out[ei])
                     let mut changed = 0
                     if not str_eq(child.host, ip) {
-                        child.host = ip
+                        child.host = own_string(ip)
                         child.pool = 0 - 1
                         changed = 1
                     }
@@ -860,36 +873,37 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                     child.drain = 0
                     child.maxconn = s.maxconn
                     child.check = s.check
-                    child.resolve_parent = s.name
-                    child.resolve_name = name
+                    child.resolve_parent = own_string(s.name)
+                    child.resolve_name = own_string(name)
                     child.resolve = 0
                     child.resolve_expand = 0
                     child.resolve_srv = 0
                     child.last_resolve_ms = now
-                    out[ei] = child
+                    out[ei] = server_clone(child)
                     if changed == 1 {
-                        log_info_event("dns_srv", f"backend={be.name} member={mname} target={rr.target} ip={ip} port={rr.port} priority={rr.priority}")
+                        log_info_event("dns_srv", f"backend={be.name} member={mname} target={target} ip={ip} port={rr.port} priority={rr.priority}")
                     }
                 } else {
-                    let mut child = server_new(mname, ip, rr.port, w, s.check, be.name)
+                    let mut child = server_new(own_string(mname), own_string(ip), rr.port, w, s.check, own_string(be.name))
                     child.maxconn = s.maxconn
-                    child.resolve_parent = s.name
-                    child.resolve_name = name
+                    child.resolve_parent = own_string(s.name)
+                    child.resolve_name = own_string(name)
                     child.resolve = 0
                     child.resolve_expand = 0
                     child.resolve_srv = 0
                     child.last_resolve_ms = now
-                    out = append(out, child)
-                    log_info_event("dns_srv", f"backend={be.name} member={mname} target={rr.target} ip={ip} port={rr.port} priority={rr.priority} action=add")
+                    out = append(out, server_clone(child))
+                    log_info_event("dns_srv", f"backend={be.name} member={mname} target={target} ip={ip} port={rr.port} priority={rr.priority} action=add")
                 }
             }
             let mut rebuilt = make([]Server, 0, len(out))
-            for _, cur in range out {
+            for ri in range len(out) {
+                let cur = server_clone(out[ri])
                 if str_eq(cur.backend, be.name) {
                     if str_eq(cur.resolve_parent, s.name) {
                         if want[cur.name] != 1 {
                             if cur.conns > 0 {
-                                let mut d = cur
+                                let mut d = server_clone(cur)
                                 d.drain = 1
                                 rebuilt = append(rebuilt, d)
                                 log_info_event("dns_srv", f"backend={be.name} member={cur.name} action=drain_obsolete")
@@ -900,7 +914,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                         }
                     }
                 }
-                rebuilt = append(rebuilt, cur)
+                rebuilt = append(rebuilt, server_clone(cur))
             }
             out = rebuilt
             si3 = si3 + 1

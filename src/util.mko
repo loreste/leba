@@ -1,6 +1,14 @@
 // Shared helpers — string, time, parse
 pack util
 
+// Mako 0.2.4 makes ownership explicit when a string is copied out of an
+// array or temporary value. Use this at parser boundaries before storing a
+// value in a long-lived struct or map.
+fn own_string(s: string) -> string {
+    let view = str_as_view(s)
+    return str_to_owned(view)
+}
+
 fn substr(s: string, start: int, end: int) -> string {
     let b = bytes(s)
     let mut a = start
@@ -107,14 +115,14 @@ struct HostPort {
 }
 
 fn parse_host_port(addr: string) -> HostPort {
-    let t = str_trim_space(addr)
+    let t = own_string(str_trim_space(addr))
     let i = str_last_index(t, ":")
     if i <= 0 {
-        return HostPort { host: t, port: "0" }
+        return HostPort { host: own_string(t), port: "0" }
     }
     return HostPort {
-        host: substr(t, 0, i),
-        port: substr(t, i + 1, str_len(t))
+        host: own_string(substr(t, 0, i)),
+        port: own_string(substr(t, i + 1, str_len(t)))
     }
 }
 

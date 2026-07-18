@@ -70,7 +70,7 @@ fn apply_done_servers_conn(conn_si: int, servers: []Server) -> []Server {
 
 // Mark request/bytes/errors and passive health on the hop that answered (or last tried).
 fn apply_done_servers_health(err: int, status: int, served_si: int, bytes: int, servers: []Server) -> []Server {
-    let mut srv = servers
+    let mut srv = server_array_clone(servers)
     if served_si >= 0 {
         if err == 0 {
             srv = mark_server_req(srv, served_si, bytes, 0)
@@ -763,10 +763,10 @@ fn rebind_h3_listeners(el: EvLoop, old: []H3Listener, new_http_fes: []Frontend) 
 
 // Sync HttpListener.h3 / h3_handle fields from the H3 listener list (by frontend name).
 fn sync_http_h3_handles(http_listeners: []HttpListener, h3_listeners: []H3Listener) -> []HttpListener {
-    let mut out = http_listeners
+    let mut out = make([]HttpListener, 0, len(http_listeners))
     let mut i = 0
-    while i < len(out) {
-        let mut hl = out[i]
+    while i < len(http_listeners) {
+        let mut hl = http_listeners[i]
         let mut found = 0
         let mut h3h = 0 - 1
         for _, h3l in range h3_listeners {
@@ -779,7 +779,7 @@ fn sync_http_h3_handles(http_listeners: []HttpListener, h3_listeners: []H3Listen
         }
         hl.h3 = found
         hl.h3_handle = h3h
-        out[i] = hl
+        out = append(out, hl)
         i = i + 1
     }
     return out

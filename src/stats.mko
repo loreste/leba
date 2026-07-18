@@ -627,7 +627,7 @@ fn basic_auth_payload(auth_header: string) -> string {
 fn basic_auth_user(payload: string) -> string {
     let cut = str_cut(payload, ":")
     if len(cut) >= 1 {
-        return cut[0]
+        return own_string(cut[0])
     }
     return ""
 }
@@ -635,7 +635,7 @@ fn basic_auth_user(payload: string) -> string {
 fn basic_auth_pass(payload: string) -> string {
     let cut = str_cut(payload, ":")
     if len(cut) >= 2 {
-        return cut[1]
+        return own_string(cut[1])
     }
     return ""
 }
@@ -709,13 +709,13 @@ fn admin_password_matches(pass: string, stored: string) -> int {
 }
 
 fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: string, fallback_pass: string) -> string {
-    let payload = basic_auth_payload(auth_header)
+    let payload = own_string(basic_auth_payload(auth_header))
     let auth_user = basic_auth_user(payload)
     let auth_pass = basic_auth_pass(payload)
     for i, u in range users {
         if str_eq(auth_user, u.user) {
             let mut ok = 0
-            if not str_eq(u.pass_hash, "") {
+            if str_len(u.pass_hash) > 0 {
                 if admin_password_matches(auth_pass, u.pass_hash) == 1 {
                     ok = 1
                 }
@@ -726,7 +726,7 @@ fn admin_auth_role(auth_header: string, users: []AdminUser, fallback_user: strin
             }
             if ok == 1 {
                 if admin_role_known(u.role) == 1 {
-                    return u.role
+                    return own_string(u.role)
                 }
                 return "viewer"
             }

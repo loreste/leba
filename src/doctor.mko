@@ -105,6 +105,36 @@ struct ExplainResult {
     text: string
 }
 
+fn explain_result_new(
+    frontend: string,
+    path: string,
+    host: string,
+    method: string,
+    denied: int,
+    deny_reason: string,
+    backend: string,
+    server: string,
+    server_addr: string,
+    balance: string,
+    ok: int,
+    text: string
+) -> ExplainResult {
+    return ExplainResult {
+        frontend: own_string(frontend),
+        path: own_string(path),
+        host: own_string(host),
+        method: own_string(method),
+        denied: denied,
+        deny_reason: own_string(deny_reason),
+        backend: own_string(backend),
+        server: own_string(server),
+        server_addr: own_string(server_addr),
+        balance: own_string(balance),
+        ok: ok,
+        text: own_string(text)
+    }
+}
+
 fn balance_known(b: string) -> int {
     match b {
         "round_robin" => { return 1 }
@@ -141,7 +171,7 @@ fn server_count(servers: []Server, backend: string) -> int {
 fn backend_balance(backends: []Backend, name: string) -> string {
     for _, be in range backends {
         if str_eq(be.name, name) {
-            return be.balance
+            return own_string(be.balance)
         }
     }
     return ""
@@ -780,20 +810,7 @@ fn explain_request(
 
     if found == 0 {
         builder_write(b, "result: no http frontend found\n")
-        return ExplainResult {
-            frontend: "",
-            path: path,
-            host: host,
-            method: method,
-            denied: 0,
-            deny_reason: "",
-            backend: "",
-            server: "",
-            server_addr: "",
-            balance: "",
-            ok: 0,
-            text: builder_string(b)
-        }
+        return explain_result_new("", path, host, method, 0, "", "", "", "", "", 0, builder_string(b))
     }
 
     builder_write(b, f"frontend: {fe.name} {fe.bind_host}:{fe.bind_port} mode={fe.mode}\n")
@@ -802,20 +819,7 @@ fn explain_request(
     if denied == 1 {
         builder_write(b, "acl:    DENY (matched deny/allow rule)\n")
         builder_write(b, "result: 403 forbidden — request never reaches a backend\n")
-        return ExplainResult {
-            frontend: fe.name,
-            path: path,
-            host: host,
-            method: method,
-            denied: 1,
-            deny_reason: "acl",
-            backend: "",
-            server: "",
-            server_addr: "",
-            balance: "",
-            ok: 0,
-            text: builder_string(b)
-        }
+        return explain_result_new(fe.name, path, host, method, 1, "acl", "", "", "", "", 0, builder_string(b))
     }
     builder_write(b, "acl:    allow\n")
 
@@ -824,20 +828,7 @@ fn explain_request(
 
     if str_eq(be_name, "") {
         builder_write(b, "result: 503 no backend matched\n")
-        return ExplainResult {
-            frontend: fe.name,
-            path: path,
-            host: host,
-            method: method,
-            denied: 0,
-            deny_reason: "",
-            backend: "",
-            server: "",
-            server_addr: "",
-            balance: "",
-            ok: 0,
-            text: builder_string(b)
-        }
+        return explain_result_new(fe.name, path, host, method, 0, "", "", "", "", "", 0, builder_string(b))
     }
 
     let mut be = backend_new(be_name)
@@ -850,20 +841,7 @@ fn explain_request(
     }
     if be_found == 0 {
         builder_write(b, "result: 503 unknown backend\n")
-        return ExplainResult {
-            frontend: fe.name,
-            path: path,
-            host: host,
-            method: method,
-            denied: 0,
-            deny_reason: "",
-            backend: be_name,
-            server: "",
-            server_addr: "",
-            balance: "",
-            ok: 0,
-            text: builder_string(b)
-        }
+        return explain_result_new(fe.name, path, host, method, 0, "", be_name, "", "", "", 0, builder_string(b))
     }
 
     builder_write(b, f"balance: {be.balance}\n")
@@ -889,40 +867,14 @@ fn explain_request(
     if pick < 0 {
         builder_write(b, "pick:   none available\n")
         builder_write(b, "result: 502 bad gateway\n")
-        return ExplainResult {
-            frontend: fe.name,
-            path: path,
-            host: host,
-            method: method,
-            denied: 0,
-            deny_reason: "",
-            backend: be_name,
-            server: "",
-            server_addr: "",
-            balance: be.balance,
-            ok: 0,
-            text: builder_string(b)
-        }
+        return explain_result_new(fe.name, path, host, method, 0, "", be_name, "", "", be.balance, 0, builder_string(b))
     }
 
     let s = w.servers[pick]
     builder_write(b, f"pick:   {s.name} @ {join_host_port(s.host, s.port)}\n")
     builder_write(b, f"result: would proxy {method} {path} -> {http_url(s.host, s.port, path)}\n")
 
-    return ExplainResult {
-        frontend: fe.name,
-        path: path,
-        host: host,
-        method: method,
-        denied: 0,
-        deny_reason: "",
-        backend: be_name,
-        server: s.name,
-        server_addr: join_host_port(s.host, s.port),
-        balance: be.balance,
-        ok: 1,
-        text: builder_string(b)
-    }
+    return explain_result_new(fe.name, path, host, method, 0, "", be_name, s.name, join_host_port(s.host, s.port), be.balance, 1, builder_string(b))
 }
 
 // Structured access log line.

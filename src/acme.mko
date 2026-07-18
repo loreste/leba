@@ -1,0 +1,595 @@
+// External ACME helper (lego) orchestration for NPM-style cert UX.
+// Pure-Mako ACME is not possible without JOSE account signing — shell out to lego.
+pack acme
+
+struct AcmeSettings {
+    webroot: string
+    storage: string
+    email: string
+    helper: string
+}
+
+struct AcmeRunResult {
+    ok: int
+    error: string
+    cert: string
+    key: string
+    domain: string
+    output: string
+}
+
+// Reject shell metacharacters in tokens used inside exec_run strings.
+fn acme_token_safe(s: string) -> int {
+    if str_eq(s, "") {
+        return 0
+    }
+    if str_len(s) > 256 {
+        return 0
+    }
+    let data = bytes(s)
+    for _, d in range data {
+        let c = int(d)
+        let mut ok = 0
+        if c >= 48 {
+            if c <= 57 {
+                ok = 1
+            }
+        }
+        if c >= 65 {
+            if c <= 90 {
+                ok = 1
+            }
+        }
+        if c >= 97 {
+            if c <= 122 {
+                ok = 1
+            }
+        }
+        if c == 45 {
+            ok = 1
+        }
+        if c == 46 {
+            ok = 1
+        }
+        if c == 95 {
+            ok = 1
+        }
+        if c == 64 {
+            ok = 1
+        }
+        if c == 43 {
+            ok = 1
+        }
+        if c == 47 {
+            ok = 1
+        }
+        if ok == 0 {
+            return 0
+        }
+    }
+    return 1
+}
+
+fn acme_email_ok(s: string) -> int {
+    if acme_token_safe(s) == 0 {
+        return 0
+    }
+    if not str_contains(s, "@") {
+        return 0
+    }
+    if str_contains(s, "..") {
+        return 0
+    }
+    return 1
+}
+
+fn acme_kv_from_config(config_path: string, key: string) -> string {
+    if str_eq(config_path, "") {
+        return ""
+    }
+    let raw = read_file(config_path)
+    if str_eq(raw, "") {
+        return ""
+    }
+    let lines = str_split(raw, "\n")
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_has_prefix(t, "#") {
+            continue
+        }
+        let fields = str_fields(t)
+        if len(fields) >= 2 {
+            if str_eq(fields[0], key) {
+                return expand_env(fields[1])
+            }
+        }
+    }
+    return ""
+}
+
+fn acme_settings_resolve(webroot_hint: string) -> AcmeSettings {
+    return acme_settings_resolve_path(webroot_hint, "")
+}
+
+fn acme_settings_resolve_path(webroot_hint: string, config_path: string) -> AcmeSettings {
+    let mut webroot = webroot_hint
+    if str_eq(webroot, "") {
+        webroot = env_get_or("LEBA_ACME_WEBROOT", "")
+    }
+    if str_eq(webroot, "") {
+        webroot = acme_kv_from_config(config_path, "acme_webroot")
+    }
+    if str_eq(webroot, "") {
+        webroot = "/var/lib/leba/acme"
+    }
+    let mut storage = env_get_or("LEBA_ACME_STORAGE", "")
+    if str_eq(storage, "") {
+        storage = acme_kv_from_config(config_path, "acme_storage")
+    }
+    if str_eq(storage, "") {
+        storage = "/var/lib/leba/lego"
+    }
+    let mut email = env_get_or("LEBA_ACME_EMAIL", "")
+    if str_eq(email, "") {
+        email = acme_kv_from_config(config_path, "acme_email")
+    }
+    let mut helper = env_get_or("LEBA_ACME_HELPER", "")
+    if str_eq(helper, "") {
+        helper = acme_kv_from_config(config_path, "acme_helper")
+    }
+    if str_eq(helper, "") {
+        helper = "lego"
+    }
+    return AcmeSettings {
+        webroot: webroot,
+        storage: storage,
+        email: email,
+        helper: helper
+    }
+}
+
+fn acme_settings_from_defaults(d: Defaults, webroot_hint: string) -> AcmeSettings {
+    let mut s = acme_settings_resolve(webroot_hint)
+    if not str_eq(d.acme_webroot, "") {
+        if str_eq(webroot_hint, "") {
+            s.webroot = d.acme_webroot
+        }
+    }
+    if not str_eq(d.acme_storage, "") {
+        s.storage = d.acme_storage
+    }
+    if not str_eq(d.acme_email, "") {
+        s.email = d.acme_email
+    }
+    if not str_eq(d.acme_helper, "") {
+        s.helper = d.acme_helper
+    }
+    // Env still wins for operator overrides when set.
+    let env_email = env_get("LEBA_ACME_EMAIL")
+    if not str_eq(env_email, "") {
+        s.email = env_email
+    }
+    let env_storage = env_get("LEBA_ACME_STORAGE")
+    if not str_eq(env_storage, "") {
+        s.storage = env_storage
+    }
+    let env_helper = env_get("LEBA_ACME_HELPER")
+    if not str_eq(env_helper, "") {
+        s.helper = env_helper
+    }
+    let env_web = env_get("LEBA_ACME_WEBROOT")
+    if not str_eq(env_web, "") {
+        s.webroot = env_web
+    }
+    return s
+}
+
+fn acme_first_webroot(frontends: []Frontend) -> string {
+    for _, fe in range frontends {
+        if not str_eq(fe.acme_webroot, "") {
+            return fe.acme_webroot
+        }
+    }
+    return ""
+}
+
+// lego stores PEMs as <storage>/certificates/<domain>.crt and .key
+fn acme_cert_paths(storage: string, domain: string) -> (string, string) {
+    let base = storage + "/certificates/" + domain
+    return (base + ".crt", base + ".key")
+}
+
+fn acme_paths_exist(cert: string, key: string) -> int {
+    if file_exists(cert) {
+        if file_exists(key) {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn acme_helper_available(helper: string) -> int {
+    if str_eq(helper, "") {
+        return 0
+    }
+    if acme_token_safe(helper) == 0 {
+        return 0
+    }
+    if file_exists(helper) {
+        return 1
+    }
+    // command -v is shell; helper is token-safe.
+    let probe = exec_output("command -v " + helper + " 2>/dev/null || true")
+    if str_len(str_trim_space(probe)) > 0 {
+        return 1
+    }
+    return 0
+}
+
+// PEM notAfter via openssl when available. Returns "" if unknown.
+fn acme_cert_not_after(cert_path: string) -> string {
+    if str_eq(cert_path, "") {
+        return ""
+    }
+    if not file_exists(cert_path) {
+        return ""
+    }
+    if acme_token_safe(cert_path) == 0 {
+        return ""
+    }
+    // Prefer openssl; fail soft if missing.
+    let raw = exec_output("openssl x509 -enddate -noout -in " + cert_path + " 2>/dev/null || true")
+    let t = str_trim_space(raw)
+    if str_has_prefix(t, "notAfter=") {
+        return str_trim_space(substr(t, 9, str_len(t)))
+    }
+    return ""
+}
+
+// Preflight for issue: returns empty string if OK, else human + machine-friendly error.
+// Format: "code=CODE message=..." for API consumers.
+fn acme_preflight_issue(settings: AcmeSettings, domain: string, email_override: string) -> string {
+    if acme_token_safe(domain) == 0 {
+        return "code=invalid_domain message=domain must be a safe hostname (letters, digits, . - _)"
+    }
+    if acme_token_safe(settings.helper) == 0 {
+        return "code=invalid_helper message=acme_helper path/name contains unsafe characters"
+    }
+    if acme_helper_available(settings.helper) == 0 {
+        return "code=missing_helper message=ACME helper not found on PATH — install lego or set LEBA_ACME_HELPER to an absolute path (Docker image includes lego)"
+    }
+    let mut email = email_override
+    if str_eq(email, "") {
+        email = settings.email
+    }
+    if acme_email_ok(email) == 0 {
+        return "code=missing_email message=valid email required — set defaults acme_email, LEBA_ACME_EMAIL, or query email="
+    }
+    if acme_token_safe(settings.webroot) == 0 {
+        return "code=invalid_webroot message=acme_webroot path is empty or unsafe"
+    }
+    if acme_token_safe(settings.storage) == 0 {
+        return "code=invalid_storage message=acme_storage path is empty or unsafe"
+    }
+    return ""
+}
+
+fn acme_preflight_renew(settings: AcmeSettings) -> string {
+    if acme_token_safe(settings.helper) == 0 {
+        return "code=invalid_helper message=acme_helper path/name contains unsafe characters"
+    }
+    if acme_helper_available(settings.helper) == 0 {
+        return "code=missing_helper message=ACME helper not found — install lego or set LEBA_ACME_HELPER"
+    }
+    if acme_token_safe(settings.storage) == 0 {
+        return "code=invalid_storage message=acme_storage path is empty or unsafe"
+    }
+    let certs_dir = settings.storage + "/certificates"
+    if not file_exists(certs_dir) {
+        return "code=no_certs message=no certificates directory under acme_storage — issue a cert first"
+    }
+    return ""
+}
+
+fn acme_error_json(err: string) -> string {
+    // Parse "code=X message=Y" into structured JSON; else plain error.
+    let mut code = ""
+    let mut message = err
+    if str_has_prefix(err, "code=") {
+        let rest = substr(err, 5, str_len(err))
+        let cut = str_index(rest, " message=")
+        if cut >= 0 {
+            code = substr(rest, 0, cut)
+            message = substr(rest, cut + 9, str_len(rest))
+        } else {
+            code = rest
+            message = err
+        }
+    }
+    let mut b = str_builder()
+    builder_write(b, "{\"error\":\"")
+    builder_write(b, json_escape(message))
+    builder_write(b, "\"")
+    if not str_eq(code, "") {
+        builder_write(b, ",\"code\":\"")
+        builder_write(b, json_escape(code))
+        builder_write(b, "\"")
+    }
+    builder_write(b, "}\n")
+    return builder_string(b)
+}
+
+fn acme_preflight_http_status(err: string) -> int {
+    if str_has_prefix(err, "code=missing_helper") {
+        return 400
+    }
+    if str_has_prefix(err, "code=missing_email") {
+        return 400
+    }
+    if str_has_prefix(err, "code=missing_dns_provider") {
+        return 400
+    }
+    if str_has_prefix(err, "code=invalid_") {
+        return 400
+    }
+    if str_has_prefix(err, "code=no_certs") {
+        return 400
+    }
+    return 500
+}
+
+// challenge: "http" (default) or "dns". dns_provider e.g. cloudflare, route53, digitalocean.
+// DNS credentials come from lego-standard env vars (CF_DNS_API_TOKEN, AWS_*, etc.).
+fn acme_issue(settings: AcmeSettings, domain: string, email_override: string) -> AcmeRunResult {
+    return acme_issue_challenge(settings, domain, email_override, "http", "")
+}
+
+fn acme_issue_challenge(
+    settings: AcmeSettings,
+    domain: string,
+    email_override: string,
+    challenge: string,
+    dns_provider: string
+) -> AcmeRunResult {
+    let pre = acme_preflight_issue(settings, domain, email_override)
+    if not str_eq(pre, "") {
+        return AcmeRunResult { ok: 0, error: pre, cert: "", key: "", domain: domain, output: "" }
+    }
+    let mut email = email_override
+    if str_eq(email, "") {
+        email = settings.email
+    }
+    let mut ch = challenge
+    if str_eq(ch, "") {
+        ch = "http"
+    }
+    if str_eq(ch, "dns") {
+        let mut prov = dns_provider
+        if str_eq(prov, "") {
+            prov = env_get_or("LEBA_ACME_DNS_PROVIDER", "")
+        }
+        if str_eq(prov, "") {
+            return AcmeRunResult {
+                ok: 0,
+                error: "code=missing_dns_provider message=DNS-01 requires dns_provider= or LEBA_ACME_DNS_PROVIDER (e.g. cloudflare)",
+                cert: "",
+                key: "",
+                domain: domain,
+                output: ""
+            }
+        }
+        if acme_token_safe(prov) == 0 {
+            return AcmeRunResult {
+                ok: 0,
+                error: "code=invalid_dns_provider message=dns provider name is unsafe",
+                cert: "",
+                key: "",
+                domain: domain,
+                output: ""
+            }
+        }
+        let _ = exec_run("mkdir -p " + settings.storage + " " + settings.storage + "/certificates")
+        let mut cmd = str_builder()
+        builder_write(cmd, settings.helper)
+        builder_write(cmd, " --accept-tos --email ")
+        builder_write(cmd, email)
+        builder_write(cmd, " --dns ")
+        builder_write(cmd, prov)
+        builder_write(cmd, " --path ")
+        builder_write(cmd, settings.storage)
+        builder_write(cmd, " --domains ")
+        builder_write(cmd, domain)
+        builder_write(cmd, " run 2>&1")
+        log_info_event("acme_issue_start", f"domain={domain} challenge=dns provider={prov}")
+        let out = exec_output(builder_string(cmd))
+        return acme_issue_finish(settings, domain, out, "dns")
+    }
+    // HTTP-01 default
+    let _ = exec_run("mkdir -p " + settings.webroot + " " + settings.storage + " " + settings.storage + "/certificates")
+    let mut cmd = str_builder()
+    builder_write(cmd, settings.helper)
+    builder_write(cmd, " --accept-tos --email ")
+    builder_write(cmd, email)
+    builder_write(cmd, " --http --http.webroot ")
+    builder_write(cmd, settings.webroot)
+    builder_write(cmd, " --path ")
+    builder_write(cmd, settings.storage)
+    builder_write(cmd, " --domains ")
+    builder_write(cmd, domain)
+    builder_write(cmd, " run 2>&1")
+    log_info_event("acme_issue_start", f"domain={domain} helper={settings.helper} challenge=http")
+    let out = exec_output(builder_string(cmd))
+    return acme_issue_finish(settings, domain, out, "http")
+}
+
+fn acme_issue_finish(settings: AcmeSettings, domain: string, out: string, challenge: string) -> AcmeRunResult {
+    let cert, key = acme_cert_paths(settings.storage, domain)
+    if acme_paths_exist(cert, key) == 1 {
+        log_info_event("acme_issue_ok", f"domain={domain} cert={cert} challenge={challenge}")
+        return AcmeRunResult { ok: 1, error: "", cert: cert, key: key, domain: domain, output: out }
+    }
+    let mut err = "code=lego_failed message=lego did not produce certificate files under acme_storage/certificates/"
+    if str_len(out) > 0 {
+        let mut snippet = out
+        if str_len(snippet) > 400 {
+            snippet = substr(snippet, 0, 400)
+        }
+        err = "code=lego_failed message=" + snippet
+    }
+    log_warn_event("acme_issue_failed", f"domain={domain} err={err}")
+    return AcmeRunResult { ok: 0, error: err, cert: cert, key: key, domain: domain, output: out }
+}
+
+fn acme_renew(settings: AcmeSettings) -> AcmeRunResult {
+    let pre = acme_preflight_renew(settings)
+    if not str_eq(pre, "") {
+        return AcmeRunResult { ok: 0, error: pre, cert: "", key: "", domain: "", output: "" }
+    }
+    let mut cmd = str_builder()
+    builder_write(cmd, settings.helper)
+    builder_write(cmd, " --path ")
+    builder_write(cmd, settings.storage)
+    builder_write(cmd, " renew --no-random-sleep 2>&1")
+    log_info_event("acme_renew_start", f"storage={settings.storage}")
+    let out = exec_output(builder_string(cmd))
+    let certs_dir = settings.storage + "/certificates"
+    if file_exists(certs_dir) {
+        log_info_event("acme_renew_done", f"storage={settings.storage}")
+        return AcmeRunResult { ok: 1, error: "", cert: "", key: "", domain: "", output: out }
+    }
+    return AcmeRunResult { ok: 0, error: "code=renew_failed message=renew finished but certificates directory missing", cert: "", key: "", domain: "", output: out }
+}
+
+fn acme_list_json(frontends: []Frontend, settings: AcmeSettings) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"certificates\":[")
+    let mut first = 1
+    for _, fe in range frontends {
+        if not str_eq(fe.tls_cert, "") {
+            if first == 0 {
+                builder_write(b, ",")
+            }
+            first = 0
+            builder_write(b, "{\"source\":\"frontend\",\"frontend\":\"")
+            builder_write(b, json_escape(fe.name))
+            builder_write(b, "\",\"hostname\":\"\",\"cert\":\"")
+            builder_write(b, json_escape(fe.tls_cert))
+            builder_write(b, "\",\"key\":\"")
+            builder_write(b, json_escape(fe.tls_key))
+            builder_write(b, "\",\"exists\":")
+            if acme_paths_exist(fe.tls_cert, fe.tls_key) == 1 {
+                builder_write(b, "true")
+            } else {
+                builder_write(b, "false")
+            }
+            builder_write(b, ",\"not_after\":\"")
+            builder_write(b, json_escape(acme_cert_not_after(fe.tls_cert)))
+            builder_write(b, "\"}")
+        }
+        for _, se in range fe.tls_sni {
+            if first == 0 {
+                builder_write(b, ",")
+            }
+            first = 0
+            builder_write(b, "{\"source\":\"sni\",\"frontend\":\"")
+            builder_write(b, json_escape(fe.name))
+            builder_write(b, "\",\"hostname\":\"")
+            builder_write(b, json_escape(se.hostname))
+            builder_write(b, "\",\"cert\":\"")
+            builder_write(b, json_escape(se.cert))
+            builder_write(b, "\",\"key\":\"")
+            builder_write(b, json_escape(se.key))
+            builder_write(b, "\",\"exists\":")
+            if acme_paths_exist(se.cert, se.key) == 1 {
+                builder_write(b, "true")
+            } else {
+                builder_write(b, "false")
+            }
+            builder_write(b, ",\"not_after\":\"")
+            builder_write(b, json_escape(acme_cert_not_after(se.cert)))
+            builder_write(b, "\"}")
+        }
+    }
+    let certs_dir = settings.storage + "/certificates"
+    if file_exists(certs_dir) {
+        let entries = read_dir(certs_dir)
+        for _, name in range entries {
+            if str_has_suffix(name, ".crt") {
+                let domain = substr(name, 0, str_len(name) - 4)
+                let cert, key = acme_cert_paths(settings.storage, domain)
+                if first == 0 {
+                    builder_write(b, ",")
+                }
+                first = 0
+                builder_write(b, "{\"source\":\"lego\",\"frontend\":\"\",\"hostname\":\"")
+                builder_write(b, json_escape(domain))
+                builder_write(b, "\",\"cert\":\"")
+                builder_write(b, json_escape(cert))
+                builder_write(b, "\",\"key\":\"")
+                builder_write(b, json_escape(key))
+                builder_write(b, "\",\"exists\":")
+                if acme_paths_exist(cert, key) == 1 {
+                    builder_write(b, "true")
+                } else {
+                    builder_write(b, "false")
+                }
+                builder_write(b, ",\"not_after\":\"")
+                builder_write(b, json_escape(acme_cert_not_after(cert)))
+                builder_write(b, "\"}")
+            }
+        }
+    }
+    let helper_ok = acme_helper_available(settings.helper)
+    let email_ok = acme_email_ok(settings.email)
+    builder_write(b, "],\"settings\":{\"webroot\":\"")
+    builder_write(b, json_escape(settings.webroot))
+    builder_write(b, "\",\"storage\":\"")
+    builder_write(b, json_escape(settings.storage))
+    builder_write(b, "\",\"email\":\"")
+    builder_write(b, json_escape(settings.email))
+    builder_write(b, "\",\"helper\":\"")
+    builder_write(b, json_escape(settings.helper))
+    builder_write(b, "\",\"helper_available\":")
+    if helper_ok == 1 {
+        builder_write(b, "true")
+    } else {
+        builder_write(b, "false")
+    }
+    builder_write(b, ",\"email_configured\":")
+    if email_ok == 1 {
+        builder_write(b, "true")
+    } else {
+        builder_write(b, "false")
+    }
+    builder_write(b, ",\"ready\":")
+    if helper_ok == 1 {
+        if email_ok == 1 {
+            builder_write(b, "true")
+        } else {
+            builder_write(b, "false")
+        }
+    } else {
+        builder_write(b, "false")
+    }
+    builder_write(b, ",\"issues\":[")
+    let mut ifirst = 1
+    if helper_ok == 0 {
+        builder_write(b, "{\"code\":\"missing_helper\",\"message\":\"Install lego or set LEBA_ACME_HELPER\"}")
+        ifirst = 0
+    }
+    if email_ok == 0 {
+        if ifirst == 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, "{\"code\":\"missing_email\",\"message\":\"Set LEBA_ACME_EMAIL or defaults acme_email\"}")
+        ifirst = 0
+    }
+    if acme_token_safe(settings.webroot) == 0 {
+        if ifirst == 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, "{\"code\":\"invalid_webroot\",\"message\":\"acme_webroot empty or unsafe\"}")
+    }
+    builder_write(b, "]}}\n")
+    return builder_string(b)
+}

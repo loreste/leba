@@ -123,7 +123,28 @@ fn acl_decide_full(acls: []AclRule, frontend: string, path: string, host: string
                 }
             }
         } else {
-            hit = match_kind(r.kind, r.value, path, host, method, "")
+            // host_src: "hostname|ip-prefix" — host-scoped IP allow/deny lists (NPM attach).
+            if str_eq(r.kind, "host_src") {
+                let cut = str_index(r.value, "|")
+                if cut > 0 {
+                    let hpart = substr(r.value, 0, cut)
+                    let ipart = substr(r.value, cut + 1, str_len(r.value))
+                    if match_kind("host", hpart, path, host, method, "") == 1 {
+                        if not str_eq(ipart, "") {
+                            if str_eq(client_ip, ipart) {
+                                hit = 1
+                            }
+                            if hit == 0 {
+                                if str_has_prefix(client_ip, ipart) {
+                                    hit = 1
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                hit = match_kind(r.kind, r.value, path, host, method, "")
+            }
         }
         match r.action {
             "deny" => {
@@ -167,10 +188,20 @@ fn acl_build_index(acls: []AclRule) -> map[string][]int {
     return idx
 }
 
-// Returns matching route index, or -1. Prefer non-default first match; default last.
+// Host match for route.host_match (exact or host:port strip).
+fn route_host_match_ok(host_match: string, host: string) -> int {
+    if str_eq(host_match, "") {
+        return 1
+    }
+    return match_kind("host", host_match, "", host, "GET", "")
+}
+
+// Returns matching route index, or -1.
+// Prefer: path/path_prefix (with optional host_match) → host → default.
 fn select_route_idx(routes: []Route, frontend: string, path: string, host: string) -> int {
     let p = path_only(path)
     let mut default_idx = 0 - 1
+    // Pass 1: path kinds (locations under a host use host_match).
     for i, r in range routes {
         if not str_eq(r.frontend, frontend) {
             continue
@@ -179,8 +210,24 @@ fn select_route_idx(routes: []Route, frontend: string, path: string, host: strin
             default_idx = i
             continue
         }
+        if str_eq(r.kind, "host") {
+            continue
+        }
         if match_kind(r.kind, r.value, p, host, "GET", "") == 1 {
-            return i
+            if route_host_match_ok(r.host_match, host) == 1 {
+                return i
+            }
+        }
+    }
+    // Pass 2: host routes (vhosts).
+    for i, r in range routes {
+        if not str_eq(r.frontend, frontend) {
+            continue
+        }
+        if str_eq(r.kind, "host") {
+            if match_kind("host", r.value, p, host, "GET", "") == 1 {
+                return i
+            }
         }
     }
     return default_idx

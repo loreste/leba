@@ -379,11 +379,14 @@ fn doctor_world(w: World) -> DoctorReport {
                 builder_write(b, f"ERROR  frontend {fe.name} acme_webroot must not contain '..'\n")
                 errors = errors + 1
             }
-            if fe.bind_port != 80 {
-                if fe.bind_port != 8080 {
-                    builder_write(b, f"WARN   frontend {fe.name} has acme_webroot but bind port is {fe.bind_port} (HTTP-01 usually needs 80)\n")
-                    builder_write(b, "  fix:  expose port 80 for Let's Encrypt HTTP-01 or use DNS challenge\n")
-                    warnings = warnings + 1
+            // Stats frontends inherit defaults.acme_webroot but never serve HTTP-01.
+            if not str_eq(fe.mode, "stats") {
+                if fe.bind_port != 80 {
+                    if fe.bind_port != 8080 {
+                        builder_write(b, f"WARN   frontend {fe.name} has acme_webroot but bind port is {fe.bind_port} (HTTP-01 usually needs 80)\n")
+                        builder_write(b, "  fix:  expose port 80 for Let's Encrypt HTTP-01 or use DNS challenge\n")
+                        warnings = warnings + 1
+                    }
                 }
             }
             let _ = aw
@@ -523,6 +526,54 @@ fn doctor_world(w: World) -> DoctorReport {
                 warnings = warnings + 1
             }
         }
+        // Admin users file: readable + not obviously world-writable.
+        if not str_eq(w.admin_users_file, "") {
+            if str_contains(w.admin_users_file, "..") {
+                builder_write(b, "ERROR  admin_users_file path must not contain '..'\n")
+                errors = errors + 1
+            } else {
+                let uf = read_file(w.admin_users_file)
+                if str_eq(uf, "") {
+                    // May be relative; still warn when absolute and missing.
+                    if path_is_abs(w.admin_users_file) {
+                        builder_write(b, f"ERROR  admin_users_file not readable: {w.admin_users_file}\n")
+                        builder_write(b, "  fix:  create the file and set restrictive permissions (0600)\n")
+                        errors = errors + 1
+                    } else {
+                        builder_write(b, f"WARN   admin_users_file may be unreadable: {w.admin_users_file}\n")
+                        warnings = warnings + 1
+                    }
+                } else {
+                    // Portable mode probe only when path is shell-safe (no spaces/metacharacters).
+                    let p = w.admin_users_file
+                    let mut safe = 1
+                    if str_contains(p, " ") or str_contains(p, ";") or str_contains(p, "|") or str_contains(p, "&") or str_contains(p, "`") or str_contains(p, "$") or str_contains(p, "\n") or str_contains(p, "\r") or str_contains(p, "'") or str_contains(p, "\"") {
+                        safe = 0
+                    }
+                    if safe == 1 {
+                        let mode_l = str_trim_space(exec_output("stat -c %a " + p + " 2>/dev/null || true"))
+                        let mode_m = str_trim_space(exec_output("stat -f %Lp " + p + " 2>/dev/null || true"))
+                        let mut mode = mode_l
+                        if str_eq(mode, "") {
+                            mode = mode_m
+                        }
+                        if str_eq(mode, "777") or str_eq(mode, "666") or str_eq(mode, "646") or str_eq(mode, "662") {
+                            builder_write(b, f"ERROR  admin_users_file is world-writable (mode {mode}): {p}\n")
+                            builder_write(b, "  fix:  chmod 600 the admin users file\n")
+                            errors = errors + 1
+                        } else {
+                            if str_has_suffix(mode, "7") or str_has_suffix(mode, "6") or str_has_suffix(mode, "3") or str_has_suffix(mode, "2") {
+                                if str_len(mode) >= 3 {
+                                    builder_write(b, f"WARN   admin_users_file mode {mode} may allow group/other write: {p}\n")
+                                    builder_write(b, "  fix:  chmod 600 recommended for credential files\n")
+                                    warnings = warnings + 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if w.oidc.enabled == 1 {
             if str_eq(w.oidc.client_id, "") {
                 builder_write(b, "ERROR  oidc enabled but client_id is empty\n")
@@ -603,6 +654,37 @@ fn doctor_world(w: World) -> DoctorReport {
                 builder_write(b, f"ERROR  ACL path_prefix on {a.frontend} has empty match value\n")
                 errors = errors + 1
             }
+        }
+    }
+
+    // ACME defaults / helper readiness (NPM control plane).
+    if not str_eq(w.defaults.acme_webroot, "") {
+        if str_contains(w.defaults.acme_webroot, "..") {
+            builder_write(b, "ERROR  defaults acme_webroot must not contain '..'\n")
+            errors = errors + 1
+        }
+        if str_eq(w.defaults.acme_email, "") {
+            let env_em = env_get("LEBA_ACME_EMAIL")
+            if str_eq(env_em, "") {
+                builder_write(b, "WARN   acme_webroot set but no acme_email / LEBA_ACME_EMAIL — certificate issue will fail\n")
+                builder_write(b, "  fix:  defaults acme_email you@example.com  or export LEBA_ACME_EMAIL\n")
+                warnings = warnings + 1
+            }
+        }
+        if not str_eq(w.defaults.acme_storage, "") {
+            if str_contains(w.defaults.acme_storage, "..") {
+                builder_write(b, "ERROR  defaults acme_storage must not contain '..'\n")
+                errors = errors + 1
+            }
+        }
+    }
+
+    // Managed include paths: refuse path traversal in include targets when present in summary.
+    // (parse already resolves includes; warn about common footguns on state/admin paths.)
+    if not str_eq(w.state_file, "") {
+        if str_contains(w.state_file, "..") {
+            builder_write(b, "ERROR  state_file path must not contain '..'\n")
+            errors = errors + 1
         }
     }
 

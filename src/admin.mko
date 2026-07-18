@@ -212,6 +212,16 @@ fn valid_abs_path(s: string) -> int {
     if str_contains(s, "\r") {
         return 0
     }
+    // Path traversal / relative segments in absolute paths.
+    if str_contains(s, "/../") {
+        return 0
+    }
+    if str_has_suffix(s, "/..") {
+        return 0
+    }
+    if str_contains(s, "/./") {
+        return 0
+    }
     return 1
 }
 
@@ -234,20 +244,133 @@ fn find_frontend_idx_admin(frontends: []Frontend, name: string) -> int {
 }
 
 fn upsert_host_route(routes: []Route, frontend: string, domain: string, backend: string) -> []Route {
+    return upsert_host_route_full(routes, frontend, domain, backend, "", "", 0, 1, 1)
+}
+
+// action: "" | redirect | dead; enable 0/1; websocket 0/1
+fn upsert_host_route_full(
+    routes: []Route,
+    frontend: string,
+    domain: string,
+    backend: string,
+    action: string,
+    target: string,
+    code: int,
+    websocket: int,
+    enable: int
+) -> []Route {
     let mut out = routes
     for i, rt in range out {
         if str_eq(rt.frontend, frontend) {
             if str_eq(rt.kind, "host") {
                 if str_eq(rt.value, domain) {
                     let mut r = out[i]
-                    r.backend = backend
+                    if not str_eq(backend, "") {
+                        r.backend = backend
+                    }
+                    if enable == 0 {
+                        r.action = "dead"
+                        if code > 0 {
+                            r.code = code
+                        } else {
+                            r.code = 503
+                        }
+                    } else {
+                        if str_eq(action, "redirect") {
+                            r.action = "redirect"
+                            r.target = target
+                            r.backend = ""
+                            if code > 0 {
+                                r.code = code
+                            } else {
+                                r.code = 301
+                            }
+                        } else {
+                            if str_eq(action, "dead") {
+                                r.action = "dead"
+                                r.backend = ""
+                                if code > 0 {
+                                    r.code = code
+                                } else {
+                                    r.code = 404
+                                }
+                            } else {
+                                r.action = ""
+                                r.target = ""
+                            }
+                        }
+                    }
+                    r.websocket = websocket
                     out[i] = r
                     return out
                 }
             }
         }
     }
-    return append(out, route_new(frontend, "host", domain, backend))
+    let mut nr = route_new(frontend, "host", domain, backend)
+    if enable == 0 {
+        nr = route_dead_new(frontend, "host", domain, 503)
+    } else {
+        if str_eq(action, "redirect") {
+            nr = route_redirect_new(frontend, "host", domain, target, code)
+        } else {
+            if str_eq(action, "dead") {
+                nr = route_dead_new(frontend, "host", domain, code)
+            }
+        }
+    }
+    nr.websocket = websocket
+    return append(out, nr)
+}
+
+fn remove_host_locations(routes: []Route, frontend: string, domain: string) -> []Route {
+    let mut out = make([]Route, 0, len(routes))
+    for _, rt in range routes {
+        if str_eq(rt.frontend, frontend) {
+            if str_eq(rt.host_match, domain) {
+                continue
+            }
+        }
+        out = append(out, rt)
+    }
+    return out
+}
+
+fn upsert_location_route(routes: []Route, frontend: string, domain: string, path_prefix: string, backend: string, websocket: int) -> []Route {
+    let mut out = routes
+    for i, rt in range out {
+        if str_eq(rt.frontend, frontend) {
+            if str_eq(rt.host_match, domain) {
+                if str_eq(rt.value, path_prefix) {
+                    let mut r = out[i]
+                    r.backend = backend
+                    r.kind = "path_prefix"
+                    r.websocket = websocket
+                    r.action = ""
+                    out[i] = r
+                    return out
+                }
+            }
+        }
+    }
+    let mut nr = route_location_new(frontend, domain, path_prefix, backend)
+    nr.websocket = websocket
+    return append(out, nr)
+}
+
+fn remove_location_route(routes: []Route, frontend: string, domain: string, path_prefix: string) -> []Route {
+    let mut out = make([]Route, 0, len(routes))
+    for _, rt in range routes {
+        if str_eq(rt.frontend, frontend) {
+            if str_eq(rt.host_match, domain) {
+                if str_eq(rt.value, path_prefix) {
+                    continue
+                }
+            }
+        }
+        out = append(out, rt)
+    }
+    return out
 }
 
 fn ensure_backend(backends: []Backend, name: string) -> []Backend {
@@ -284,13 +407,50 @@ fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Serv
                 builder_write(b, ",")
             }
             first = 0
+            let mut enabled = 1
+            if str_eq(r.action, "dead") {
+                enabled = 0
+            }
             builder_write(b, "{\"frontend\":\"")
             builder_write(b, json_escape(r.frontend))
             builder_write(b, "\",\"domain\":\"")
             builder_write(b, json_escape(r.value))
             builder_write(b, "\",\"backend\":\"")
             builder_write(b, json_escape(r.backend))
-            builder_write(b, "\",\"servers\":[")
+            builder_write(b, "\",\"action\":\"")
+            builder_write(b, json_escape(r.action))
+            builder_write(b, "\",\"target\":\"")
+            builder_write(b, json_escape(r.target))
+            builder_write(b, "\",\"code\":")
+            builder_write(b, int_to_string(r.code))
+            builder_write(b, ",\"enabled\":")
+            builder_write(b, int_to_string(enabled))
+            builder_write(b, ",\"websocket\":")
+            builder_write(b, int_to_string(r.websocket))
+            builder_write(b, ",\"locations\":[")
+            let mut lf = 1
+            for _, loc in range routes {
+                if str_eq(loc.frontend, r.frontend) {
+                    if not str_eq(loc.kind, "host") {
+                        if str_eq(loc.host_match, r.value) {
+                            if lf == 0 {
+                                builder_write(b, ",")
+                            }
+                            lf = 0
+                            builder_write(b, "{\"path\":\"")
+                            builder_write(b, json_escape(loc.value))
+                            builder_write(b, "\",\"kind\":\"")
+                            builder_write(b, json_escape(loc.kind))
+                            builder_write(b, "\",\"backend\":\"")
+                            builder_write(b, json_escape(loc.backend))
+                            builder_write(b, "\",\"websocket\":")
+                            builder_write(b, int_to_string(loc.websocket))
+                            builder_write(b, "}")
+                        }
+                    }
+                }
+            }
+            builder_write(b, "],\"servers\":[")
             let mut sf = 1
             for si, s in range servers {
                 if str_eq(s.backend, r.backend) {
@@ -346,11 +506,90 @@ fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Serv
     return builder_string(b)
 }
 
+fn render_route_line(rt: Route) -> string {
+    let mut b = str_builder()
+    builder_write(b, "  route ")
+    builder_write(b, rt.kind)
+    if not str_eq(rt.kind, "default") {
+        builder_write(b, " ")
+        builder_write(b, rt.value)
+    }
+    if str_eq(rt.action, "redirect") {
+        builder_write(b, " redirect ")
+        builder_write(b, rt.target)
+        if rt.code > 0 {
+            builder_write(b, " ")
+            builder_write(b, int_to_string(rt.code))
+        }
+        builder_write(b, "\n")
+        return builder_string(b)
+    }
+    if str_eq(rt.action, "dead") {
+        builder_write(b, " dead")
+        if rt.code > 0 {
+            builder_write(b, " ")
+            builder_write(b, int_to_string(rt.code))
+        }
+        builder_write(b, "\n")
+        return builder_string(b)
+    }
+    // path location under host: path_prefix /api host example.com -> be
+    if not str_eq(rt.host_match, "") {
+        if not str_eq(rt.kind, "host") {
+            builder_write(b, " host ")
+            builder_write(b, rt.host_match)
+        }
+    }
+    builder_write(b, " -> ")
+    builder_write(b, rt.backend)
+    if rt.websocket == 0 {
+        builder_write(b, " websocket off")
+    }
+    builder_write(b, "\n")
+    return builder_string(b)
+}
+
 fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> string {
     let mut b = str_builder()
-    builder_write(b, "# Generated by Leba admin. Keep this file included from leba.conf.\n")
+    builder_write(b, "# Generated by Leba admin (0.12 host parity). Include from leba.conf.\n")
     for fi, fe in range frontends {
         let mut wrote = 0
+        // Locations first (path_prefix with host_match), then host routes.
+        for ri, rt in range routes {
+            if str_eq(rt.frontend, fe.name) {
+                let mut is_loc = 0
+                if not str_eq(rt.kind, "host") {
+                    if not str_eq(rt.kind, "default") {
+                        if not str_eq(rt.host_match, "") {
+                            is_loc = 1
+                        }
+                    }
+                }
+                if is_loc == 1 {
+                    if wrote == 0 {
+                        builder_write(b, f"\nfrontend {fe.name}\n")
+                        if not str_eq(fe.tls_cert, "") {
+                            builder_write(b, f"  tls_cert {fe.tls_cert}\n")
+                        }
+                        if not str_eq(fe.tls_key, "") {
+                            builder_write(b, f"  tls_key {fe.tls_key}\n")
+                        }
+                        for _, se in range fe.tls_sni {
+                            builder_write(b, f"  tls_sni {se.hostname} {se.cert} {se.key}\n")
+                        }
+                        if fe.redirect_https == 1 {
+                            if fe.redirect_code > 0 {
+                                builder_write(b, f"  redirect https {fe.redirect_code}\n")
+                            } else {
+                                builder_write(b, "  redirect https\n")
+                            }
+                        }
+                        wrote = 1
+                    }
+                    builder_write(b, render_route_line(rt))
+                }
+            }
+        }
         for ri, rt in range routes {
             if str_eq(rt.frontend, fe.name) {
                 if str_eq(rt.kind, "host") {
@@ -365,9 +604,16 @@ fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []
                         for _, se in range fe.tls_sni {
                             builder_write(b, f"  tls_sni {se.hostname} {se.cert} {se.key}\n")
                         }
+                        if fe.redirect_https == 1 {
+                            if fe.redirect_code > 0 {
+                                builder_write(b, f"  redirect https {fe.redirect_code}\n")
+                            } else {
+                                builder_write(b, "  redirect https\n")
+                            }
+                        }
                         wrote = 1
                     }
-                    builder_write(b, f"  route host {rt.value} -> {rt.backend}\n")
+                    builder_write(b, render_route_line(rt))
                 }
             }
         }
@@ -375,10 +621,8 @@ fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []
     for bi, be in range backends {
         let mut used = 0
         for ri2, rt in range routes {
-            if str_eq(rt.kind, "host") {
-                if str_eq(rt.backend, be.name) {
-                    used = 1
-                }
+            if str_eq(rt.backend, be.name) {
+                used = 1
             }
         }
         if used == 1 {
@@ -401,7 +645,7 @@ fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []
     return builder_string(b)
 }
 
-fn ensure_managed_include(config_path: string) -> int {
+fn ensure_managed_include_named(config_path: string, name: string, comment: string) -> int {
     if str_eq(config_path, "") {
         return 1
     }
@@ -409,7 +653,8 @@ fn ensure_managed_include(config_path: string) -> int {
     if str_eq(raw, "") {
         return 0
     }
-    if str_contains(raw, "include leba.vhosts.conf") {
+    let needle = "include " + name
+    if str_contains(raw, needle) {
         return 1
     }
     let mut b = str_builder()
@@ -417,11 +662,19 @@ fn ensure_managed_include(config_path: string) -> int {
     if not str_has_suffix(raw, "\n") {
         builder_write(b, "\n")
     }
-    builder_write(b, "\n# Admin-managed virtual hosts.\ninclude leba.vhosts.conf\n")
+    builder_write(b, "\n# ")
+    builder_write(b, comment)
+    builder_write(b, "\ninclude ")
+    builder_write(b, name)
+    builder_write(b, "\n")
     if write_file(config_path, builder_string(b)) == 0 {
         return 1
     }
     return 0
+}
+
+fn ensure_managed_include(config_path: string) -> int {
+    return ensure_managed_include_named(config_path, "leba.vhosts.conf", "Admin-managed virtual hosts.")
 }
 
 fn save_managed_vhosts(config_path: string, config_dir: string, frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> int {
@@ -431,6 +684,421 @@ fn save_managed_vhosts(config_path: string, config_dir: string, frontends: []Fro
         return 0
     }
     return ensure_managed_include(config_path)
+}
+
+// --- Access lists + app HTTP Basic (managed include) -----------------------
+
+fn render_managed_access(frontends: []Frontend, acls: []AclRule, auth_blob: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, "# Generated by Leba admin — access lists and app HTTP Basic.\n")
+    for _, fe in range frontends {
+        let mut need = 0
+        if not str_eq(fe.auth_basic_realm, "") {
+            need = 1
+        }
+        for _, a in range acls {
+            if str_eq(a.frontend, fe.name) {
+                need = 1
+            }
+        }
+        // auth_blob may contain lines for this frontend already; still open section if realm set or acls
+        if need == 0 {
+            continue
+        }
+        builder_write(b, f"\nfrontend {fe.name}\n")
+        if not str_eq(fe.auth_basic_realm, "") {
+            // Realm may contain spaces — quote when needed.
+            if str_contains(fe.auth_basic_realm, " ") {
+                builder_write(b, "  auth_basic \"")
+                builder_write(b, fe.auth_basic_realm)
+                builder_write(b, "\"\n")
+            } else {
+                builder_write(b, f"  auth_basic {fe.auth_basic_realm}\n")
+            }
+        }
+        for _, a in range acls {
+            if str_eq(a.frontend, fe.name) {
+                builder_write(b, f"  {a.action} {a.kind} {a.value}\n")
+            }
+        }
+    }
+    if not str_eq(auth_blob, "") {
+        builder_write(b, "\n# auth_user lines (passwords — protect this file)\n")
+        builder_write(b, auth_blob)
+        if not str_has_suffix(auth_blob, "\n") {
+            builder_write(b, "\n")
+        }
+    }
+    return builder_string(b)
+}
+
+fn read_managed_auth_blob(config_dir: string) -> string {
+    let full = resolve_servers_path(config_dir, "leba.access.conf")
+    let raw = read_file(full)
+    if str_eq(raw, "") {
+        return ""
+    }
+    let mut b = str_builder()
+    let lines = str_split(raw, "\n")
+    let mut cur_fe = ""
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_eq(t, "") {
+            continue
+        }
+        if str_has_prefix(t, "#") {
+            continue
+        }
+        let fields = str_fields(t)
+        if len(fields) == 0 {
+            continue
+        }
+        if str_eq(fields[0], "frontend") {
+            if len(fields) >= 2 {
+                cur_fe = fields[1]
+            }
+            continue
+        }
+        if str_eq(fields[0], "auth_user") {
+            if len(fields) >= 3 {
+                if not str_eq(cur_fe, "") {
+                    builder_write(b, "frontend ")
+                    builder_write(b, cur_fe)
+                    builder_write(b, "\n  auth_user ")
+                    builder_write(b, fields[1])
+                    builder_write(b, " ")
+                    builder_write(b, fields[2])
+                    if len(fields) >= 5 {
+                        if str_eq(fields[3], "host") {
+                            builder_write(b, " host ")
+                            builder_write(b, fields[4])
+                        }
+                    }
+                    builder_write(b, "\n")
+                }
+            }
+        }
+    }
+    return builder_string(b)
+}
+
+fn upsert_auth_user_blob_host(blob: string, frontend: string, host: string, user: string, pass: string) -> string {
+    // Store host-scoped lines as: FE|HOST|USER|PASS
+    let lines = str_split(blob, "\n")
+    let mut keep = make([]string, 0, 8)
+    let mut cur = ""
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_eq(t, "") {
+            continue
+        }
+        let fields = str_fields(t)
+        if len(fields) == 0 {
+            continue
+        }
+        if str_eq(fields[0], "frontend") {
+            if len(fields) >= 2 {
+                cur = fields[1]
+            }
+            continue
+        }
+        if str_eq(fields[0], "auth_user") {
+            if len(fields) >= 3 {
+                let mut h = ""
+                if len(fields) >= 5 {
+                    if str_eq(fields[3], "host") {
+                        h = fields[4]
+                    }
+                }
+                if str_eq(cur, frontend) {
+                    if str_eq(fields[1], user) {
+                        if str_eq(h, host) {
+                            continue
+                        }
+                    }
+                }
+                keep = append(keep, cur + " " + fields[1] + " " + fields[2] + " " + h)
+            }
+        }
+    }
+    keep = append(keep, frontend + " " + user + " " + pass + " " + host)
+    let mut out = str_builder()
+    let mut last_fe = ""
+    for _, row in range keep {
+        let parts = str_fields(row)
+        if len(parts) < 3 {
+            continue
+        }
+        if not str_eq(parts[0], last_fe) {
+            builder_write(out, "frontend ")
+            builder_write(out, parts[0])
+            builder_write(out, "\n")
+            last_fe = parts[0]
+        }
+        builder_write(out, "  auth_user ")
+        builder_write(out, parts[1])
+        builder_write(out, " ")
+        builder_write(out, parts[2])
+        if len(parts) >= 4 {
+            if not str_eq(parts[3], "") {
+                builder_write(out, " host ")
+                builder_write(out, parts[3])
+            }
+        }
+        builder_write(out, "\n")
+    }
+    return builder_string(out)
+}
+
+fn upsert_auth_user_blob(blob: string, frontend: string, user: string, pass: string) -> string {
+    // Re-render as frontend sections with auth_user lines only.
+    let mut keep = make([]string, 0, 8)
+    let lines = str_split(blob, "\n")
+    let mut cur = ""
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_eq(t, "") {
+            continue
+        }
+        let fields = str_fields(t)
+        if len(fields) == 0 {
+            continue
+        }
+        if str_eq(fields[0], "frontend") {
+            if len(fields) >= 2 {
+                cur = fields[1]
+            }
+            continue
+        }
+        if str_eq(fields[0], "auth_user") {
+            if len(fields) >= 3 {
+                if str_eq(cur, frontend) {
+                    if str_eq(fields[1], user) {
+                        continue
+                    }
+                }
+                keep = append(keep, cur + " " + fields[1] + " " + fields[2])
+            }
+        }
+    }
+    keep = append(keep, frontend + " " + user + " " + pass)
+    let mut out = str_builder()
+    let mut last_fe = ""
+    for _, row in range keep {
+        let parts = str_fields(row)
+        if len(parts) < 3 {
+            continue
+        }
+        if not str_eq(parts[0], last_fe) {
+            builder_write(out, "frontend ")
+            builder_write(out, parts[0])
+            builder_write(out, "\n")
+            last_fe = parts[0]
+        }
+        builder_write(out, "  auth_user ")
+        builder_write(out, parts[1])
+        builder_write(out, " ")
+        builder_write(out, parts[2])
+        builder_write(out, "\n")
+    }
+    return builder_string(out)
+}
+
+fn delete_auth_user_blob(blob: string, frontend: string, user: string) -> string {
+    let lines = str_split(blob, "\n")
+    let mut keep = make([]string, 0, 8)
+    let mut cur = ""
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_eq(t, "") {
+            continue
+        }
+        let fields = str_fields(t)
+        if len(fields) == 0 {
+            continue
+        }
+        if str_eq(fields[0], "frontend") {
+            if len(fields) >= 2 {
+                cur = fields[1]
+            }
+            continue
+        }
+        if str_eq(fields[0], "auth_user") {
+            if len(fields) >= 3 {
+                if str_eq(cur, frontend) {
+                    if str_eq(fields[1], user) {
+                        continue
+                    }
+                }
+                keep = append(keep, cur + " " + fields[1] + " " + fields[2])
+            }
+        }
+    }
+    let mut out = str_builder()
+    let mut last_fe = ""
+    for _, row in range keep {
+        let parts = str_fields(row)
+        if len(parts) < 3 {
+            continue
+        }
+        if not str_eq(parts[0], last_fe) {
+            builder_write(out, "frontend ")
+            builder_write(out, parts[0])
+            builder_write(out, "\n")
+            last_fe = parts[0]
+        }
+        builder_write(out, "  auth_user ")
+        builder_write(out, parts[1])
+        builder_write(out, " ")
+        builder_write(out, parts[2])
+        builder_write(out, "\n")
+    }
+    return builder_string(out)
+}
+
+fn save_managed_access(config_path: string, config_dir: string, frontends: []Frontend, acls: []AclRule, auth_blob: string) -> int {
+    let full = resolve_servers_path(config_dir, "leba.access.conf")
+    let ok = write_file(full, render_managed_access(frontends, acls, auth_blob))
+    if ok != 0 {
+        return 0
+    }
+    return ensure_managed_include_named(config_path, "leba.access.conf", "Admin-managed access lists and app HTTP Basic.")
+}
+
+fn acls_json(acls: []AclRule) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"access_lists\":[")
+    for i, a in range acls {
+        if i > 0 {
+            builder_write(b, ",")
+        }
+        builder_write(b, "{\"frontend\":\"")
+        builder_write(b, json_escape(a.frontend))
+        builder_write(b, "\",\"action\":\"")
+        builder_write(b, json_escape(a.action))
+        builder_write(b, "\",\"kind\":\"")
+        builder_write(b, json_escape(a.kind))
+        builder_write(b, "\",\"value\":\"")
+        builder_write(b, json_escape(a.value))
+        builder_write(b, "\"}")
+    }
+    builder_write(b, "],\"managed_file\":\"leba.access.conf\"}\n")
+    return builder_string(b)
+}
+
+fn http_auth_json(frontends: []Frontend, auth_blob: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"http_auth\":[")
+    let mut first = 1
+    for _, fe in range frontends {
+        if not str_eq(fe.auth_basic_realm, "") {
+            if first == 0 {
+                builder_write(b, ",")
+            }
+            first = 0
+            builder_write(b, "{\"frontend\":\"")
+            builder_write(b, json_escape(fe.name))
+            builder_write(b, "\",\"realm\":\"")
+            builder_write(b, json_escape(fe.auth_basic_realm))
+            builder_write(b, "\",\"users\":[")
+            let mut uf = 1
+            let lines = str_split(auth_blob, "\n")
+            let mut cur = ""
+            for _, line in range lines {
+                let t = str_trim_space(line)
+                let fields = str_fields(t)
+                if len(fields) == 0 {
+                    continue
+                }
+                if str_eq(fields[0], "frontend") {
+                    if len(fields) >= 2 {
+                        cur = fields[1]
+                    }
+                    continue
+                }
+                if str_eq(fields[0], "auth_user") {
+                    if str_eq(cur, fe.name) {
+                        if len(fields) >= 2 {
+                            if uf == 0 {
+                                builder_write(b, ",")
+                            }
+                            uf = 0
+                            builder_write(b, "\"")
+                            builder_write(b, json_escape(fields[1]))
+                            builder_write(b, "\"")
+                        }
+                    }
+                }
+            }
+            builder_write(b, "]}")
+        }
+    }
+    builder_write(b, "],\"managed_file\":\"leba.access.conf\",\"note\":\"passwords never returned\"}\n")
+    return builder_string(b)
+}
+
+fn acl_upsert(acls: []AclRule, frontend: string, action: string, kind: string, value: string) -> []AclRule {
+    for _, a in range acls {
+        if str_eq(a.frontend, frontend) {
+            if str_eq(a.action, action) {
+                if str_eq(a.kind, kind) {
+                    if str_eq(a.value, value) {
+                        return acls
+                    }
+                }
+            }
+        }
+    }
+    return append(acls, acl_new(frontend, action, kind, value))
+}
+
+fn acl_remove(acls: []AclRule, frontend: string, action: string, kind: string, value: string) -> []AclRule {
+    let mut out = make([]AclRule, 0, len(acls))
+    for _, a in range acls {
+        if str_eq(a.frontend, frontend) {
+            if str_eq(a.action, action) {
+                if str_eq(a.kind, kind) {
+                    if str_eq(a.value, value) {
+                        continue
+                    }
+                }
+            }
+        }
+        out = append(out, a)
+    }
+    return out
+}
+
+fn valid_acl_action(s: string) -> int {
+    if str_eq(s, "allow") {
+        return 1
+    }
+    if str_eq(s, "deny") {
+        return 1
+    }
+    return 0
+}
+
+fn valid_acl_kind(s: string) -> int {
+    if str_eq(s, "src") {
+        return 1
+    }
+    if str_eq(s, "path") {
+        return 1
+    }
+    if str_eq(s, "path_prefix") {
+        return 1
+    }
+    if str_eq(s, "host") {
+        return 1
+    }
+    if str_eq(s, "method") {
+        return 1
+    }
+    if str_eq(s, "header") {
+        return 1
+    }
+    return 0
 }
 
 fn find_server_idx(servers: []Server, backend: string, name: string) -> int {
@@ -474,17 +1142,21 @@ fn servers_json(servers: []Server) -> string {
 }
 
 fn admin_help_json() -> string {
-    return "{\"endpoints\":[\"/admin/servers\",\"/admin/reload-servers\",\"/admin/tls-reload\",\"/admin/vhosts\",\"/admin/vhost-create\",\"/admin/proxy-hosts\",\"/admin/proxy-host\",\"/admin/proxy-host-delete\",\"/admin/drain/{backend}/{server}\",\"/admin/ready/{backend}/{server}\",\"/admin/disable/{backend}/{server}\",\"/admin/enable/{backend}/{server}\",\"/readyz\",\"/livez\",\"/health\",\"/stats\",\"/metrics\"],\"note\":\"Use POST for mutating admin routes\"}\n"
+    return "{\"endpoints\":[\"/admin/servers\",\"/admin/reload-servers\",\"/admin/tls-reload\",\"/admin/vhosts\",\"/admin/vhost-create\",\"/admin/proxy-hosts\",\"/admin/proxy-host\",\"/admin/proxy-host-delete\",\"/admin/certificates\",\"/admin/certificates/issue\",\"/admin/certificates/renew\",\"/admin/access-lists\",\"/admin/access-list\",\"/admin/access-list-delete\",\"/admin/http-auth\",\"/admin/http-auth-delete\",\"/admin/http-auth-realm\",\"/admin/drain/{backend}/{server}\",\"/admin/ready/{backend}/{server}\",\"/admin/disable/{backend}/{server}\",\"/admin/enable/{backend}/{server}\",\"/readyz\",\"/livez\",\"/health\",\"/stats\",\"/metrics\"],\"note\":\"Use POST for mutating admin routes\"}\n"
 }
 
 fn remove_host_route(routes: []Route, frontend: string, domain: string) -> []Route {
     let mut out = make([]Route, 0, len(routes))
     for _, rt in range routes {
-        if str_eq(rt.kind, "host") {
-            if str_eq(rt.frontend, frontend) {
+        if str_eq(rt.frontend, frontend) {
+            if str_eq(rt.kind, "host") {
                 if str_eq(rt.value, domain) {
                     continue
                 }
+            }
+            // Drop locations under this host.
+            if str_eq(rt.host_match, domain) {
+                continue
             }
         }
         out = append(out, rt)
@@ -679,21 +1351,27 @@ fn handle_admin(
         }
     }
 
+    // Mutate the shared server table in place. Do not reassign the []Server
+    // local from a call result inside match arms — Mako SAFE free of the
+    // reassigned value at arm scope exit frees the live table (use-after-free).
     let mut out = servers
+    let mut s = out[idx]
     match p2 {
         "drain" => {
-            out = set_server_drain(out, idx, 1)
+            s.drain = 1
         }
         "ready" => {
-            out = set_server_drain(out, idx, 0)
-            out = set_server_alive(out, idx, 1)
+            s.drain = 0
+            s.alive = 1
+            s.fails = 0
         }
         "disable" => {
-            out = set_server_alive(out, idx, 0)
+            s.alive = 0
         }
         "enable" => {
-            out = set_server_alive(out, idx, 1)
-            out = set_server_drain(out, idx, 0)
+            s.alive = 1
+            s.fails = 0
+            s.drain = 0
         }
         _ => {
             log_warn_event("admin_unknown_action", f"action={p2} backend={p3} server={p4} status=404")
@@ -705,6 +1383,7 @@ fn handle_admin(
             }
         }
     }
+    out[idx] = s
 
     log_info_event("admin_action", f"action={p2} backend={p3} server={p4} status=200")
 
@@ -960,24 +1639,71 @@ fn handle_admin_state(
         let addr = query_value(full_path, "addr")
         let cert = query_value(full_path, "cert")
         let key = query_value(full_path, "key")
+        let force_ssl = query_value(full_path, "force_ssl")
+        let host_action = query_value(full_path, "action")
+        let target = query_value(full_path, "target")
+        let code_s = query_value(full_path, "code")
+        let ws_s = query_value(full_path, "websocket")
+        let enable_s = query_value(full_path, "enable")
         if valid_admin_name(frontend) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_domain(domain) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
-        if valid_admin_name(backend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        let mut enable = 1
+        if str_eq(enable_s, "0") or str_eq(enable_s, "false") or str_eq(enable_s, "off") {
+            enable = 0
         }
-        if valid_admin_name(server) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        // Preserve existing websocket when not specified.
+        let mut websocket = 1
+        let mut host_exists = 0
+        for _, rt in range routes {
+            if str_eq(rt.frontend, frontend) {
+                if str_eq(rt.kind, "host") {
+                    if str_eq(rt.value, domain) {
+                        host_exists = 1
+                        websocket = rt.websocket
+                        if str_eq(backend, "") {
+                            // keep
+                        }
+                    }
+                }
+            }
         }
-        let hp = parse_host_port(addr)
-        if str_eq(hp.host, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server address\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        if str_eq(ws_s, "0") or str_eq(ws_s, "off") or str_eq(ws_s, "false") {
+            websocket = 0
         }
-        if to_int(hp.port) <= 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server port\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        if str_eq(ws_s, "1") or str_eq(ws_s, "on") or str_eq(ws_s, "true") {
+            websocket = 1
+        }
+        let mut code = to_int(code_s)
+        // Upstream only when creating a new proxy host or explicitly providing server+addr.
+        let mut need_upstream = 0
+        if not str_eq(server, "") and not str_eq(addr, "") and not str_eq(server, "_keep") {
+            need_upstream = 1
+        }
+        if host_exists == 0 {
+            if str_eq(host_action, "redirect") or str_eq(host_action, "dead") or enable == 0 {
+                need_upstream = 0
+            } else {
+                need_upstream = 1
+            }
+        }
+        if need_upstream == 1 {
+            if valid_admin_name(backend) == 0 {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+            if valid_admin_name(server) == 0 {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+            let hp = parse_host_port(addr)
+            if str_eq(hp.host, "") {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server address\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+            if to_int(hp.port) <= 0 {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server port\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
         }
         if valid_abs_path(cert) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
@@ -985,14 +1711,17 @@ fn handle_admin_state(
         if valid_abs_path(key) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
+        if str_eq(host_action, "redirect") {
+            if str_eq(target, "") {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"redirect target required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+        }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
             return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found; create a listener in leba.conf and restart\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
-        // Per-domain cert → multi-cert SNI (Mako tls_server_sni_add). Also set default
-        // cert when the frontend has none so TLS can be enabled on first proxy-host.
         if not str_eq(cert, "") {
             if not str_eq(key, "") {
                 fe = frontend_upsert_tls_sni(fe, domain, cert, key)
@@ -1002,10 +1731,23 @@ fn handle_admin_state(
                 }
             }
         }
+        if str_eq(force_ssl, "1") {
+            fe.redirect_https = 1
+            if fe.redirect_code == 0 {
+                fe.redirect_code = 301
+            }
+        }
+        if str_eq(force_ssl, "0") {
+            fe.redirect_https = 0
+        }
         out_frontends[fi] = fe
-        let out_backends = ensure_backend(backends, backend)
-        let out_routes = upsert_host_route(routes, frontend, domain, backend)
-        let out_servers = upsert_backend_server(servers, backend, server, addr)
+        let mut out_backends = backends
+        let mut out_servers = servers
+        if need_upstream == 1 {
+            out_backends = ensure_backend(backends, backend)
+            out_servers = upsert_backend_server(servers, backend, server, addr)
+        }
+        let out_routes = upsert_host_route_full(routes, frontend, domain, backend, host_action, target, code, websocket, enable)
         if save_managed_vhosts(config_path, config_dir, out_frontends, out_backends, out_servers, out_routes) == 0 {
             return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
@@ -1016,11 +1758,19 @@ fn handle_admin_state(
         builder_write(body, json_escape(domain))
         builder_write(body, "\",\"backend\":\"")
         builder_write(body, json_escape(backend))
-        builder_write(body, "\",\"server\":\"")
-        builder_write(body, json_escape(server))
-        builder_write(body, "\",\"addr\":\"")
-        builder_write(body, json_escape(addr))
-        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"tls_reload\":")
+        builder_write(body, "\",\"enabled\":")
+        builder_write(body, int_to_string(enable))
+        builder_write(body, ",\"websocket\":")
+        builder_write(body, int_to_string(websocket))
+        builder_write(body, ",\"host_action\":\"")
+        builder_write(body, json_escape(host_action))
+        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"force_ssl\":")
+        if fe.redirect_https == 1 {
+            builder_write(body, "true")
+        } else {
+            builder_write(body, "false")
+        }
+        builder_write(body, ",\"tls_reload\":")
         if not str_eq(cert, "") {
             if not str_eq(key, "") {
                 builder_write(body, "true")
@@ -1050,6 +1800,520 @@ fn handle_admin_state(
             frontends: out_frontends,
             backends: out_backends,
             routes: out_routes,
+            acls: acls
+        }
+    }
+
+    // POST /admin/proxy-host-location — add/update path location under a host
+    if str_eq(path, "/admin/proxy-host-location") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let path_p = query_value(full_path, "path")
+        let backend = query_value(full_path, "backend")
+        let server = query_value(full_path, "server")
+        let addr = query_value(full_path, "addr")
+        let ws_s = query_value(full_path, "websocket")
+        if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_eq(path_p, "") or not str_has_prefix(path_p, "/") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"path must start with /\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_admin_name(backend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut websocket = 1
+        if str_eq(ws_s, "0") or str_eq(ws_s, "off") {
+            websocket = 0
+        }
+        let mut out_backends = backends
+        let mut out_servers = servers
+        if not str_eq(server, "") and not str_eq(addr, "") {
+            if valid_admin_name(server) == 0 {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+            out_backends = ensure_backend(backends, backend)
+            out_servers = upsert_backend_server(servers, backend, server, addr)
+        } else {
+            out_backends = ensure_backend(backends, backend)
+        }
+        let out_routes = upsert_location_route(routes, frontend, domain, path_p, backend, websocket)
+        if save_managed_vhosts(config_path, config_dir, frontends, out_backends, out_servers, out_routes) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=proxy-host-location status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"proxy-host-location\",\"managed_file\":\"leba.vhosts.conf\"}\n",
+            servers: out_servers,
+            frontends: frontends,
+            backends: out_backends,
+            routes: out_routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/proxy-host-location-delete") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let path_p = query_value(full_path, "path")
+        let out_routes = remove_location_route(routes, frontend, domain, path_p)
+        if len(out_routes) == len(routes) {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"location not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if save_managed_vhosts(config_path, config_dir, frontends, backends, servers, out_routes) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"proxy-host-location-delete\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: out_routes,
+            acls: acls
+        }
+    }
+
+    // Host-scoped access list: deny/allow host_src "domain|ip"
+    if str_eq(path, "/admin/host-access-list") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let action = query_value(full_path, "action")
+        let value = query_value(full_path, "value")
+        if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_acl_action(action) == 0 or str_eq(value, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action allow|deny and value (IP prefix) required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let compound = domain + "|" + value
+        let out_acls = acl_upsert(acls, frontend, action, "host_src", compound)
+        let auth_blob = read_managed_auth_blob(config_dir)
+        if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"host-access-list\",\"kind\":\"host_src\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: out_acls
+        }
+    }
+
+    if str_eq(path, "/admin/host-access-list-delete") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let action = query_value(full_path, "action")
+        let value = query_value(full_path, "value")
+        let compound = domain + "|" + value
+        let out_acls = acl_remove(acls, frontend, action, "host_src", compound)
+        let auth_blob = read_managed_auth_blob(config_dir)
+        if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"host-access-list-delete\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: out_acls
+        }
+    }
+
+    // Host-scoped basic auth user: auth_user with host=
+    if str_eq(path, "/admin/host-http-auth") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let domain = query_value(full_path, "domain")
+        let user = query_value(full_path, "user")
+        let pass = query_value(full_path, "pass")
+        if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 or valid_admin_name(user) == 0 or str_eq(pass, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"frontend, domain, user, pass required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        // Encode host-scoped users as: frontend HOST\n  auth_user U P host DOMAIN
+        let blob0 = read_managed_auth_blob(config_dir)
+        let blob = upsert_auth_user_blob_host(blob0, frontend, domain, user, pass)
+        if save_managed_access(config_path, config_dir, frontends, acls, blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"host-http-auth\",\"full_reload\":true}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    // --- Certificates (list / issue via lego / renew) -----------------------
+    if str_eq(path, "/admin/certificates") {
+        if not str_eq(method, "GET") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: acme_list_json(frontends, settings),
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/certificates/issue") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let domain = query_value(full_path, "domain")
+        let frontend = query_value(full_path, "frontend")
+        let email = query_value(full_path, "email")
+        let attach = query_value(full_path, "attach")
+        if valid_domain(domain) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let fi = find_frontend_idx_admin(frontends, frontend)
+        if fi < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let challenge = query_value(full_path, "challenge")
+        let dns_provider = query_value(full_path, "dns_provider")
+        let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
+        let result = acme_issue_challenge(settings, domain, email, challenge, dns_provider)
+        if result.ok == 0 {
+            let st = acme_preflight_http_status(result.error)
+            if str_has_prefix(result.error, "code=missing_dns_provider") {
+                // ensure 400
+            }
+            return AdminStateResult {
+                handled: 1,
+                status: st,
+                body: acme_error_json(result.error),
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        let mut out_frontends = frontends
+        let mut do_attach = 1
+        if str_eq(attach, "0") {
+            do_attach = 0
+        }
+        if do_attach == 1 {
+            let mut fe = out_frontends[fi]
+            fe = frontend_upsert_tls_sni(fe, domain, result.cert, result.key)
+            if str_eq(fe.tls_cert, "") {
+                fe.tls_cert = result.cert
+                fe.tls_key = result.key
+            }
+            out_frontends[fi] = fe
+            if save_managed_vhosts(config_path, config_dir, out_frontends, backends, servers, routes) == 0 {
+                return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"issued but failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+        }
+        let mut body = str_builder()
+        builder_write(body, "{\"ok\":true,\"action\":\"certificates-issue\",\"domain\":\"")
+        builder_write(body, json_escape(domain))
+        builder_write(body, "\",\"cert\":\"")
+        builder_write(body, json_escape(result.cert))
+        builder_write(body, "\",\"key\":\"")
+        builder_write(body, json_escape(result.key))
+        builder_write(body, "\",\"attached\":")
+        if do_attach == 1 {
+            builder_write(body, "true")
+        } else {
+            builder_write(body, "false")
+        }
+        builder_write(body, ",\"tls_reload\":true}\n")
+        log_info_event("admin_action", "action=certificates-issue status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: builder_string(body),
+            servers: servers,
+            frontends: out_frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/certificates/renew") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
+        let result = acme_renew(settings)
+        if result.ok == 0 {
+            let st = acme_preflight_http_status(result.error)
+            return AdminStateResult {
+                handled: 1,
+                status: st,
+                body: acme_error_json(result.error),
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        log_info_event("admin_action", "action=certificates-renew status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"certificates-renew\",\"tls_reload\":true}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    // --- Access lists ------------------------------------------------------
+    if str_eq(path, "/admin/access-lists") {
+        if not str_eq(method, "GET") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: acls_json(acls),
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/access-list") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let action = query_value(full_path, "action")
+        let kind = query_value(full_path, "kind")
+        let value = query_value(full_path, "value")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_acl_action(action) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action must be allow or deny\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_acl_kind(kind) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid kind\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_eq(value, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"value required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_contains(value, "\n") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid value\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if find_frontend_idx_admin(frontends, frontend) < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let out_acls = acl_upsert(acls, frontend, action, kind, value)
+        let auth_blob = read_managed_auth_blob(config_dir)
+        if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=access-list status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"access-list\",\"managed_file\":\"leba.access.conf\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: out_acls
+        }
+    }
+
+    if str_eq(path, "/admin/access-list-delete") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let action = query_value(full_path, "action")
+        let kind = query_value(full_path, "kind")
+        let value = query_value(full_path, "value")
+        let out_acls = acl_remove(acls, frontend, action, kind, value)
+        if len(out_acls) == len(acls) {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"rule not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let auth_blob = read_managed_auth_blob(config_dir)
+        if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=access-list-delete status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"access-list-delete\"}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: out_acls
+        }
+    }
+
+    // --- App HTTP Basic (managed + full_reload for app_auth_users) ----------
+    if str_eq(path, "/admin/http-auth") {
+        if str_eq(method, "GET") {
+            let blob = read_managed_auth_blob(config_dir)
+            return AdminStateResult {
+                handled: 1,
+                status: 200,
+                body: http_auth_json(frontends, blob),
+                servers: servers,
+                frontends: frontends,
+                backends: backends,
+                routes: routes,
+                acls: acls
+            }
+        }
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let user = query_value(full_path, "user")
+        let pass = query_value(full_path, "pass")
+        let realm = query_value(full_path, "realm")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if valid_admin_name(user) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid user\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_eq(pass, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_contains(pass, " ") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass must not contain spaces\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let fi = find_frontend_idx_admin(frontends, frontend)
+        if fi < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut out_frontends = frontends
+        let mut fe = out_frontends[fi]
+        if not str_eq(realm, "") {
+            fe.auth_basic_realm = realm
+        } else {
+            if str_eq(fe.auth_basic_realm, "") {
+                fe.auth_basic_realm = "Restricted"
+            }
+        }
+        out_frontends[fi] = fe
+        let blob0 = read_managed_auth_blob(config_dir)
+        let blob = upsert_auth_user_blob(blob0, frontend, user, pass)
+        if save_managed_access(config_path, config_dir, out_frontends, acls, blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=http-auth status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"http-auth\",\"full_reload\":true,\"note\":\"full config reload applies app auth users\"}\n",
+            servers: servers,
+            frontends: out_frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/http-auth-delete") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let user = query_value(full_path, "user")
+        let blob0 = read_managed_auth_blob(config_dir)
+        let blob = delete_auth_user_blob(blob0, frontend, user)
+        if save_managed_access(config_path, config_dir, frontends, acls, blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=http-auth-delete status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"http-auth-delete\",\"full_reload\":true}\n",
+            servers: servers,
+            frontends: frontends,
+            backends: backends,
+            routes: routes,
+            acls: acls
+        }
+    }
+
+    if str_eq(path, "/admin/http-auth-realm") {
+        if not str_eq(method, "POST") {
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let frontend = query_value(full_path, "frontend")
+        let realm = query_value(full_path, "realm")
+        if valid_admin_name(frontend) == 0 {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let fi = find_frontend_idx_admin(frontends, frontend)
+        if fi < 0 {
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        let mut out_frontends = frontends
+        let mut fe = out_frontends[fi]
+        fe.auth_basic_realm = realm
+        out_frontends[fi] = fe
+        let blob = read_managed_auth_blob(config_dir)
+        if save_managed_access(config_path, config_dir, out_frontends, acls, blob) == 0 {
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        log_info_event("admin_action", "action=http-auth-realm status=200")
+        return AdminStateResult {
+            handled: 1,
+            status: 200,
+            body: "{\"ok\":true,\"action\":\"http-auth-realm\",\"full_reload\":true}\n",
+            servers: servers,
+            frontends: out_frontends,
+            backends: backends,
+            routes: routes,
             acls: acls
         }
     }

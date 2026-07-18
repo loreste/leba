@@ -96,7 +96,17 @@ fn route_json(r: Route) -> string {
     builder_write(b, json_escape(r.value))
     builder_write(b, "\",\"backend\":\"")
     builder_write(b, json_escape(r.backend))
-    builder_write(b, "\"}")
+    builder_write(b, "\",\"action\":\"")
+    builder_write(b, json_escape(r.action))
+    builder_write(b, "\",\"target\":\"")
+    builder_write(b, json_escape(r.target))
+    builder_write(b, "\",\"code\":")
+    builder_write(b, int_to_string(r.code))
+    builder_write(b, ",\"host_match\":\"")
+    builder_write(b, json_escape(r.host_match))
+    builder_write(b, "\",\"websocket\":")
+    builder_write(b, int_to_string(r.websocket))
+    builder_write(b, "}")
     return builder_string(b)
 }
 
@@ -308,7 +318,7 @@ fn metrics_text(
     prom_line0(b, "leba_uptime_ms", uptime)
     builder_write(b, "# HELP leba_info Build/version info (always 1).\n")
     builder_write(b, "# TYPE leba_info gauge\n")
-    builder_write(b, "leba_info{version=\"0.10.0\"} 1\n")
+    builder_write(b, "leba_info{version=\"0.12.0\"} 1\n")
     builder_write(b, "# HELP leba_requests_total Total proxied requests.\n")
     builder_write(b, "# TYPE leba_requests_total counter\n")
     prom_line0(b, "leba_requests_total", st.total_req)
@@ -456,7 +466,7 @@ fn stats_json(
     let mut b = str_builder()
     builder_write(b, "{")
     builder_write(b, "\"name\":\"leba\",")
-    builder_write(b, "\"version\":\"0.10.0\",")
+    builder_write(b, "\"version\":\"0.12.0\",")
     builder_write(b, "\"uptime_ms\":")
     builder_write(b, int_to_string(uptime))
     builder_write(b, ",\"total_req\":")
@@ -756,6 +766,30 @@ fn admin_role_allows(role: string, need: string) -> int {
 }
 
 fn admin_path_required_role(method: string, path: string) -> string {
+    // Admin-only: ACME issue/renew and app auth credential writes.
+    if str_eq(method, "POST") {
+        if str_eq(path, "/admin/certificates/issue") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/certificates/renew") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/http-auth") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/http-auth-delete") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/http-auth-realm") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/host-http-auth") {
+            return "admin"
+        }
+        if str_eq(path, "/admin/reload") {
+            return "admin"
+        }
+    }
     if str_eq(path, "/admin/reload-servers") {
         return "operator"
     }
@@ -811,6 +845,42 @@ fn admin_path_mutates_state(path: string) -> int {
         return 1
     }
     if str_eq(path, "/admin/reload") {
+        return 1
+    }
+    if str_eq(path, "/admin/certificates/issue") {
+        return 1
+    }
+    if str_eq(path, "/admin/certificates/renew") {
+        return 1
+    }
+    if str_eq(path, "/admin/access-list") {
+        return 1
+    }
+    if str_eq(path, "/admin/access-list-delete") {
+        return 1
+    }
+    if str_eq(path, "/admin/http-auth") {
+        return 1
+    }
+    if str_eq(path, "/admin/http-auth-delete") {
+        return 1
+    }
+    if str_eq(path, "/admin/http-auth-realm") {
+        return 1
+    }
+    if str_eq(path, "/admin/proxy-host-location") {
+        return 1
+    }
+    if str_eq(path, "/admin/proxy-host-location-delete") {
+        return 1
+    }
+    if str_eq(path, "/admin/host-access-list") {
+        return 1
+    }
+    if str_eq(path, "/admin/host-access-list-delete") {
+        return 1
+    }
+    if str_eq(path, "/admin/host-http-auth") {
         return 1
     }
     return 0
@@ -1326,8 +1396,23 @@ fn handle_stats_tls_conn(
                 }
             }
         }
+        if str_eq(ponly, "/admin/certificates/issue") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/certificates/renew") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        if ar.status == 200 {
+            if str_contains(ar.body, "\"full_reload\":true") {
                 scr.full_reload = 1
             }
         }
@@ -1472,8 +1557,23 @@ fn handle_stats_raw_conn(
                 }
             }
         }
+        if str_eq(ponly, "/admin/certificates/issue") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/certificates/renew") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        if ar.status == 200 {
+            if str_contains(ar.body, "\"full_reload\":true") {
                 scr.full_reload = 1
             }
         }
@@ -1630,8 +1730,23 @@ fn handle_stats_conn(
                 }
             }
         }
+        if str_eq(ponly, "/admin/certificates/issue") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/certificates/renew") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
+                scr.full_reload = 1
+            }
+        }
+        if ar.status == 200 {
+            if str_contains(ar.body, "\"full_reload\":true") {
                 scr.full_reload = 1
             }
         }

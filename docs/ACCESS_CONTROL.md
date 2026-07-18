@@ -58,6 +58,13 @@ Stats frontend uses `admin_users_file` / session cookies / RBAC. Do not reuse
 
 | NPM concept | Leba |
 |-------------|------|
-| Access List (IP) | `allow` / `deny` `src` ACLs |
-| Access List (HTTP Basic) | `auth_basic` + `auth_user` |
+| Access List (IP) | `allow` / `deny` `src` ACLs — also **Access Lists** UI / `/admin/access-list` |
+| Access List (HTTP Basic) | `auth_basic` + `auth_user` — also **Access Lists** UI / `/admin/http-auth*` |
 | Proxy host | `POST /admin/proxy-host` or `route host` |
+| SSL Certificates | **Certificates** UI / `/admin/certificates*` + lego |
+| Force SSL | `force_ssl=1` on proxy-host or `redirect https` |
+
+Managed files written by the admin UI:
+
+- `leba.vhosts.conf` — host routes, backends, SNI certs, force SSL
+- `leba.access.conf` — ACL rules and app Basic users (include from `leba.conf`)

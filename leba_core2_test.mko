@@ -9,6 +9,7 @@ pull . "./src/rate.mko"
 pull . "./src/trace.mko"
 pull . "./src/doctor.mko"
 pull . "./src/admin.mko"
+pull . "./src/acme.mko"
 pull . "./src/proxy.mko"
 pull . "./src/waf.mko"
 pull . "./src/runtime.mko"
@@ -1260,13 +1261,13 @@ fn TestAppBasicAuthParseAndCheck() {
     assert_eq(w.ok, 1)
     assert_eq_str(w.frontends[0].auth_basic_realm, "My App")
     assert_eq(len(w.app_auth_users), 2)
-    assert_eq(app_basic_auth_ok("", "web", "My App", w.app_auth_users), 0)
+    assert_eq(app_basic_auth_ok("", "web", "My App", w.app_auth_users, "h"), 0)
     let good = "Basic " + base64_encode("alice:secret")
-    assert_eq(app_basic_auth_ok(good, "web", "My App", w.app_auth_users), 1)
+    assert_eq(app_basic_auth_ok(good, "web", "My App", w.app_auth_users, "h"), 1)
     let bad = "Basic " + base64_encode("alice:wrong")
-    assert_eq(app_basic_auth_ok(bad, "web", "My App", w.app_auth_users), 0)
+    assert_eq(app_basic_auth_ok(bad, "web", "My App", w.app_auth_users, "h"), 0)
     // No realm → always ok
-    assert_eq(app_basic_auth_ok("", "web", "", w.app_auth_users), 1)
+    assert_eq(app_basic_auth_ok("", "web", "", w.app_auth_users, "h"), 1)
 }
 
 fn TestAcmeWebrootParseAndInherit() {

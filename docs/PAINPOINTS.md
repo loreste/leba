@@ -106,8 +106,10 @@ configured runtime state has eligible upstream capacity.
 - [x] Concurrent smoke test (`make test-concurrent`).
 - [x] ACME HTTP-01 webroot serve.
 - [x] Proxy host create/delete API + admin UI.
+- [x] Certificates + Access Lists admin UI (NPM control plane).
+- [x] Access list + app HTTP Basic CRUD API (`leba.access.conf`).
 - [x] App HTTP Basic (`auth_basic` / `auth_user`).
-- [ ] Built-in ACME client (external lego/acme.sh + hook for now).
+- [x] ACME orchestrator via external lego (Admin UI issue/renew + `/admin/certificates/*`).
 - [x] Config reload + HTTP/TCP/UDP/H3/stats/peers rebind + OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
 - [x] Local stick tables (`stick on src`) including HTTP/3 (XFF or cookie).
@@ -119,4 +121,5 @@ configured runtime state has eligible upstream capacity.
 - [ ] More exhaustive concurrent connection tests.
 - [x] Upstream forwarding of validated trace headers.
 
-Full competitive plan: [`COMPETITIVE_ARCHITECTURE.md`](COMPETITIVE_ARCHITECTURE.md).
+Product roadmap: [`ROADMAP.md`](ROADMAP.md).
+Full competitive design depth: [`COMPETITIVE_ARCHITECTURE.md`](COMPETITIVE_ARCHITECTURE.md).

@@ -111,6 +111,10 @@ struct Route {
     target: string
     // HTTP status for redirect/dead (0 = default 301 / 404).
     code: int
+    // If non-empty, require Host match in addition to kind (path locations under a host).
+    host_match: string
+    // 1 = allow WebSocket upgrade (default); 0 = 403 on Upgrade: websocket for this route.
+    websocket: int
 }
 
 struct AclRule {
@@ -134,11 +138,13 @@ struct AdminUser {
     role: string
 }
 
-// Per-frontend HTTP Basic credentials for proxied applications (data plane).
+// Per-frontend (optional per-host) HTTP Basic credentials for proxied applications.
 struct AppAuthUser {
     frontend: string
     user: string
     pass: string
+    // Empty = all hosts on this frontend; non-empty = only this Host.
+    host: string
 }
 
 struct UdpFlow {
@@ -243,6 +249,12 @@ struct Defaults {
     workers: int
     request_body_limit_bytes: int
     acme_webroot: string
+    // lego --path storage (certificates + account).
+    acme_storage: string
+    // Contact email for ACME registration (or LEBA_ACME_EMAIL).
+    acme_email: string
+    // ACME helper binary name or absolute path (default "lego", or LEBA_ACME_HELPER).
+    acme_helper: string
 }
 
 struct LiveStats {
@@ -278,7 +290,10 @@ fn defaults_new() -> Defaults {
         retries: 1,
         workers: 32,
         request_body_limit_bytes: 1048576,
-        acme_webroot: ""
+        acme_webroot: "",
+        acme_storage: "",
+        acme_email: "",
+        acme_helper: "lego"
     }
 }
 
@@ -527,7 +542,17 @@ fn app_auth_user_new(frontend: string, user: string, pass: string) -> AppAuthUse
     return AppAuthUser {
         frontend: frontend,
         user: user,
-        pass: pass
+        pass: pass,
+        host: ""
+    }
+}
+
+fn app_auth_user_host_new(frontend: string, host: string, user: string, pass: string) -> AppAuthUser {
+    return AppAuthUser {
+        frontend: frontend,
+        user: user,
+        pass: pass,
+        host: host
     }
 }
 
@@ -539,7 +564,23 @@ fn route_new(frontend: string, kind: string, value: string, backend: string) -> 
         backend: backend,
         action: "",
         target: "",
-        code: 0
+        code: 0,
+        host_match: "",
+        websocket: 1
+    }
+}
+
+fn route_location_new(frontend: string, host: string, path_prefix: string, backend: string) -> Route {
+    return Route {
+        frontend: frontend,
+        kind: "path_prefix",
+        value: path_prefix,
+        backend: backend,
+        action: "",
+        target: "",
+        code: 0,
+        host_match: host,
+        websocket: 1
     }
 }
 
@@ -555,7 +596,9 @@ fn route_redirect_new(frontend: string, kind: string, value: string, target: str
         backend: "",
         action: "redirect",
         target: target,
-        code: c
+        code: c,
+        host_match: "",
+        websocket: 1
     }
 }
 
@@ -571,7 +614,9 @@ fn route_dead_new(frontend: string, kind: string, value: string, code: int) -> R
         backend: "",
         action: "dead",
         target: "",
-        code: c
+        code: c,
+        host_match: "",
+        websocket: 1
     }
 }
 

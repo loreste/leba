@@ -8,6 +8,7 @@ pull . "./src/balance.mko"
 pull . "./src/health.mko"
 pull . "./src/rate.mko"
 pull . "./src/admin.mko"
+pull . "./src/acme.mko"
 pull . "./src/oidc.mko"
 pull . "./src/peers.mko"
 pull . "./src/stats.mko"
@@ -51,7 +52,7 @@ fn TestStatsJsonShape() {
     assert(str_contains(j, "\"routes\""))
     assert(str_contains(j, "\"acls\""))
     assert(str_contains(j, "\"servers\""))
-    assert(str_contains(j, "0.10.0"))
+    assert(str_contains(j, "0.12.0"))
     assert(str_contains(j, "rate_limit"))
     assert(str_contains(j, "request_body_limit_bytes"))
     assert(str_contains(j, "health_interval_ms"))
@@ -170,7 +171,7 @@ fn TestMetricsTextShape() {
     assert(str_contains(m, "leba_backend_maxconn{backend=\"api\"} 3"))
     assert(str_contains(m, "leba_server_maxconn{backend=\"api\",server=\"s1\"} 5"))
     assert(str_contains(m, "leba_server_requests_total{backend=\"api\",server=\"s1\"} 4"))
-    assert(str_contains(m, "leba_info{version=\"0.10.0\"} 1"))
+    assert(str_contains(m, "leba_info{version=\"0.12.0\"} 1"))
     assert(str_contains(m, "leba_stick_entries 42"))
     assert(str_contains(m, "leba_backend_stick{backend=\"api\""))
     assert(str_contains(m, "leba_oidc_ready 1"))
@@ -489,4 +490,234 @@ fn TestOidcConfigParseAndRoleMap() {
     let html2 = login_page_html(1, 1)
     assert(str_contains(html2, "/oidc/login"))
     assert(not str_contains(html2, "loginForm"))
+}
+
+fn TestAccessListCrudAndHttpAuthRealm() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 80
+    fe.mode = "http"
+    fes = append(fes, fe)
+    let bes = make([]Backend, 0, 0)
+    let servers = make([]Server, 0, 0)
+    let routes = make([]Route, 0, 0)
+    let acls = make([]AclRule, 0, 0)
+    let mut pb = str_builder()
+    builder_write(pb, "/tmp/leba-access-")
+    builder_write(pb, int_to_string(now_ms()))
+    builder_write(pb, ".conf")
+    let cfg = builder_string(pb)
+    let _ = write_file(cfg, "frontend web\n  bind :80\n  mode http\n")
+    let dir = "/tmp"
+
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/access-list",
+        "/admin/access-list?frontend=web&action=deny&kind=src&value=203.0.113.",
+        servers, fes, bes, routes, acls, cfg, dir
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 200)
+    assert_eq(len(ar.acls), 1)
+    assert_eq_str(ar.acls[0].action, "deny")
+    assert_eq_str(ar.acls[0].value, "203.0.113.")
+    assert(str_contains(read_file(dir + "/leba.access.conf"), "deny src 203.0.113."))
+
+    let ar2 = handle_admin_state(
+        "POST",
+        "/admin/access-list-delete",
+        "/admin/access-list-delete?frontend=web&action=deny&kind=src&value=203.0.113.",
+        servers, ar.frontends, bes, routes, ar.acls, cfg, dir
+    )
+    assert_eq(ar2.status, 200)
+    assert_eq(len(ar2.acls), 0)
+
+    let ar3 = handle_admin_state(
+        "POST",
+        "/admin/http-auth-realm",
+        "/admin/http-auth-realm?frontend=web&realm=Restricted",
+        servers, ar2.frontends, bes, routes, ar2.acls, cfg, dir
+    )
+    assert_eq(ar3.status, 200)
+    assert_eq_str(ar3.frontends[0].auth_basic_realm, "Restricted")
+    assert(str_contains(ar3.body, "full_reload"))
+}
+
+fn TestCertificatesListAndForceSslProxyHost() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 443
+    fe.mode = "http"
+    fe.tls_cert = "/tmp/def.crt"
+    fe.tls_key = "/tmp/def.key"
+    fe.acme_webroot = "/tmp/acme-web"
+    fes = append(fes, fe)
+    let ar = handle_admin_state(
+        "GET",
+        "/admin/certificates",
+        "/admin/certificates",
+        make([]Server, 0, 0), fes, make([]Backend, 0, 0), make([]Route, 0, 0), make([]AclRule, 0, 0), "", "/tmp"
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 200)
+    assert(str_contains(ar.body, "\"certificates\""))
+    assert(str_contains(ar.body, "\"settings\""))
+    assert(str_contains(ar.body, "\"not_after\""))
+    assert(str_contains(ar.body, "\"issues\""))
+    assert(str_contains(ar.body, "\"ready\""))
+    assert(str_contains(ar.body, "/tmp/def.crt"))
+
+    let mut pb = str_builder()
+    builder_write(pb, "/tmp/leba-force-")
+    builder_write(pb, int_to_string(now_ms()))
+    builder_write(pb, ".conf")
+    let cfg = builder_string(pb)
+    let _ = write_file(cfg, "frontend web\n  bind :80\n  mode http\n")
+    let ar2 = handle_admin_state(
+        "POST",
+        "/admin/proxy-host",
+        "/admin/proxy-host?frontend=web&domain=ssl.example.com&backend=app&server=s1&addr=127.0.0.1%3A3000&force_ssl=1",
+        make([]Server, 0, 0), fes, make([]Backend, 0, 0), make([]Route, 0, 0), make([]AclRule, 0, 0), cfg, "/tmp"
+    )
+    assert_eq(ar2.status, 200)
+    assert_eq(ar2.frontends[0].redirect_https, 1)
+    assert(str_contains(ar2.body, "\"force_ssl\":true"))
+}
+
+fn TestAdminPathRolesForCertificatesAndAuth() {
+    assert_eq_str(admin_path_required_role("POST", "/admin/certificates/issue"), "admin")
+    assert_eq_str(admin_path_required_role("POST", "/admin/certificates/renew"), "admin")
+    assert_eq_str(admin_path_required_role("POST", "/admin/http-auth"), "admin")
+    assert_eq_str(admin_path_required_role("POST", "/admin/access-list"), "operator")
+    assert_eq_str(admin_path_required_role("GET", "/admin/certificates"), "viewer")
+    assert_eq(admin_path_mutates_state("/admin/access-list"), 1)
+    assert_eq(admin_path_mutates_state("/admin/certificates/issue"), 1)
+}
+
+fn TestAcmeTokenValidation() {
+    assert_eq(acme_token_safe("app.example.com"), 1)
+    assert_eq(acme_token_safe("ops@example.com"), 1)
+    assert_eq(acme_token_safe("/var/lib/leba/acme"), 1)
+    assert_eq(acme_token_safe("bad;rm -rf"), 0)
+    assert_eq(acme_token_safe("a b"), 0)
+    assert_eq(acme_email_ok("ops@example.com"), 1)
+    assert_eq(acme_email_ok("nope"), 0)
+}
+
+fn TestAcmePreflightStructuredErrors() {
+    let mut s = acme_settings_resolve("")
+    s.helper = "lego-definitely-not-installed-xyz"
+    s.email = "ops@example.com"
+    s.webroot = "/tmp/acme-web"
+    s.storage = "/tmp/acme-storage"
+    let e = acme_preflight_issue(s, "app.example.com", "")
+    assert(str_has_prefix(e, "code=missing_helper"))
+    assert_eq(acme_preflight_http_status(e), 400)
+    let j = acme_error_json(e)
+    assert(str_contains(j, "\"code\":\"missing_helper\""))
+    assert(str_contains(j, "\"error\""))
+
+    s.helper = "lego"
+    // Even if lego is installed, empty email fails.
+    s.email = ""
+    let e2 = acme_preflight_issue(s, "app.example.com", "")
+    // If lego missing on CI machine, either missing_helper or missing_email is fine for empty email path after helper check order.
+    assert(str_has_prefix(e2, "code=missing_helper") or str_has_prefix(e2, "code=missing_email"))
+
+    let e3 = acme_preflight_issue(s, "bad;rm", "ops@example.com")
+    assert(str_has_prefix(e3, "code=invalid_domain"))
+
+    let e4 = acme_preflight_renew(s)
+    // missing helper or no_certs depending on environment
+    assert(str_has_prefix(e4, "code="))
+}
+
+fn TestValidAbsPathRejectsTraversal() {
+    assert_eq(valid_abs_path(""), 1)
+    assert_eq(valid_abs_path("/tmp/ok.pem"), 1)
+    assert_eq(valid_abs_path("/tmp/../etc/passwd"), 0)
+    assert_eq(valid_abs_path("relative.pem"), 0)
+}
+
+fn TestCertificatesIssuePreflightViaAdmin() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.mode = "http"
+    fe.bind_port = 80
+    fe.acme_webroot = "/tmp/acme-web"
+    fes = append(fes, fe)
+    // Force missing helper via env would be ideal; domain bad is deterministic.
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/certificates/issue",
+        "/admin/certificates/issue?domain=bad%2Fhost&frontend=web&email=ops%40example.com",
+        make([]Server, 0, 0), fes, make([]Backend, 0, 0), make([]Route, 0, 0), make([]AclRule, 0, 0), "", "/tmp"
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 400)
+    assert(str_contains(ar.body, "invalid"))
+}
+
+fn TestHostLocationAndSelectOrder() {
+    let mut routes = make([]Route, 0, 4)
+    routes = append(routes, route_new("web", "host", "app.example.com", "app"))
+    routes = append(routes, route_location_new("web", "app.example.com", "/api", "api"))
+    let ri = select_route_idx(routes, "web", "/api/v1", "app.example.com")
+    assert(ri >= 0)
+    assert_eq_str(routes[ri].backend, "api")
+    let ri2 = select_route_idx(routes, "web", "/home", "app.example.com")
+    assert(ri2 >= 0)
+    assert_eq_str(routes[ri2].backend, "app")
+}
+
+fn TestHostSrcAcl() {
+    let mut acls = make([]AclRule, 0, 2)
+    acls = append(acls, acl_new("web", "deny", "host_src", "app.example.com|203.0.113."))
+    assert_eq(acl_decide_full(acls, "web", "/", "app.example.com", "GET", "203.0.113.5"), 1)
+    assert_eq(acl_decide_full(acls, "web", "/", "app.example.com", "GET", "10.0.0.1"), 0)
+    assert_eq(acl_decide_full(acls, "web", "/", "other.example.com", "GET", "203.0.113.5"), 0)
+}
+
+fn TestProxyHostDisableAndWebsocket() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.mode = "http"
+    fe.bind_port = 80
+    fes = append(fes, fe)
+    let cfg = "/tmp/leba-host-parity.conf"
+    let _ = write_file(cfg, "frontend web\n  bind :80\n  mode http\n")
+    let ar = handle_admin_state("POST", "/admin/proxy-host",
+        "/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=127.0.0.1%3A9&websocket=0",
+        make([]Server,0,0), fes, make([]Backend,0,0), make([]Route,0,0), make([]AclRule,0,0), cfg, "/tmp")
+    assert_eq(ar.status, 200)
+    assert_eq(ar.routes[0].websocket, 0)
+    let ar2 = handle_admin_state("POST", "/admin/proxy-host",
+        "/admin/proxy-host?frontend=web&domain=app.example.com&enable=0",
+        ar.servers, ar.frontends, ar.backends, ar.routes, make([]AclRule,0,0), cfg, "/tmp")
+    assert_eq(ar2.status, 200)
+    assert_eq_str(ar2.routes[0].action, "dead")
+    let ar3 = handle_admin_state("POST", "/admin/proxy-host-location",
+        "/admin/proxy-host-location?frontend=web&domain=app.example.com&path=%2Fapi&backend=api&server=a1&addr=127.0.0.1%3A8",
+        ar2.servers, ar2.frontends, ar2.backends, ar2.routes, make([]AclRule,0,0), cfg, "/tmp")
+    assert_eq(ar3.status, 200)
+    let mut found = 0
+    for _, r in range ar3.routes {
+        if str_eq(r.host_match, "app.example.com") {
+            if str_eq(r.value, "/api") {
+                found = 1
+            }
+        }
+    }
+    assert_eq(found, 1)
+}
+
+fn TestDns01MissingProvider() {
+    let mut s = acme_settings_resolve("")
+    s.helper = "lego"
+    s.email = "ops@example.com"
+    s.webroot = "/tmp/w"
+    s.storage = "/tmp/s"
+    let r = acme_issue_challenge(s, "app.example.com", "", "dns", "")
+    assert_eq(r.ok, 0)
+    assert(str_has_prefix(r.error, "code=missing_dns_provider") or str_has_prefix(r.error, "code=missing_helper"))
 }

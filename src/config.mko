@@ -25,6 +25,9 @@
 //     protocols http/1.1[,h2,h3]   # h2/h3 require TLS; h3 needs quiche-linked build
 //     redirect https [CODE]   # force HTTPS (301 default; 302/307/308 ok); no backend needed
 //     acme_webroot PATH       # HTTP-01 challenge tokens (defaults inherit)
+//     acme_storage PATH       # lego --path (defaults; env LEBA_ACME_STORAGE)
+//     acme_email ADDR         # ACME registration email (env LEBA_ACME_EMAIL)
+//     acme_helper PATH|NAME   # lego binary (default lego; env LEBA_ACME_HELPER)
 //     auth_basic REALM        # require HTTP Basic for proxied apps (non-ACME)
 //     auth_user USER PASS     # credential for auth_basic on this frontend
 //     waf detect|block|off    # local rules; optional remote inspect
@@ -144,6 +147,9 @@ fn apply_defaults_kv(d: Defaults, key: string, val: string) -> Defaults {
         "request_body_limit" => { out.request_body_limit_bytes = parse_size_bytes(val) },
         "request_body_limit_bytes" => { out.request_body_limit_bytes = to_int(val) },
         "acme_webroot" => { out.acme_webroot = val },
+        "acme_storage" => { out.acme_storage = val },
+        "acme_email" => { out.acme_email = val },
+        "acme_helper" => { out.acme_helper = val },
         _ => {}
     }
     return out
@@ -550,14 +556,21 @@ fn load_servers_file_list(backend: string, file_path: string, base_dir: string) 
 }
 
 fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string) -> ServersReload {
-    let mut out = make([]Server, 0, len(current) + 8)
+    // Two-pass: count then fill by index. Avoids `out = append(out, …)` reassignment
+    // which Mako SAFE free can free at the wrong scope (double-free / UAF).
     let mut loaded_total = 0
-    for bi, be in range backends {
+    let mut need = 0
+    let mut bi = 0
+    while bi < len(backends) {
+        let be = backends[bi]
+        bi = bi + 1
         if str_eq(be.servers_file, "") {
-            for ci, cs in range current {
-                if str_eq(cs.backend, be.name) {
-                    out = append(out, cs)
+            let mut ci = 0
+            while ci < len(current) {
+                if str_eq(current[ci].backend, be.name) {
+                    need = need + 1
                 }
+                ci = ci + 1
             }
         } else {
             let rr = load_servers_file_list(be.name, be.servers_file, base_dir)
@@ -569,21 +582,70 @@ fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string
                     loaded: loaded_total
                 }
             }
-            for ni, ns in range rr.servers {
-                out = append(out, preserve_server_runtime(ns, current))
-            }
-            for oi, cs in range current {
+            need = need + len(rr.servers)
+            let mut oi = 0
+            while oi < len(current) {
+                let cs = current[oi]
+                oi = oi + 1
                 if str_eq(cs.backend, be.name) {
                     if server_in_backend_list(rr.servers, be.name, cs.name) == 0 {
                         if cs.conns > 0 {
-                            let mut draining = cs
-                            draining.drain = 1
-                            out = append(out, draining)
+                            need = need + 1
                         }
                     }
                 }
             }
             loaded_total = loaded_total + rr.loaded
+        }
+    }
+    let mut out = make([]Server, need, need)
+    let mut w = 0
+    bi = 0
+    while bi < len(backends) {
+        let be = backends[bi]
+        bi = bi + 1
+        if str_eq(be.servers_file, "") {
+            let mut ci = 0
+            while ci < len(current) {
+                let cs = current[ci]
+                ci = ci + 1
+                if str_eq(cs.backend, be.name) {
+                    out[w] = cs
+                    w = w + 1
+                }
+            }
+        } else {
+            let rr = load_servers_file_list(be.name, be.servers_file, base_dir)
+            if rr.ok == 0 {
+                return ServersReload {
+                    ok: 0,
+                    error: rr.error,
+                    servers: current,
+                    loaded: 0
+                }
+            }
+            let mut ni = 0
+            while ni < len(rr.servers) {
+                let kept = preserve_server_runtime(rr.servers[ni], current)
+                out[w] = kept
+                w = w + 1
+                ni = ni + 1
+            }
+            let mut oi = 0
+            while oi < len(current) {
+                let cs = current[oi]
+                oi = oi + 1
+                if str_eq(cs.backend, be.name) {
+                    if server_in_backend_list(rr.servers, be.name, cs.name) == 0 {
+                        if cs.conns > 0 {
+                            let mut draining = cs
+                            draining.drain = 1
+                            out[w] = draining
+                            w = w + 1
+                        }
+                    }
+                }
+            }
         }
     }
     return ServersReload {
@@ -678,11 +740,12 @@ fn load_runtime_state_file(w: World, base_dir: string) -> World {
         return out
     }
     let full_path = resolve_servers_path(base_dir, out.state_file)
-    let mut raw = ""
-    if not str_eq(out.state_key, "") {
-        raw = open_file_at_rest(full_path, out.state_key, "leba-state")
+    // Avoid `let mut raw = ""; raw = read_file(...)` — Mako SAFE free may free
+    // the reassigned value. Keep a single owning assignment per branch.
+    let raw = if not str_eq(out.state_key, "") {
+        open_file_at_rest(full_path, out.state_key, "leba-state")
     } else {
-        raw = read_file(full_path)
+        read_file(full_path)
     }
     if str_eq(raw, "") {
         return out
@@ -790,18 +853,48 @@ fn parse_route_line(fields: []string, fe: string) -> Route {
             return route_dead_new(fe, kind, value, code)
         }
     }
-    if len(fields) >= 5 {
-        if str_eq(fields[3], "->") {
-            backend = fields[4]
-        } else {
-            backend = fields[3]
+    // Find backend after "->" or as next non-modifier token after value.
+    // Optional trailers: host HOSTNAME (locations), websocket on|off.
+    let mut host_match = ""
+    let mut websocket = 1
+    let mut arrow = 0 - 1
+    let mut i = 0
+    while i < len(fields) {
+        if str_eq(fields[i], "->") {
+            arrow = i
+        }
+        if str_eq(fields[i], "host") {
+            if i + 1 < len(fields) {
+                if not str_eq(kind, "host") {
+                    host_match = fields[i + 1]
+                }
+            }
+        }
+        if str_eq(fields[i], "websocket") {
+            if i + 1 < len(fields) {
+                if str_eq(fields[i + 1], "off") or str_eq(fields[i + 1], "0") or str_eq(fields[i + 1], "false") {
+                    websocket = 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    if arrow >= 0 {
+        if arrow + 1 < len(fields) {
+            backend = fields[arrow + 1]
         }
     } else {
+        // No arrow: last non-modifier token after value that is not host/websocket value.
+        // route host x be  OR  route path_prefix /api be
         if len(fields) >= 4 {
-            if str_eq(fields[3], "->") {
-                backend = ""
-            } else {
-                backend = fields[3]
+            if not str_eq(fields[3], "host") {
+                if not str_eq(fields[3], "websocket") {
+                    if not str_eq(fields[3], "redirect") {
+                        if not str_eq(fields[3], "dead") {
+                            backend = fields[3]
+                        }
+                    }
+                }
             }
         }
     }
@@ -815,7 +908,10 @@ fn parse_route_line(fields: []string, fe: string) -> Route {
     if str_has_prefix(backend, "@dead:") {
         return route_dead_new(fe, kind, value, to_int(substr(backend, 6, str_len(backend))))
     }
-    return route_new(fe, kind, value, backend)
+    let mut r = route_new(fe, kind, value, backend)
+    r.host_match = host_match
+    r.websocket = websocket
+    return r
 }
 
 fn parse_config_text(raw: string) -> World {
@@ -1152,9 +1248,18 @@ fn parse_config_text(raw: string) -> World {
                                                     }
                                                 } else {
                                                 if str_eq(head, "auth_user") {
-                                                    // auth_user USER PASS  (data-plane basic auth)
+                                                    // auth_user USER PASS
+                                                    // auth_user USER PASS host HOSTNAME  (host-scoped basic)
                                                     if len(fields) >= 3 {
-                                                        w.app_auth_users = append(w.app_auth_users, app_auth_user_new(cur_name, fields[1], fields[2]))
+                                                        if len(fields) >= 5 {
+                                                            if str_eq(fields[3], "host") {
+                                                                w.app_auth_users = append(w.app_auth_users, app_auth_user_host_new(cur_name, fields[4], fields[1], fields[2]))
+                                                            } else {
+                                                                w.app_auth_users = append(w.app_auth_users, app_auth_user_new(cur_name, fields[1], fields[2]))
+                                                            }
+                                                        } else {
+                                                            w.app_auth_users = append(w.app_auth_users, app_auth_user_new(cur_name, fields[1], fields[2]))
+                                                        }
                                                     }
                                                 } else {
                                                 if str_eq(head, "root") {

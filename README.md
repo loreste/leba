@@ -69,12 +69,18 @@ gh repo clone loreste/leba
 ### Admin & Operations
 - Built-in web admin dashboard with RBAC (viewer, operator, admin)
 - Standalone admin UI with proxy host management cards
+- Certificates tab: list PEMs, issue/renew Let's Encrypt via lego, live TLS reload
+- Access Lists tab: IP/path ACL CRUD + app HTTP Basic users
+- Proxy host upsert with Force SSL, per-domain SNI certs, Edit
 - Session-based authentication with secure cookies
 - Analytics dashboard with top paths and status breakdown
 - Live request rate chart with 30-sample history
 - Config viewer with sensitive field redaction
 - REST API for drain, ready, disable, enable, reload
 - Vhost and proxy host management API
+- Certificates API (`/admin/certificates`, issue/renew via lego HTTP-01 or DNS-01)
+- Access lists + app HTTP Basic API (`/admin/access-list*`, `/admin/http-auth*`)
+- Host parity: enable/disable, WebSocket toggle, locations, redirect/dead, host IP ACL, host Basic
 - Config doctor with validation and fix suggestions
 - Request explainer (dry-run routing decisions)
 - CLI for all admin operations
@@ -201,6 +207,23 @@ leba admin hash-password PASSWORD         Generate hash
 leba version                              Print version
 ```
 
+## Quick start (Docker demo)
+
+```bash
+# 1) build binary for the image
+make build
+
+# 2) one-command stack: Leba + demo origin
+docker compose up --build
+
+# 3) open admin UI and hit the proxy
+open http://localhost:8404/          # admin / change-me
+curl -s http://localhost/            # → hello from leba demo origin
+```
+
+Replace `LEBA_SESSION_SECRET` and admin password before any public deploy.
+Optional ACME: `LEBA_ACME_EMAIL=you@example.com docker compose up --build`.
+
 ## Deployment
 
 ```bash
@@ -219,13 +242,13 @@ Typical paths:
 
 ## Status
 
-Leba is working software with 80+ automated tests (v0.10.0). It handles
+Leba is working software with 80+ automated tests (v0.12.0). It handles
 HTTP/1-3, TCP, UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind
-real traffic.
+real traffic. v0.11 ships an NPM-style control plane (proxy hosts, certificates
+via lego, access lists) on a HAProxy-class data plane.
 
-**Competitive roadmap:** see [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md)
-for the plan to beat NPM / reach HAProxy Enterprise-class ops (ACME, hitless
-reload, multi-node, WAF adapter). Phase 0 (trust) is in progress.
+**Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — release plan and beat criteria
+vs NPM / HAProxy Enterprise. Design depth: [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md).
 
 Known limits:
 - HTTP/2 covers multiplexed request/response; long-lived streaming and server

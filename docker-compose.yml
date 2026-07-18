@@ -1,35 +1,62 @@
-# Leba — NPM-style compose stack.
-# Mount certs at ./certs and set LEBA_ADMIN_AUTH for the admin API.
+# Leba — one-command NPM-style demo.
+#
+#   docker compose up --build
+#   open http://localhost:8404/   (admin / change-me)
+#   curl http://localhost/        → demo origin via Leba
+#
+# ACME: set LEBA_ACME_EMAIL and publish port 80 for HTTP-01.
 services:
+  origin:
+    image: hashicorp/http-echo:1.0
+    command: ["-text=hello from leba demo origin", "-listen=:8080"]
+    restart: unless-stopped
+
   leba:
     build: .
     image: leba:local
     restart: unless-stopped
+    depends_on:
+      - origin
     ports:
       - "80:8080"
       - "443:8443"
       - "8404:8404"
     environment:
       LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
-      LEBA_SESSION_SECRET: "${LEBA_SESSION_SECRET:-change-me-session-secret}"
+      LEBA_SESSION_SECRET: "${LEBA_SESSION_SECRET:-change-me-session-secret-use-long}"
+      LEBA_ACME_EMAIL: "${LEBA_ACME_EMAIL:-}"
+      LEBA_ACME_STORAGE: /var/lib/leba/lego
+      LEBA_ACME_WEBROOT: /var/lib/leba/acme
+      LEBA_ACME_HELPER: lego
     volumes:
-      - ./certs:/etc/leba/certs:ro
+      - ./certs:/etc/leba/certs
       - leba-state:/var/lib/leba
       - leba-logs:/var/log/leba
-    # Optional lego sidecar profile: docker compose --profile acme up
-    profiles: []
+      - leba-acme:/var/lib/leba/acme
+      - leba-lego:/var/lib/leba/lego
+    # Demo config proxies to the origin service.
+    command: ["/usr/local/bin/leba", "-f", "/etc/leba/leba.demo.conf"]
 
   lego:
     image: goacme/lego:latest
     profiles: ["acme"]
+    network_mode: "service:leba"
     volumes:
-      - ./certs:/certs
+      - leba-lego:/lego
+      - leba-acme:/acme
       - ./deploy/docker/lego-deploy-hook.sh:/hooks/deploy.sh:ro
     environment:
       LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
-      LEBA_ADMIN_URL: "http://leba:8404"
-    entrypoint: ["/bin/sh", "-c", "echo 'Run lego manually with --http.webroot or DNS and --run-hook /hooks/deploy.sh'; sleep infinity"]
+      LEBA_ADMIN_URL: "http://127.0.0.1:8404"
+    entrypoint:
+      [
+        "/bin/sh",
+        "-c",
+        "echo 'lego profile ready — use Admin UI Certificates or: lego --email $$LEBA_ACME_EMAIL --http --http.webroot /acme --path /lego --domains HOST run'; sleep infinity",
+      ]
 
 volumes:
   leba-state:
   leba-logs:
+  leba-acme:
+  leba-lego:

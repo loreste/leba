@@ -224,9 +224,61 @@ Alias of `GET /admin/vhosts` (NPM-style name).
 Alias of `POST /admin/vhost-create` (NPM-style name). Creates or updates a host
 route, backend, and server member; persists to `leba.vhosts.conf`.
 
+Optional query parameters:
+
+| Parameter | Notes |
+|-----------|-------|
+| `cert`, `key` | Absolute paths; installs multi-cert SNI for `domain` and live-reloads TLS |
+| `force_ssl` | `1` enables frontend `redirect https`; `0` disables |
+
 ### `POST /admin/proxy-host-delete`
 
 Removes a host route. Query parameters: `frontend`, `domain`.
+
+## Certificates (NPM-style)
+
+### `GET /admin/certificates`
+
+Lists frontend TLS material, SNI entries, and PEMs discovered under ACME storage.
+Includes helper settings (`webroot`, `storage`, `email`, `helper`, `helper_available`).
+Role: **viewer**.
+
+### `POST /admin/certificates/issue`
+
+Runs external **lego** (HTTP-01 webroot), attaches cert as SNI for `domain` on
+`frontend` (unless `attach=0`), persists managed vhosts, and triggers live TLS reload.
+
+Query: `domain`, `frontend`, optional `email`, `attach`. Role: **admin**.
+
+Requires `lego` on `PATH` (or `LEBA_ACME_HELPER` / `acme_helper`), plus
+`LEBA_ACME_EMAIL` or `acme_email` / query `email`.
+
+### `POST /admin/certificates/renew`
+
+Runs `lego renew` on ACME storage and triggers TLS reload. Role: **admin**.
+
+See `docs/ACME.md`.
+
+## Access lists and app HTTP Basic
+
+### `GET /admin/access-lists`
+
+Returns ACL rules. Role: **viewer**.
+
+### `POST /admin/access-list`
+
+Query: `frontend`, `action` (`allow`|`deny`), `kind` (`src`, `path`, `path_prefix`,
+`host`, `method`, `header`), `value`. Live-updates ACLs and writes `leba.access.conf`.
+Role: **operator**.
+
+### `POST /admin/access-list-delete`
+
+Same query fields as add. Role: **operator**.
+
+### `GET /admin/http-auth` · `POST /admin/http-auth` · `POST /admin/http-auth-delete` · `POST /admin/http-auth-realm`
+
+Manage app HTTP Basic realms and users (passwords never returned on GET). Writes
+require **admin** and trigger **full config reload** so `app_auth_users` reloads.
 
 ### `POST /admin/vhost-create`
 

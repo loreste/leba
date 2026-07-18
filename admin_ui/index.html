@@ -137,6 +137,8 @@ function render(){
   const fn=views[TAB];
   if(fn)v.innerHTML=fn();
   else if(TAB==='analyticsData'){loadAnalyticsData()}
+  else if(TAB==='certs'){loadCerts()}
+  else if(TAB==='access'){loadAccess()}
 }
 
 // ---- Views ----
@@ -208,60 +210,124 @@ function viewHosts(){
 
   let h=`<div class="row" style="justify-content:space-between;margin-bottom:1.25rem">
     <h2 style="margin:0">Proxy Hosts</h2>
-    <button class="btn primary op-only" onclick="$('#addForm').style.display=$('#addForm').style.display==='none'?'block':'none'">+ Add proxy host</button></div>`;
+    <button class="btn primary op-only" onclick="$('#addForm').style.display=$('#addForm').style.display==='none'?'block':'none'">+ Add / edit proxy host</button></div>`;
 
-  // Add form
   h+=`<div id="addForm" class="panel op-only" style="display:none;border-color:var(--accent)">
-    <h3>New proxy host</h3>
+    <h3>Add or edit proxy host</h3>
+    <p class="muted" style="font-size:.8rem;margin-bottom:.8rem">Upsert by domain+frontend. Modes: proxy (default), redirect, or dead. Locations and host IP lists live on each card.</p>
     <div class="form-grid">
       <div><label>Domain name</label><input id="vhDomain" placeholder="app.example.com"></div>
       <div><label>Frontend</label><select id="vhFe">${feOpts}</select></div>
+      <div><label>Mode</label><select id="vhAction"><option value="">proxy</option><option value="redirect">redirect</option><option value="dead">dead (404)</option></select></div>
+      <div><label>Redirect target (if redirect)</label><input id="vhTarget" placeholder="https://new.example.com"></div>
       <div><label>Backend name</label><input id="vhBackend" placeholder="my-app"></div>
       <div><label>Server name</label><input id="vhServer" placeholder="app1"></div>
       <div><label>Forward to (host:port)</label><input id="vhAddr" placeholder="127.0.0.1:3000"></div>
-      <div><label>TLS certificate (optional)</label><input id="vhCert" placeholder="/etc/letsencrypt/live/…/fullchain.pem"></div>
-      <div><label>TLS key (optional)</label><input id="vhKey" placeholder="/etc/letsencrypt/live/…/privkey.pem"></div>
+      <div><label>WebSocket</label><select id="vhWs"><option value="1">allow</option><option value="0">block</option></select></div>
+      <div><label>Enabled</label><select id="vhEnable"><option value="1">yes</option><option value="0">no (503)</option></select></div>
+      <div><label>Force SSL (frontend)</label>
+        <select id="vhForceSsl"><option value="">unchanged</option><option value="1">on</option><option value="0">off</option></select>
+      </div>
+      <div><label>TLS certificate (optional)</label><input id="vhCert" placeholder="/var/lib/leba/lego/certificates/….crt"></div>
+      <div><label>TLS key (optional)</label><input id="vhKey" placeholder="/var/lib/leba/lego/certificates/….key"></div>
     </div>
     <div class="row" style="justify-content:flex-end;margin-top:.8rem">
       <button class="btn" onclick="$('#addForm').style.display='none'">Cancel</button>
-      <button class="btn primary" onclick="addHost()">Create</button>
+      <button class="btn primary" onclick="addHost()">Save host</button>
     </div></div>`;
 
-  // Host cards
   hosts.forEach(r=>{
     const srvs=(d.servers||[]).filter(s=>s.backend===r.backend);
     const be=(d.backends||[]).find(b=>b.name===r.backend);
     const up=srvs.filter(s=>+s.alive&&!+s.drain).length;
     const fe=http.find(f=>f.name===r.frontend);
     const tls=fe&&fe.tls_cert;const ok=up===srvs.length&&srvs.length>0;
+    const sni=(fe&&(fe.tls_sni||[]).find(s=>s.hostname===r.value));
+    const force=+((fe&&fe.redirect_https)||0);
+    const srv0=srvs[0];
+    const enabled=r.action==='dead'&&(+r.code===503||!r.backend)?0:(r.action==='dead'?0:1);
+    const locs=(d.routes||[]).filter(x=>x.host_match===r.value&&x.frontend===r.frontend);
+    const hostAcls=(d.acls||[]).filter(a=>a.kind==='host_src'&&String(a.value||'').startsWith(r.value+'|'));
 
-    h+=`<div class="card host-card ${ok?'':'degraded'}">
+    h+=`<div class="card host-card ${ok&&enabled?'':'degraded'}">
       <div class="row" style="justify-content:space-between;margin-bottom:.75rem">
         <div>
-          <h3 style="font-size:1.1rem">${tls?'🔒':'⚠️'} <a href="https://${esc(r.value)}" target="_blank">${esc(r.value)}</a></h3>
-          <span class="muted" style="font-size:.8rem">→ ${esc(r.backend)} · ${be?esc(be.balance):'—'} · ${fe?'port '+fe.port:''}</span>
+          <h3 style="font-size:1.1rem">${tls||sni?'🔒':'⚠️'} <a href="https://${esc(r.value)}" target="_blank">${esc(r.value)}</a></h3>
+          <span class="muted" style="font-size:.8rem">→ ${esc(r.backend||r.action||'—')} · ${be?esc(be.balance):'—'} · ${fe?'port '+fe.port:''}
+          ${force?' · <span class="pill warn">force SSL</span>':''}
+          ${sni?' · <span class="pill up">SNI</span>':''}
+          ${+r.websocket===0?' · <span class="pill down">WS off</span>':' · <span class="pill">WS on</span>'}
+          ${r.action==='redirect'?' · <span class="pill warn">redirect</span>':''}
+          ${r.action==='dead'?' · <span class="pill down">dead</span>':''}
+          ${!enabled?' · <span class="pill down">disabled</span>':''}</span>
         </div>
-        <span class="pill ${ok?'up':'down'}">${up}/${srvs.length} UP</span>
+        <span class="pill ${ok&&enabled?'up':'down'}">${enabled? (up+'/'+srvs.length+' UP'):'OFF'}</span>
       </div>
-      <table><tr><th>Server</th><th>Address</th><th>State</th><th>Requests</th><th>Bytes</th><th class="op-only">Actions</th></tr>`;
+      <table><tr><th>Server</th><th>Address</th><th>State</th><th>Req</th><th class="op-only">Actions</th></tr>`;
     srvs.forEach(s=>{
       h+=`<tr><td><strong>${esc(s.name)}</strong></td><td class="mono">${esc(s.host)}:${s.port}</td>
-      <td>${pill(s)}</td><td>${s.total_req}</td><td>${fmtBytes(s.total_bytes)}</td>
+      <td>${pill(s)}</td><td>${s.total_req}</td>
       <td class="op-only actions">
         <button class="btn sm ${+s.drain?'ok':'warn'}" onclick="act('${+s.drain?'ready':'drain'}','${esc(s.backend)}','${esc(s.name)}')">${+s.drain?'Ready':'Drain'}</button>
         <button class="btn sm ${+s.alive?'bad':'ok'}" onclick="act('${+s.alive?'disable':'enable'}','${esc(s.backend)}','${esc(s.name)}')">${+s.alive?'Disable':'Enable'}</button>
       </td></tr>`;
     });
-    if(!srvs.length)h+='<tr><td colspan=6 class="muted">No servers</td></tr>';
-    h+=`</table>
-      <div class="row op-only" style="justify-content:flex-end;margin-top:.75rem">
-        <button class="btn sm bad" onclick="deleteHost('${esc(r.frontend)}','${esc(r.value)}')">Delete host</button>
-      </div>
+    if(!srvs.length)h+='<tr><td colspan=5 class="muted">No upstream servers (redirect/dead host?)</td></tr>';
+    h+='</table>';
+
+    // Locations
+    h+='<div style="margin-top:.8rem"><strong style="font-size:.85rem">Custom locations</strong>';
+    h+='<table style="margin-top:.4rem"><tr><th>Path</th><th>Backend</th><th>WS</th><th class="op-only"></th></tr>';
+    locs.forEach(loc=>{
+      h+=`<tr><td class="mono">${esc(loc.value)}</td><td>${esc(loc.backend)}</td><td>${+loc.websocket===0?'off':'on'}</td>
+      <td class="op-only"><button class="btn sm bad" onclick="delLocation('${esc(r.frontend)}','${esc(r.value)}','${esc(loc.value)}')">Delete</button></td></tr>`;
+    });
+    if(!locs.length)h+='<tr><td colspan=4 class="muted">No path locations — catch-all host route only</td></tr>';
+    h+='</table>';
+    h+=`<div class="form-grid op-only" style="margin-top:.5rem;grid-template-columns:1fr 1fr 1fr auto">
+      <div><label>Path</label><input id="locPath_${esc(r.value)}" placeholder="/api"></div>
+      <div><label>Backend</label><input id="locBe_${esc(r.value)}" placeholder="${esc(r.backend||'app')}"></div>
+      <div><label>Server host:port (opt)</label><input id="locAddr_${esc(r.value)}" placeholder="127.0.0.1:3001"></div>
+      <div style="align-self:end"><button class="btn sm primary" onclick="addLocation('${esc(r.frontend)}','${esc(r.value)}')">Add</button></div>
+    </div></div>`;
+
+    // Host IP ACL
+    h+='<div style="margin-top:.8rem"><strong style="font-size:.85rem">Host IP access list</strong>';
+    h+='<table style="margin-top:.4rem"><tr><th>Action</th><th>IP / prefix</th><th class="op-only"></th></tr>';
+    hostAcls.forEach(a=>{
+      const ip=(a.value||'').split('|')[1]||'';
+      h+=`<tr><td><span class="pill ${a.action==='allow'?'up':'down'}">${esc(a.action)}</span></td><td class="mono">${esc(ip)}</td>
+      <td class="op-only"><button class="btn sm bad" onclick="delHostAcl('${esc(r.frontend)}','${esc(r.value)}','${esc(a.action)}','${esc(ip)}')">Delete</button></td></tr>`;
+    });
+    if(!hostAcls.length)h+='<tr><td colspan=3 class="muted">No host-scoped IP rules</td></tr>';
+    h+='</table>';
+    h+=`<div class="row op-only" style="gap:.4rem;margin-top:.4rem;flex-wrap:wrap">
+      <select id="haclAct_${esc(r.value)}"><option value="deny">deny</option><option value="allow">allow</option></select>
+      <input id="haclIp_${esc(r.value)}" placeholder="203.0.113. or 10.0." style="min-width:140px">
+      <button class="btn sm" onclick="addHostAcl('${esc(r.frontend)}','${esc(r.value)}')">Add IP rule</button>
+    </div></div>`;
+
+    // Host basic
+    h+=`<div class="row admin-only" style="gap:.4rem;margin-top:.8rem;flex-wrap:wrap">
+      <input id="hauthU_${esc(r.value)}" placeholder="user" style="width:100px">
+      <input id="hauthP_${esc(r.value)}" type="password" placeholder="pass" style="width:100px">
+      <button class="btn sm" onclick="addHostAuth('${esc(r.frontend)}','${esc(r.value)}')">Add host Basic user</button>
+      <span class="muted" style="font-size:.72rem">Triggers full reload</span>
+    </div>`;
+
+    h+=`<div class="row op-only" style="justify-content:flex-end;margin-top:.75rem;gap:.4rem;flex-wrap:wrap">
+      <button class="btn sm" onclick="toggleHost('${esc(r.frontend)}','${esc(r.value)}','${esc(r.backend)}',${enabled?0:1})">${enabled?'Disable host':'Enable host'}</button>
+      <button class="btn sm" onclick="setHostWs('${esc(r.frontend)}','${esc(r.value)}','${esc(r.backend)}',${+r.websocket===0?1:0})">${+r.websocket===0?'Allow WS':'Block WS'}</button>
+      <button class="btn sm" onclick="editHost('${esc(r.frontend)}','${esc(r.value)}','${esc(r.backend)}','${esc(srv0?srv0.name:'')}','${esc(srv0?(srv0.host+':'+srv0.port):'')}','${esc(sni?sni.cert:(fe&&fe.tls_cert)||'')}','${esc(sni?sni.key:(fe&&fe.tls_key)||'')}',${force},${+r.websocket},${enabled},'${esc(r.action||'')}','${esc(r.target||'')}')">Edit</button>
+      <button class="btn sm" onclick="nav('certs');setTimeout(()=>{const d=$('#acmeDomain');if(d)d.value='${esc(r.value)}'},50)">LE cert</button>
+      <button class="btn sm bad" onclick="deleteHost('${esc(r.frontend)}','${esc(r.value)}')">Delete</button>
+    </div>
     </div>`;
   });
-  if(!hosts.length)h+='<div class="panel"><p class="muted">No proxy hosts configured. Click + Add proxy host to get started.</p></div>';
+  if(!hosts.length)h+='<div class="panel"><p class="muted">No proxy hosts configured. Click + Add / edit proxy host to get started.</p></div>';
   return h;
 }
+
 
 function viewBackends(){
   if(!DATA)return '';const d=DATA;
@@ -438,14 +504,20 @@ function viewAPI(){
   <tr><td>GET</td><td class="mono">/stats/whoami</td><td>Current user and role</td></tr>
   <tr><td>GET</td><td class="mono">/stats/analytics</td><td>Access log analytics</td></tr>
   <tr><td>GET</td><td class="mono">/admin/servers</td><td>Server inventory</td></tr>
-  <tr><td>GET</td><td class="mono">/admin/vhosts</td><td>Virtual host list</td></tr>
-  <tr><td>GET</td><td class="mono">/admin/config</td><td>Running config</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/vhosts · /admin/proxy-hosts</td><td>Virtual host list</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/certificates</td><td>Cert inventory + ACME settings</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/certificates/issue</td><td>lego issue + attach (admin)</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/certificates/renew</td><td>lego renew + tls-reload (admin)</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/access-lists</td><td>IP/path ACL rules</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/access-list · -delete</td><td>Add/remove ACL (operator)</td></tr>
+  <tr><td>GET/POST</td><td class="mono">/admin/http-auth*</td><td>App Basic users/realm (admin write)</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/config</td><td>Running config (redacted)</td></tr>
   <tr><td>POST</td><td class="mono">/admin/drain|ready|disable|enable/…</td><td>Server state</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/proxy-host</td><td>Add host (+ optional per-domain SNI cert)</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/proxy-host</td><td>Upsert host (+ cert, force_ssl)</td></tr>
   <tr><td>POST</td><td class="mono">/admin/proxy-host-delete</td><td>Delete host route</td></tr>
   <tr><td>POST</td><td class="mono">/admin/vhost-cert</td><td>Default or SNI cert (<code>hostname=</code>)</td></tr>
   <tr><td>POST</td><td class="mono">/admin/tls-reload</td><td>Live TLS + SNI refresh</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/reload</td><td>Full config reload + rebind</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/reload</td><td>Full config reload + rebind (admin)</td></tr>
   <tr><td>POST</td><td class="mono">/admin/reload-servers</td><td>Reload servers_file</td></tr>
   <tr><td>GET</td><td class="mono">/oidc/login</td><td>Start OIDC SSO</td></tr>
   <tr><td>GET</td><td class="mono">/metrics</td><td>Prometheus</td></tr>
@@ -459,19 +531,276 @@ async function act(action,be,srv){
   toast(action+' '+be+'/'+srv+' OK');await refresh()}catch(e){toast(e.message,1)}
 }
 
+function editHost(fe,domain,be,srv,addr,cert,key,force,ws,en,action,target){
+  $('#addForm').style.display='block';
+  if($('#vhDomain'))$('#vhDomain').value=domain||'';
+  if($('#vhFe'))$('#vhFe').value=fe||'';
+  if($('#vhBackend'))$('#vhBackend').value=be||'';
+  if($('#vhServer'))$('#vhServer').value=srv||'';
+  if($('#vhAddr'))$('#vhAddr').value=addr||'';
+  if($('#vhCert'))$('#vhCert').value=cert||'';
+  if($('#vhKey'))$('#vhKey').value=key||'';
+  if($('#vhForceSsl'))$('#vhForceSsl').value=force?'1':'0';
+  if($('#vhWs'))$('#vhWs').value=ws===0?'0':'1';
+  if($('#vhEnable'))$('#vhEnable').value=en===0?'0':'1';
+  if($('#vhAction'))$('#vhAction').value=action||'';
+  if($('#vhTarget'))$('#vhTarget').value=target||'';
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
 async function addHost(){
   const domain=$('#vhDomain')?.value,fe=$('#vhFe')?.value,be=$('#vhBackend')?.value;
   const srv=$('#vhServer')?.value,addr=$('#vhAddr')?.value;
   const cert=$('#vhCert')?.value||'',key=$('#vhKey')?.value||'';
-  if(!domain||!be||!srv||!addr){toast('Fill in domain, backend, server, and address',1);return}
+  const force=$('#vhForceSsl')?.value||'';
+  const action=$('#vhAction')?.value||'';
+  const target=$('#vhTarget')?.value||'';
+  const ws=$('#vhWs')?.value||'1';
+  const enable=$('#vhEnable')?.value||'1';
+  if(!domain){toast('Domain required',1);return}
+  if(action!=='redirect'&&action!=='dead'&&enable!=='0'){
+    if(!be||!srv||!addr){toast('Fill backend, server, and address for proxy mode',1);return}
+  }
   try{
-    const p='/admin/proxy-host?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
-      '&backend='+encodeURIComponent(be)+'&server='+encodeURIComponent(srv)+'&addr='+encodeURIComponent(addr)+
-      '&cert='+encodeURIComponent(cert)+'&key='+encodeURIComponent(key);
-    const r=await api(p,'POST');toast('Created proxy host: '+domain);
-    if(r.tls_reload||r.sni||r.tls_reload_recommended)toast('TLS/SNI applied live (or run TLS reload)',0);
+    let p='/admin/proxy-host?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&backend='+encodeURIComponent(be||'')+'&server='+encodeURIComponent(srv||'')+'&addr='+encodeURIComponent(addr||'')+
+      '&cert='+encodeURIComponent(cert)+'&key='+encodeURIComponent(key)+
+      '&websocket='+encodeURIComponent(ws)+'&enable='+encodeURIComponent(enable);
+    if(action)p+='&action='+encodeURIComponent(action);
+    if(target)p+='&target='+encodeURIComponent(target);
+    if(force!=='')p+='&force_ssl='+encodeURIComponent(force);
+    const r=await api(p,'POST');toast('Saved proxy host: '+domain);
+    if(r.tls_reload||r.sni)toast('TLS/SNI applied live',0);
     $('#addForm').style.display='none';await refresh();
   }catch(e){toast('Failed: '+e.message,1)}
+}
+
+async function toggleHost(fe,domain,be,enable){
+  try{
+    // disable: no upstream required; enable: keep existing backend name (addr may be stub if already present)
+    let p='/admin/proxy-host?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&enable='+enable+'&backend='+encodeURIComponent(be||'app')+'&server=_keep&addr=127.0.0.1:1';
+    if(enable===0)p+='&action=dead&code=503';
+    else p+='&action=proxy';
+    await api(p,'POST');toast(enable?'Host enabled':'Host disabled');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+
+async function setHostWs(fe,domain,be,ws){
+  try{
+    const p='/admin/proxy-host?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&backend='+encodeURIComponent(be||'app')+'&server=_keep&addr=127.0.0.1:1&websocket='+ws+'&enable=1&action=proxy';
+    await api(p,'POST');toast(ws?'WebSocket allowed':'WebSocket blocked');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+
+async function addLocation(fe,domain){
+  const path=$('#locPath_'+domain)?.value,be=$('#locBe_'+domain)?.value,addr=$('#locAddr_'+domain)?.value||'';
+  if(!path||!be){toast('Path and backend required',1);return}
+  try{
+    let p='/admin/proxy-host-location?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&path='+encodeURIComponent(path)+'&backend='+encodeURIComponent(be);
+    if(addr){p+='&server=loc1&addr='+encodeURIComponent(addr)}
+    await api(p,'POST');toast('Location added');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function delLocation(fe,domain,path){
+  try{
+    await api('/admin/proxy-host-location-delete?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+'&path='+encodeURIComponent(path),'POST');
+    toast('Location deleted');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function addHostAcl(fe,domain){
+  const action=$('#haclAct_'+domain)?.value,value=$('#haclIp_'+domain)?.value;
+  if(!value){toast('IP prefix required',1);return}
+  try{
+    await api('/admin/host-access-list?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&action='+encodeURIComponent(action)+'&value='+encodeURIComponent(value),'POST');
+    toast('Host IP rule added');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function delHostAcl(fe,domain,action,value){
+  try{
+    await api('/admin/host-access-list-delete?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&action='+encodeURIComponent(action)+'&value='+encodeURIComponent(value),'POST');
+    toast('Rule deleted');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function addHostAuth(fe,domain){
+  const user=$('#hauthU_'+domain)?.value,pass=$('#hauthP_'+domain)?.value;
+  if(!user||!pass){toast('User and pass required',1);return}
+  try{
+    await api('/admin/host-http-auth?frontend='+encodeURIComponent(fe)+'&domain='+encodeURIComponent(domain)+
+      '&user='+encodeURIComponent(user)+'&pass='+encodeURIComponent(pass),'POST');
+    toast('Host Basic user saved · full reload');await refresh();
+  }catch(e){toast(e.message,1)}
+}
+
+async function loadCerts(){
+  const v=$('#view');if(!v)return;
+  v.innerHTML='<div class="panel">Loading certificates…</div>';
+  try{
+    const d=await api('/admin/certificates');
+    const s=d.settings||{};
+    const fes=(DATA&&DATA.frontends||[]).filter(f=>f.mode==='http');
+    const feOpts=fes.map(f=>`<option value="${esc(f.name)}">${esc(f.name)}</option>`).join('');
+    let h=`<div class="row" style="justify-content:space-between;margin-bottom:1rem">
+      <h2 style="margin:0">Certificates</h2>
+      <div class="row op-only" style="gap:.4rem">
+        <button class="btn" onclick="tlsReload()">TLS reload</button>
+        <button class="btn primary admin-only" onclick="renewCerts()">Renew all (lego)</button>
+      </div></div>`;
+    const ready=!!s.ready;
+    h+=`<div class="notice" style="${ready?'border-color:rgba(61,220,151,.35)':''}">
+      Let's Encrypt via external <code>lego</code> (HTTP-01). Ready: <strong>${ready?'yes':'no'}</strong>
+      · helper <strong>${s.helper_available?'yes':'no'}</strong> (<code>${esc(s.helper||'lego')}</code>)
+      · email <strong>${s.email_configured?'set':'missing'}</strong>.
+      ${(s.issues||[]).map(i=>`<div style="margin-top:.4rem">⚠ ${esc(i.code)}: ${esc(i.message)}</div>`).join('')}
+    </div>`;
+    h+=`<div class="panel admin-only"><h3>Request Let's Encrypt certificate</h3>
+      <div class="form-grid">
+        <div><label>Domain</label><input id="acmeDomain" placeholder="app.example.com"></div>
+        <div><label>Attach to frontend</label><select id="acmeFe">${feOpts}</select></div>
+        <div><label>Email (optional override)</label><input id="acmeEmail" placeholder="${esc(s.email||'ops@example.com')}"></div>
+        <div><label>Challenge</label><select id="acmeChallenge"><option value="http">HTTP-01 (port 80)</option><option value="dns">DNS-01 (API token)</option></select></div>
+        <div><label>DNS provider (if DNS-01)</label><input id="acmeDnsProv" placeholder="cloudflare / route53 / …"></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:.6rem">
+        <button class="btn primary" onclick="issueCert()" ${ready?'':'disabled title="Fix ACME issues above first (helper + email)"'}>Issue &amp; attach + live reload</button>
+      </div>
+      <p class="muted" style="margin-top:.6rem;font-size:.78rem">Webroot: <code>${esc(s.webroot||'')}</code> · Storage: <code>${esc(s.storage||'')}</code><br>
+      DNS-01: set provider API token env for lego (e.g. <code>CF_DNS_API_TOKEN</code>) and optional <code>LEBA_ACME_DNS_PROVIDER</code>.</p>
+    </div>`;
+    h+='<div class="panel"><h3>Known certificates</h3><table><tr><th>Source</th><th>Hostname</th><th>Frontend</th><th>Cert path</th><th>On disk</th><th>Expires</th></tr>';
+    (d.certificates||[]).forEach(c=>{
+      h+=`<tr><td><span class="pill">${esc(c.source)}</span></td><td class="mono">${esc(c.hostname||'—')}</td>
+      <td>${esc(c.frontend||'—')}</td><td class="mono" style="font-size:.75rem">${esc(c.cert)}</td>
+      <td>${c.exists?'<span class="pill up">yes</span>':'<span class="pill down">missing</span>'}</td>
+      <td class="mono" style="font-size:.75rem">${esc(c.not_after||'—')}</td></tr>`;
+    });
+    if(!(d.certificates||[]).length)h+='<tr><td colspan=6 class="muted">No certificates yet. Issue via lego or set paths on a proxy host.</td></tr>';
+    h+='</table></div>';
+    h+=`<div class="panel"><h3>Attach existing paths</h3>
+      <div class="form-grid op-only">
+        <div><label>Frontend</label><select id="certFe">${feOpts}</select></div>
+        <div><label>SNI hostname (optional)</label><input id="certHost" placeholder="api.example.com"></div>
+        <div><label>Certificate path</label><input id="certPath" placeholder="/var/lib/leba/lego/certificates/….crt"></div>
+        <div><label>Key path</label><input id="certKey" placeholder="/var/lib/leba/lego/certificates/….key"></div>
+      </div>
+      <div class="row op-only" style="margin-top:.5rem"><button class="btn primary" onclick="saveCert()">Save cert (default or SNI)</button></div>
+    </div>`;
+    v.innerHTML=h;
+  }catch(e){v.innerHTML='<div class="panel"><h3>Error</h3><p>'+esc(e.message)+'</p></div>'}
+}
+
+async function issueCert(){
+  const domain=$('#acmeDomain')?.value,fe=$('#acmeFe')?.value,email=$('#acmeEmail')?.value||'';
+  const challenge=$('#acmeChallenge')?.value||'http',dnsProv=$('#acmeDnsProv')?.value||'';
+  if(!domain||!fe){toast('Domain and frontend required',1);return}
+  toast('Issuing certificate via lego (may take 30–90s)…');
+  try{
+    let p='/admin/certificates/issue?domain='+encodeURIComponent(domain)+'&frontend='+encodeURIComponent(fe)+
+      '&challenge='+encodeURIComponent(challenge);
+    if(email)p+='&email='+encodeURIComponent(email);
+    if(dnsProv)p+='&dns_provider='+encodeURIComponent(dnsProv);
+    const r=await api(p,'POST');
+    toast('Issued '+domain+(r.attached?' and attached':'')+' · TLS reloaded');
+    await loadCerts();await refresh();
+  }catch(e){toast(e.message,1);await loadCerts()}
+}
+
+async function renewCerts(){
+  if(!confirm('Run lego renew for all certs in ACME storage?'))return;
+  toast('Renewing…');
+  try{await api('/admin/certificates/renew','POST');toast('Renew completed · TLS reload requested');await loadCerts()}
+  catch(e){toast(e.message,1)}
+}
+
+async function loadAccess(){
+  const v=$('#view');if(!v)return;
+  v.innerHTML='<div class="panel">Loading access lists…</div>';
+  try{
+    const [lists,auth]=await Promise.all([api('/admin/access-lists'),api('/admin/http-auth')]);
+    const fes=(DATA&&DATA.frontends||[]).filter(f=>f.mode==='http');
+    const feOpts=fes.map(f=>`<option value="${esc(f.name)}">${esc(f.name)}</option>`).join('');
+    let h=`<div class="row" style="justify-content:space-between;margin-bottom:1rem"><h2 style="margin:0">Access Lists</h2></div>`;
+    h+=`<div class="panel op-only"><h3>Add IP / path rule</h3>
+      <div class="form-grid">
+        <div><label>Frontend</label><select id="aclFe">${feOpts}</select></div>
+        <div><label>Action</label><select id="aclAction"><option value="deny">deny</option><option value="allow">allow</option></select></div>
+        <div><label>Kind</label><select id="aclKind"><option value="src">src (IP prefix)</option><option value="path_prefix">path_prefix</option><option value="path">path</option><option value="host">host</option><option value="method">method</option></select></div>
+        <div><label>Value</label><input id="aclVal" placeholder="203.0.113. or /admin"></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:.5rem"><button class="btn primary" onclick="addAcl()">Add rule</button></div>
+      <p class="muted" style="margin-top:.6rem;font-size:.78rem">If any <code>allow</code> exists for a frontend, unmatched clients are denied (allow-list mode).</p>
+    </div>`;
+    h+='<div class="panel"><h3>Rules</h3><table><tr><th>Frontend</th><th>Action</th><th>Kind</th><th>Value</th><th class="op-only"></th></tr>';
+    (lists.access_lists||[]).forEach(a=>{
+      h+=`<tr><td>${esc(a.frontend)}</td><td><span class="pill ${a.action==='allow'?'up':'down'}">${esc(a.action)}</span></td>
+      <td class="mono">${esc(a.kind)}</td><td class="mono">${esc(a.value)}</td>
+      <td class="op-only"><button class="btn sm bad" onclick="delAcl('${esc(a.frontend)}','${esc(a.action)}','${esc(a.kind)}','${esc(a.value)}')">Delete</button></td></tr>`;
+    });
+    if(!(lists.access_lists||[]).length)h+='<tr><td colspan=5 class="muted">No ACL rules yet</td></tr>';
+    h+='</table></div>';
+
+    h+=`<div class="panel admin-only"><h3>App HTTP Basic</h3>
+      <div class="form-grid">
+        <div><label>Frontend</label><select id="authFe">${feOpts}</select></div>
+        <div><label>Realm</label><input id="authRealm" placeholder="Restricted"></div>
+        <div><label>Username</label><input id="authUser" placeholder="alice"></div>
+        <div><label>Password</label><input id="authPass" type="password" placeholder="••••••••"></div>
+      </div>
+      <div class="row" style="justify-content:flex-end;gap:.4rem;margin-top:.5rem">
+        <button class="btn" onclick="setAuthRealm()">Set realm only</button>
+        <button class="btn primary" onclick="addAuthUser()">Add / update user</button>
+      </div>
+    </div>`;
+    h+='<div class="panel"><h3>Basic auth frontends</h3><table><tr><th>Frontend</th><th>Realm</th><th>Users</th><th class="admin-only"></th></tr>';
+    (auth.http_auth||[]).forEach(a=>{
+      h+=`<tr><td>${esc(a.frontend)}</td><td>${esc(a.realm)}</td><td class="mono">${(a.users||[]).map(esc).join(', ')||'—'}</td>
+      <td class="admin-only actions">${(a.users||[]).map(u=>`<button class="btn sm bad" onclick="delAuthUser('${esc(a.frontend)}','${esc(u)}')">Remove ${esc(u)}</button>`).join(' ')}</td></tr>`;
+    });
+    if(!(auth.http_auth||[]).length)h+='<tr><td colspan=4 class="muted">No app Basic auth configured</td></tr>';
+    h+='</table></div>';
+    v.innerHTML=h;
+  }catch(e){v.innerHTML='<div class="panel"><h3>Error</h3><p>'+esc(e.message)+'</p></div>'}
+}
+
+async function addAcl(){
+  const fe=$('#aclFe')?.value,action=$('#aclAction')?.value,kind=$('#aclKind')?.value,value=$('#aclVal')?.value;
+  if(!fe||!value){toast('Frontend and value required',1);return}
+  try{
+    await api('/admin/access-list?frontend='+encodeURIComponent(fe)+'&action='+encodeURIComponent(action)+
+      '&kind='+encodeURIComponent(kind)+'&value='+encodeURIComponent(value),'POST');
+    toast('Rule added');await loadAccess();await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function delAcl(fe,action,kind,value){
+  try{
+    await api('/admin/access-list-delete?frontend='+encodeURIComponent(fe)+'&action='+encodeURIComponent(action)+
+      '&kind='+encodeURIComponent(kind)+'&value='+encodeURIComponent(value),'POST');
+    toast('Rule deleted');await loadAccess();await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function addAuthUser(){
+  const fe=$('#authFe')?.value,user=$('#authUser')?.value,pass=$('#authPass')?.value,realm=$('#authRealm')?.value||'';
+  if(!fe||!user||!pass){toast('Frontend, user, and pass required',1);return}
+  try{
+    let p='/admin/http-auth?frontend='+encodeURIComponent(fe)+'&user='+encodeURIComponent(user)+'&pass='+encodeURIComponent(pass);
+    if(realm)p+='&realm='+encodeURIComponent(realm);
+    await api(p,'POST');toast('User saved · full reload applied');await loadAccess();await refresh();
+  }catch(e){toast(e.message,1)}
+}
+async function delAuthUser(fe,user){
+  if(!confirm('Remove user '+user+'?'))return;
+  try{await api('/admin/http-auth-delete?frontend='+encodeURIComponent(fe)+'&user='+encodeURIComponent(user),'POST');
+  toast('Removed · full reload');await loadAccess();await refresh()}catch(e){toast(e.message,1)}
+}
+async function setAuthRealm(){
+  const fe=$('#authFe')?.value,realm=$('#authRealm')?.value||'';
+  if(!fe){toast('Frontend required',1);return}
+  try{await api('/admin/http-auth-realm?frontend='+encodeURIComponent(fe)+'&realm='+encodeURIComponent(realm),'POST');
+  toast('Realm updated · full reload');await loadAccess();await refresh()}catch(e){toast(e.message,1)}
 }
 
 async function deleteHost(fe,domain){
@@ -513,8 +842,8 @@ async function doLogout(){window.location.href='/logout'}
 
 // ---- Init ----
 const tabs=[
-  ['overview','Overview'],['hosts','Proxy Hosts'],['servers','Servers'],
-  ['backends','Backends'],['frontends','Frontends & Routes'],['platform','Platform'],
+  ['overview','Overview'],['hosts','Proxy Hosts'],['certs','Certificates'],['access','Access Lists'],
+  ['servers','Servers'],['backends','Backends'],['frontends','Frontends & Routes'],['platform','Platform'],
   ['analyticsData','Analytics'],['config','Security'],['api','API']
 ];
 const navEl=$('#nav');

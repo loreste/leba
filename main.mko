@@ -12,6 +12,7 @@ pull . "./src/proxy.mko"
 pull . "./src/waf.mko"
 pull . "./src/doctor.mko"
 pull . "./src/admin.mko"
+pull . "./src/acme.mko"
 pull . "./src/webadmin.mko"
 pull . "./src/runtime.mko"
 pull . "./src/peers.mko"
@@ -37,7 +38,7 @@ fn main() {
     let mut max_req = 0
     if argc() > 1 {
         if str_eq(arg_get(1), "version") {
-            print("leba 0.10.0")
+            print("leba 0.12.0")
             print("concurrency: crew worker pool")
             return
         }

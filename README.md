@@ -226,8 +226,8 @@ Known limits:
 - HTTP/3 requires a quiche-linked build. Upstream prefers keep-alive pools when
   `init_server_pools` is active; otherwise falls back to per-request connect.
 - SIP support is signaling-focused; media relay is not implemented.
-- Full config **table** reload is implemented (`SIGHUP` / `POST /admin/reload`);
-  listen socket rebind still requires restart.
+- Full config reload with HTTP/TCP listen rebind (`SIGHUP` / `POST /admin/reload`);
+  H3/UDP/stats-port rebind still may require restart.
 - No built-in Let's Encrypt client; use external ACME + `acme_webroot` +
   `POST /admin/tls-reload` (see [`docs/ACME.md`](docs/ACME.md)).
 - No response compression (gzip/brotli) or response caching yet.

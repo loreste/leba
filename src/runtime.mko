@@ -89,3 +89,196 @@ fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Ser
     let mut srv = apply_done_servers_conn(si, servers)
     return apply_done_servers_health(err, status, si, bytes, srv)
 }
+
+fn frontend_bind_key(host: string, port: int) -> string {
+    return host + ":" + int_to_string(port)
+}
+
+fn find_http_listener_by_name(listeners: []HttpListener, name: string) -> int {
+    for i, hl in range listeners {
+        if str_eq(hl.frontend.name, name) {
+            return i
+        }
+    }
+    return 0 - 1
+}
+
+fn find_http_listener_idx(listeners: []HttpListener, name: string, host: string, port: int) -> int {
+    for i, hl in range listeners {
+        if str_eq(hl.frontend.name, name) {
+            if str_eq(hl.frontend.bind_host, host) {
+                if hl.frontend.bind_port == port {
+                    return i
+                }
+            }
+        }
+    }
+    return 0 - 1
+}
+
+fn http_listener_open(fe: Frontend) -> HttpListener {
+    let mut h_tls = 0
+    let mut h_tls_srv = tls_server_new("", "")
+    if str_len(fe.tls_cert) > 0 {
+        h_tls = 1
+        if str_len(fe.tls_client_ca) > 0 {
+            h_tls_srv = tls_server_new_mtls(fe.tls_cert, fe.tls_key, fe.tls_client_ca)
+        } else {
+            h_tls_srv = tls_server_new(fe.tls_cert, fe.tls_key)
+        }
+    }
+    let hfd = tcp_listen_addr(fe.bind_host, fe.bind_port)
+    return HttpListener {
+        frontend: fe,
+        fd: hfd,
+        tls: h_tls,
+        tls_srv: h_tls_srv,
+        h3: 0,
+        h3_handle: 0 - 1
+    }
+}
+
+fn http_listener_close(el: EvLoop, hl: HttpListener) {
+    if hl.fd >= 0 {
+        let _ = evloop_del(el, hl.fd)
+        let _ = tcp_close(hl.fd)
+    }
+    if hl.tls == 1 {
+        let _ = tls_server_free(hl.tls_srv)
+    }
+    // H3 recreate is not part of v1 rebind (restart required for H3 bind changes).
+}
+
+// Rebuild HTTP listeners to match new frontends. Reuses FDs when name+bind match.
+// Returns new listener list; closes unused old listeners.
+fn rebind_http_listeners(el: EvLoop, old: []HttpListener, new_fes: []Frontend) -> []HttpListener {
+    let mut out = make([]HttpListener, 0, len(new_fes))
+    let mut used = make([]int, 0, len(old))
+    let mut ui = 0
+    while ui < len(old) {
+        used = append(used, 0)
+        ui = ui + 1
+    }
+    for _, fe in range new_fes {
+        if not str_eq(fe.mode, "http") {
+            continue
+        }
+        let match_idx = find_http_listener_idx(old, fe.name, fe.bind_host, fe.bind_port)
+        if match_idx >= 0 {
+            let mut hl = old[match_idx]
+            // Update frontend config; reload TLS if paths present.
+            let old_cert = hl.frontend.tls_cert
+            let old_key = hl.frontend.tls_key
+            hl.frontend = fe
+            if hl.tls == 1 {
+                if not str_eq(fe.tls_cert, "") {
+                    if not str_eq(fe.tls_cert, old_cert) {
+                        let _ = tls_server_reload(hl.tls_srv, fe.tls_cert, fe.tls_key)
+                    } else {
+                        if not str_eq(fe.tls_key, old_key) {
+                            let _ = tls_server_reload(hl.tls_srv, fe.tls_cert, fe.tls_key)
+                        }
+                    }
+                }
+            } else {
+                // TLS newly enabled: need new tls server object (keep same listen fd).
+                if str_len(fe.tls_cert) > 0 {
+                    if str_len(fe.tls_client_ca) > 0 {
+                        hl.tls_srv = tls_server_new_mtls(fe.tls_cert, fe.tls_key, fe.tls_client_ca)
+                    } else {
+                        hl.tls_srv = tls_server_new(fe.tls_cert, fe.tls_key)
+                    }
+                    hl.tls = 1
+                    log_info_event("listener_tls_enabled", f"frontend={fe.name}")
+                }
+            }
+            used[match_idx] = 1
+            out = append(out, hl)
+            log_info_event("listener_reused", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port}")
+        } else {
+            let hl2 = http_listener_open(fe)
+            if hl2.fd < 0 {
+                log_error_event("listener_rebind_failed", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port}")
+            } else {
+                let _ = evloop_add(el, hl2.fd, 1)
+                log_info_event("listener_bound", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} source=reload")
+            }
+            out = append(out, hl2)
+        }
+    }
+    // Close listeners not reused.
+    let mut oi = 0
+    while oi < len(old) {
+        if used[oi] == 0 {
+            log_info_event("listener_closed", f"frontend={old[oi].frontend.name} bind={old[oi].frontend.bind_host}:{old[oi].frontend.bind_port} source=reload")
+            http_listener_close(el, old[oi])
+        }
+        oi = oi + 1
+    }
+    return out
+}
+
+// Remap pending HTTP client frontend_idx by name after rebind.
+fn reindex_pending_clients(pending: []PendingClient, listeners: []HttpListener) -> []PendingClient {
+    let mut out = make([]PendingClient, 0, len(pending))
+    for _, pc in range pending {
+        if pc.kind != 2 {
+            out = append(out, pc)
+            continue
+        }
+        let mut name = pc.frontend_name
+        if str_eq(name, "") {
+            if pc.frontend_idx >= 0 {
+                if pc.frontend_idx < len(listeners) {
+                    name = listeners[pc.frontend_idx].frontend.name
+                }
+            }
+        }
+        let ni = find_http_listener_by_name(listeners, name)
+        if ni < 0 {
+            let _ = tcp_close(pc.fd)
+            log_warn_event("pending_dropped", f"reason=frontend_gone name={name}")
+            continue
+        }
+        if listeners[ni].fd < 0 {
+            let _ = tcp_close(pc.fd)
+            continue
+        }
+        let mut npc = pc
+        npc.frontend_idx = ni
+        npc.frontend_name = name
+        out = append(out, npc)
+    }
+    return out
+}
+
+// Rebuild TCP listen FDs for tcp frontends (order matches tcp_fes).
+fn rebind_tcp_listeners(el: EvLoop, old_fds: []int, old_fes: []Frontend, new_fes: []Frontend) -> ([]int, []Frontend) {
+    // Close all old TCP listeners then open new set (simple, low connection count path).
+    let mut oi = 0
+    while oi < len(old_fds) {
+        if old_fds[oi] >= 0 {
+            let _ = evloop_del(el, old_fds[oi])
+            let _ = tcp_close(old_fds[oi])
+        }
+        oi = oi + 1
+    }
+    let mut fds = make([]int, 0, len(new_fes))
+    let mut fes = make([]Frontend, 0, len(new_fes))
+    for _, fe in range new_fes {
+        if not str_eq(fe.mode, "tcp") {
+            continue
+        }
+        let fd = tcp_listen_addr(fe.bind_host, fe.bind_port)
+        if fd < 0 {
+            log_error_event("tcp_rebind_failed", f"frontend={fe.name} port={fe.bind_port}")
+        } else {
+            let _ = evloop_add(el, fd, 1)
+            log_info_event("listener_bound", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=tcp source=reload")
+        }
+        fds = append(fds, fd)
+        fes = append(fes, fe)
+    }
+    let _ = old_fes
+    return (fds, fes)
+}

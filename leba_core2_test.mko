@@ -775,6 +775,39 @@ fn TestRetryPlanPicksAlternates() {
     assert(plan.h1.server_idx != 0)
 }
 
+fn TestFindHttpListenerByNameAndBind() {
+    let mut fes = make([]Frontend, 0, 2)
+    let mut a = frontend_new("web")
+    a.bind_host = "127.0.0.1"
+    a.bind_port = 80
+    a.mode = "http"
+    let mut b = frontend_new("api")
+    b.bind_host = "0.0.0.0"
+    b.bind_port = 8080
+    b.mode = "http"
+    let mut listeners = make([]HttpListener, 0, 2)
+    listeners = append(listeners, HttpListener {
+        frontend: a,
+        fd: 10,
+        tls: 0,
+        tls_srv: tls_server_new("", ""),
+        h3: 0,
+        h3_handle: 0 - 1
+    })
+    listeners = append(listeners, HttpListener {
+        frontend: b,
+        fd: 11,
+        tls: 0,
+        tls_srv: tls_server_new("", ""),
+        h3: 0,
+        h3_handle: 0 - 1
+    })
+    assert_eq(find_http_listener_by_name(listeners, "api"), 1)
+    assert_eq(find_http_listener_idx(listeners, "web", "127.0.0.1", 80), 0)
+    assert_eq(find_http_listener_idx(listeners, "web", "127.0.0.1", 81), 0 - 1)
+    assert_eq_str(frontend_bind_key("127.0.0.1", 443), "127.0.0.1:443")
+}
+
 fn TestStickTableGetSetAndPick() {
     let mut servers = make([]Server, 0, 2)
     servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "app"))

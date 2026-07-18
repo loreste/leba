@@ -86,7 +86,7 @@ configured runtime state has eligible upstream capacity.
 
 ## Roadmap
 
-- [x] Config table reload (bind rebind still open).
+- [x] Config reload with HTTP/TCP listen rebind (H3/UDP/stats port still restart).
 - [x] Protected manual `servers_file` reload.
 - [x] Watched `servers_file` reload.
 - [x] TLS termination for simple HTTP proxying.
@@ -108,7 +108,7 @@ configured runtime state has eligible upstream capacity.
 - [x] Proxy host create/delete API + admin UI.
 - [x] App HTTP Basic (`auth_basic` / `auth_user`).
 - [ ] Built-in ACME client (external lego/acme.sh + hook for now).
-- [x] Config table reload (`SIGHUP` / `POST /admin/reload`; bind rebind later).
+- [x] Config reload + HTTP/TCP rebind (`SIGHUP` / `POST /admin/reload`).
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
 - [x] Local stick tables (`stick on src`).
 - [x] HA active/standby docs (`docs/HA.md`).

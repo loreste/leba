@@ -468,7 +468,7 @@ fn main() {
                     servers_reload_reason = f"watch_path={changed}"
                 }
             }
-            // Full table reload (routes/acls/backends/servers/headers/auth) — not bind rebind.
+            // Full table reload + HTTP/TCP listen rebind (H3 bind changes still restart).
             if not str_eq(full_reload_reason, "") {
                 let fr = full_config_reload(config_path, servers)
                 if fr.ok == 1 {
@@ -486,23 +486,31 @@ fn main() {
                     w.state_file = fr.state_file
                     w.state_key = fr.state_key
                     buckets = rate_init_all(frontends)
-                    // Refresh Frontend objects on http_listeners without rebinding sockets.
-                    let mut hi = 0
-                    while hi < len(http_listeners) {
-                        let mut hl = http_listeners[hi]
-                        let mut fi = 0
-                        while fi < len(frontends) {
-                            if str_eq(frontends[fi].name, hl.frontend.name) {
-                                if frontends[fi].bind_port == hl.frontend.bind_port {
-                                    hl.frontend = frontends[fi]
-                                }
-                            }
-                            fi = fi + 1
+                    // Rebuild http/tcp frontend lists and rebind listeners.
+                    let mut new_http_fes = make([]Frontend, 0, 8)
+                    let mut new_tcp_fes = make([]Frontend, 0, 8)
+                    let mut si_fe = 0
+                    while si_fe < len(frontends) {
+                        if str_eq(frontends[si_fe].mode, "http") {
+                            new_http_fes = append(new_http_fes, frontends[si_fe])
                         }
-                        http_listeners[hi] = hl
-                        hi = hi + 1
+                        if str_eq(frontends[si_fe].mode, "tcp") {
+                            new_tcp_fes = append(new_tcp_fes, frontends[si_fe])
+                        }
+                        si_fe = si_fe + 1
                     }
-                    log_info_event("config_reloaded", f"{full_reload_reason} servers={len(servers)} routes={len(routes)} backends={len(backends)}")
+                    http_fes = new_http_fes
+                    http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
+                    pending_clients = reindex_pending_clients(pending_clients, http_listeners)
+                    let new_tcp_fds, new_tcp_list = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
+                    tcp_fds = new_tcp_fds
+                    tcp_fes = new_tcp_list
+                    // Stats frontend metadata (port rebind not attempted — keep existing stats_fd).
+                    let sidx = frontend_mode_index(frontends, "stats", 0)
+                    if sidx >= 0 {
+                        stats_fe = frontends[sidx]
+                    }
+                    log_info_event("config_reloaded", f"{full_reload_reason} servers={len(servers)} routes={len(routes)} backends={len(backends)} http_listeners={len(http_listeners)} tcp={len(tcp_fds)}")
                 } else {
                     log_warn_event("config_reload_failed", f"{full_reload_reason} error=\"{json_escape(fr.error)}\"")
                 }
@@ -544,13 +552,20 @@ fn main() {
                             if idle_ms <= 0 {
                                 idle_ms = 30000
                             }
+                            let mut fe_name = ""
+                            if d_fe_idx >= 0 {
+                                if d_fe_idx < len(http_listeners) {
+                                    fe_name = http_listeners[d_fe_idx].frontend.name
+                                }
+                            }
                             pending_clients = append(pending_clients, PendingClient {
                                 fd: d_fd,
                                 kind: 2,
                                 frontend_idx: d_fe_idx,
                                 deadline_ms: now_ms() + idle_ms,
                                 buffer: "",
-                                ka_count: d_ka_n
+                                ka_count: d_ka_n,
+                                frontend_name: fe_name
                             })
                         } else {
                             let _ = tcp_close(d_fd)
@@ -647,7 +662,21 @@ fn main() {
                                         w.state_file = fr.state_file
                                         w.state_key = fr.state_key
                                         buckets = rate_init_all(frontends)
-                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)}")
+                                        let mut new_http_fes_a = make([]Frontend, 0, 8)
+                                        let mut si_a = 0
+                                        while si_a < len(frontends) {
+                                            if str_eq(frontends[si_a].mode, "http") {
+                                                new_http_fes_a = append(new_http_fes_a, frontends[si_a])
+                                            }
+                                            si_a = si_a + 1
+                                        }
+                                        http_fes = new_http_fes_a
+                                        http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
+                                        pending_clients = reindex_pending_clients(pending_clients, http_listeners)
+                                        let nfd_a, ntf_a = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
+                                        tcp_fds = nfd_a
+                                        tcp_fes = ntf_a
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)}")
                                     } else {
                                         log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
                                     }
@@ -766,7 +795,21 @@ fn main() {
                                         w.state_file = fr.state_file
                                         w.state_key = fr.state_key
                                         buckets = rate_init_all(frontends)
-                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)}")
+                                        let mut new_http_fes_b = make([]Frontend, 0, 8)
+                                        let mut si_b = 0
+                                        while si_b < len(frontends) {
+                                            if str_eq(frontends[si_b].mode, "http") {
+                                                new_http_fes_b = append(new_http_fes_b, frontends[si_b])
+                                            }
+                                            si_b = si_b + 1
+                                        }
+                                        http_fes = new_http_fes_b
+                                        http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
+                                        pending_clients = reindex_pending_clients(pending_clients, http_listeners)
+                                        let nfd_b, ntf_b = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
+                                        tcp_fds = nfd_b
+                                        tcp_fes = ntf_b
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)}")
                                     } else {
                                         log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
                                     }
@@ -787,7 +830,8 @@ fn main() {
                                     frontend_idx: -1,
                                     deadline_ms: now_ms() + 3000,
                                     buffer: "",
-                                    ka_count: 0
+                                    ka_count: 0,
+                                    frontend_name: ""
                                 })
                             }
                         }
@@ -965,7 +1009,8 @@ fn main() {
                                                 frontend_idx: hi_match,
                                                 deadline_ms: now_ms() + 3000,
                                                 buffer: "",
-                                                ka_count: 0
+                                                ka_count: 0,
+                                                frontend_name: h.frontend.name
                                             })
                                         }
                                     }

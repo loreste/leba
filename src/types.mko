@@ -154,6 +154,8 @@ struct PendingClient {
     buffer: string
     // Requests already completed on this keep-alive connection (0 for new accepts).
     ka_count: int
+    // Stable name for rebind remapping (HTTP data plane).
+    frontend_name: string
 }
 
 // --- global defaults & live stats ------------------------------------------

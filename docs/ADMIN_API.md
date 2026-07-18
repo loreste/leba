@@ -161,13 +161,15 @@ Requires `operator` or `admin`.
 
 ### `POST /admin/reload`
 
-Full **config table swap** without process restart: re-reads the main config
-file, runs doctor, preserves server runtime state by `(backend, name)`, re-inits
-pools for address changes, and swaps routes / ACLs / backends / frontends /
-header rules / app auth users.
+Full **config reload** without process restart: re-reads the main config file,
+runs doctor, preserves server runtime state by `(backend, name)`, re-inits pools
+for address changes, swaps routes / ACLs / backends / frontends / header rules /
+app auth users, and **rebinds HTTP/TCP listen sockets** when host:port sets
+change (reuse FD when name+bind unchanged).
 
-**Not included in v1:** opening or closing listen sockets (bind changes still
-need a process restart). TLS material on disk still uses `/admin/tls-reload`.
+**Still restart-only:** HTTP/3 (QUIC) listener recreate, stats listen port move,
+UDP frontend rebind. TLS PEMs on disk: `/admin/tls-reload` (or cert path change
+on reused TLS listeners triggers `tls_server_reload`).
 
 Also triggered by **SIGHUP**. File-watch on `servers_file` remains servers-only.
 

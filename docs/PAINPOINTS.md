@@ -113,6 +113,7 @@ configured runtime state has eligible upstream capacity.
 - [x] Local stick tables (`stick on src`).
 - [x] HA active/standby docs (`docs/HA.md`).
 - [x] WAF adapter (local + remote inspect).
+- [x] DNS service discovery (`resolve` / `resolve_interval`).
 - [ ] More exhaustive concurrent connection tests.
 - [x] Upstream forwarding of validated trace headers.
 

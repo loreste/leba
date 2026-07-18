@@ -132,6 +132,100 @@ fn backend_up_count(servers: []Server, backend: string) -> int {
     return n
 }
 
+// Prefer first IPv4 from comma-separated dns_lookup_all result; else first token.
+fn dns_prefer_ipv4(all: string) -> string {
+    if str_eq(all, "") {
+        return ""
+    }
+    let parts = str_split(all, ",")
+    let mut first = ""
+    for _, p in range parts {
+        let ip = str_trim_space(p)
+        if str_eq(ip, "") {
+            continue
+        }
+        if str_eq(first, "") {
+            first = ip
+        }
+        if dns_ip_family(ip) == 4 {
+            return ip
+        }
+    }
+    return first
+}
+
+fn dns_resolve_hostname(hostname: string) -> string {
+    if str_eq(hostname, "") {
+        return ""
+    }
+    // Already an IP?
+    if parse_ip_ok(hostname) == 1 {
+        return hostname
+    }
+    let all = dns_lookup_all(hostname)
+    let preferred = dns_prefer_ipv4(all)
+    if not str_eq(preferred, "") {
+        return preferred
+    }
+    return lookup_host(hostname)
+}
+
+// Re-resolve server hostnames marked with `resolve`. Updates host IP and drops
+// pool when the address changes so init_server_pools can reopen.
+fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Server {
+    let mut out = servers
+    let now = now_ms()
+    for bi, be in range backends {
+        let mut interval = be.resolve_interval_ms
+        if interval <= 0 {
+            interval = 10000
+        }
+        for si in range len(out) {
+            let s = out[si]
+            if not str_eq(s.backend, be.name) {
+                continue
+            }
+            if s.resolve == 0 {
+                continue
+            }
+            let mut name = s.resolve_name
+            if str_eq(name, "") {
+                name = s.host
+            }
+            let mut due = force
+            if due == 0 {
+                if s.last_resolve_ms == 0 {
+                    due = 1
+                } else {
+                    if now - s.last_resolve_ms >= interval {
+                        due = 1
+                    }
+                }
+            }
+            if due == 0 {
+                continue
+            }
+            let ip = dns_resolve_hostname(name)
+            let mut ns = out[si]
+            ns.last_resolve_ms = now
+            if str_eq(ip, "") {
+                log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} name={name}")
+                out[si] = ns
+                continue
+            }
+            if not str_eq(ip, ns.host) {
+                log_info_event("dns_resolved", f"backend={be.name} server={s.name} name={name} ip={ip}")
+                ns.host = ip
+                ns.pool = 0 - 1
+            }
+            ns.resolve_name = name
+            out[si] = ns
+        }
+        let _ = bi
+    }
+    return out
+}
+
 fn apply_passive_health(servers: []Server, idx: int, status: int, fall: int) -> []Server {
     if idx < 0 { return servers }
     if idx >= len(servers) { return servers }

@@ -436,8 +436,20 @@ fn main() {
     let mut pending_clients = make([]PendingClient, 0, workers * 16)
     let pending_limit = workers * 64
     let drain_token = mint_drain_token()
+    let mut last_bg_ms = 0
+    // Initial DNS resolve for servers marked resolve.
+    servers = run_dns_resolve(servers, backends, 1)
+    servers = init_server_pools(servers, backends)
     crew pool {
         while max_req <= 0 or completed < max_req {
+            // Background: DNS re-resolve + active health (every ~1s).
+            let now_bg = now_ms()
+            if now_bg - last_bg_ms >= 1000 {
+                last_bg_ms = now_bg
+                servers = run_dns_resolve(servers, backends, 0)
+                servers = init_server_pools(servers, backends)
+                servers = run_health_checks(servers, backends, 0)
+            }
             if signal_fired("TERM") == 1 {
                 fire_drain(drain_token)
                 log_info_event("runtime_signal", "signal=TERM action=shutdown drain=fired")

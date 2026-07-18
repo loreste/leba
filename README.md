@@ -14,6 +14,7 @@ gh repo clone loreste/leba
   and consistent-hash algorithms
 - Sticky cookie session persistence
 - Source-IP stick tables (`stick on src`, capacity/TTL)
+- DNS service discovery (`resolve` on servers + `resolve_interval`)
 - Per-server weight and maxconn limits
 - Per-backend maxconn limits
 - Connection draining (graceful removal from pool)

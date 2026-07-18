@@ -167,6 +167,8 @@ fn apply_backend_kv(b: Backend, key: string, val: string) -> Backend {
         "stick_size" => { out.stick_size = to_int(val) },
         "stick_expire" => { out.stick_expire_ms = parse_duration_ms(val) },
         "stick_expire_ms" => { out.stick_expire_ms = to_int(val) },
+        "resolve_interval" => { out.resolve_interval_ms = parse_duration_ms(val) },
+        "resolve_interval_ms" => { out.resolve_interval_ms = to_int(val) },
         _ => {}
     }
     return out
@@ -250,6 +252,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     let mut weight = 100
     let mut maxconn = 0
     let mut check = 1
+    let mut resolve = 0
     let mut i = 3
     while i < len(fields) {
         if str_eq(fields[i], "weight") {
@@ -276,7 +279,12 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
                         check = 0
                         i = i + 1
                     } else {
-                        i = i + 1
+                        if str_eq(fields[i], "resolve") {
+                            resolve = 1
+                            i = i + 1
+                        } else {
+                            i = i + 1
+                        }
                     }
                 }
             }
@@ -284,6 +292,10 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     }
     let mut s = server_new(name, host, port, weight, check, backend)
     s.maxconn = maxconn
+    s.resolve = resolve
+    if resolve == 1 {
+        s.resolve_name = host
+    }
     return s
 }
 
@@ -401,6 +413,7 @@ fn preserve_server_runtime(s: Server, current: []Server) -> Server {
     out.total_err = old.total_err
     out.total_bytes = old.total_bytes
     out.last_check_ms = old.last_check_ms
+    out.last_resolve_ms = old.last_resolve_ms
     // Keep pool only when address unchanged; else re-open on next init_server_pools.
     if str_eq(old.host, s.host) {
         if old.port == s.port {
@@ -410,6 +423,19 @@ fn preserve_server_runtime(s: Server, current: []Server) -> Server {
         }
     } else {
         out.pool = 0 - 1
+    }
+    // Preserve resolved IP if new config still has same resolve_name and resolve flag.
+    if s.resolve == 1 {
+        if not str_eq(old.resolve_name, "") {
+            if str_eq(old.resolve_name, s.resolve_name) {
+                if not str_eq(old.host, "") {
+                    out.host = old.host
+                    if old.port == s.port {
+                        out.pool = old.pool
+                    }
+                }
+            }
+        }
     }
     return out
 }

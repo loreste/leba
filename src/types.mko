@@ -21,6 +21,10 @@ struct Server {
     last_check_ms: int
     pool: int
     backend: string
+    // DNS discovery: 1 = periodically re-resolve resolve_name into host.
+    resolve: int
+    resolve_name: string
+    last_resolve_ms: int
 }
 
 struct Backend {
@@ -40,6 +44,8 @@ struct Backend {
     stick_on: string
     stick_size: int
     stick_expire_ms: int
+    // How often to re-resolve server hostnames marked resolve.
+    resolve_interval_ms: int
 }
 
 // --- routing & ACL ---------------------------------------------------------
@@ -249,7 +255,10 @@ fn server_new(name: string, host: string, port: int, weight: int, check: int, ba
         total_bytes: 0,
         last_check_ms: 0,
         pool: -1,
-        backend: backend
+        backend: backend,
+        resolve: 0,
+        resolve_name: "",
+        last_resolve_ms: 0
     }
 }
 
@@ -269,7 +278,8 @@ fn backend_new(name: string) -> Backend {
         rr_idx: 0,
         stick_on: "",
         stick_size: 100000,
-        stick_expire_ms: 1800000
+        stick_expire_ms: 1800000,
+        resolve_interval_ms: 10000
     }
 }
 

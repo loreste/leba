@@ -10,6 +10,7 @@ pull . "./src/trace.mko"
 pull . "./src/doctor.mko"
 pull . "./src/admin.mko"
 pull . "./src/proxy.mko"
+pull . "./src/waf.mko"
 pull . "./src/runtime.mko"
 pull . "./src/cli.mko"
 
@@ -773,6 +774,35 @@ fn TestRetryPlanPicksAlternates() {
     assert(plan.n >= 2)
     assert_eq(plan.h0.server_idx, 0)
     assert(plan.h1.server_idx != 0)
+}
+
+fn TestWafLocalBlocksTraversalAndSqli() {
+    let a = waf_local_scan("GET", "/ok", "")
+    assert_eq_str(a.action, "allow")
+    let b = waf_local_scan("GET", "/x/../../../etc/passwd", "")
+    assert_eq_str(b.action, "block")
+    let c = waf_local_scan("POST", "/login", "1' or '1'='1")
+    assert_eq_str(c.action, "block")
+    let d = waf_inspect("detect", "", "open", 50, "GET", "/x/../y", "", "GET /x/../y HTTP/1.1\r\n\r\n")
+    assert_eq_str(d.action, "detect")
+    let e = waf_inspect("block", "", "open", 50, "GET", "/x/../y", "", "GET /x/../y HTTP/1.1\r\n\r\n")
+    assert_eq_str(e.action, "block")
+    let f = waf_inspect("off", "", "open", 50, "GET", "/x/../y", "", "")
+    assert_eq_str(f.action, "allow")
+}
+
+fn TestWafParseAndUrl() {
+    let raw = "frontend web\n  bind 80\n  mode http\n  waf block\n  waf_url http://127.0.0.1:8999/v1/inspect\n  waf_fail closed\n  waf_timeout 100ms\n  default_backend app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.frontends[0].waf_mode, "block")
+    assert_eq_str(w.frontends[0].waf_url, "http://127.0.0.1:8999/v1/inspect")
+    assert_eq_str(w.frontends[0].waf_fail, "closed")
+    assert_eq(w.frontends[0].waf_timeout_ms, 100)
+    let host, port, path = waf_parse_url("http://10.0.0.5:9000/inspect")
+    assert_eq_str(host, "10.0.0.5")
+    assert_eq(port, 9000)
+    assert_eq_str(path, "/inspect")
 }
 
 fn TestFindHttpListenerByNameAndBind() {

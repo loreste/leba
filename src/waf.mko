@@ -1,0 +1,251 @@
+// WAF adapter: local signature rules + optional remote HTTP inspect sidecar.
+pack waf
+
+struct WafResult {
+    action: string
+    status: int
+    rule: string
+    detail: string
+}
+
+fn waf_result_allow() -> WafResult {
+    return WafResult {
+        action: "allow",
+        status: 200,
+        rule: "",
+        detail: ""
+    }
+}
+
+fn waf_result_block(status: int, rule: string, detail: string) -> WafResult {
+    let mut st = status
+    if st <= 0 {
+        st = 403
+    }
+    return WafResult {
+        action: "block",
+        status: st,
+        rule: rule,
+        detail: detail
+    }
+}
+
+fn waf_mode_active(mode: string) -> int {
+    if str_eq(mode, "detect") {
+        return 1
+    }
+    if str_eq(mode, "block") {
+        return 1
+    }
+    if str_eq(mode, "on") {
+        return 1
+    }
+    return 0
+}
+
+// Cheap local signatures (path + body). Case-insensitive substring checks.
+fn waf_local_scan(method: string, path: string, body: string) -> WafResult {
+    let hay = str_to_lower(path + " " + body)
+    // Path traversal
+    if str_contains(hay, "../") {
+        return waf_result_block(403, "local.path_traversal", "../")
+    }
+    if str_contains(hay, "..\\") {
+        return waf_result_block(403, "local.path_traversal", "..\\")
+    }
+    // XSS probes
+    if str_contains(hay, "<script") {
+        return waf_result_block(403, "local.xss_script", "<script")
+    }
+    if str_contains(hay, "javascript:") {
+        return waf_result_block(403, "local.xss_js", "javascript:")
+    }
+    // SQLi probes
+    if str_contains(hay, " union select") {
+        return waf_result_block(403, "local.sqli_union", "union select")
+    }
+    if str_contains(hay, "' or '1'='1") {
+        return waf_result_block(403, "local.sqli_or", "or 1=1")
+    }
+    if str_contains(hay, " or 1=1") {
+        return waf_result_block(403, "local.sqli_or", "or 1=1")
+    }
+    if str_contains(hay, "; drop table") {
+        return waf_result_block(403, "local.sqli_drop", "drop table")
+    }
+    // Command injection probes
+    if str_contains(hay, ";wget ") {
+        return waf_result_block(403, "local.rce_wget", ";wget")
+    }
+    if str_contains(hay, "$((") {
+        return waf_result_block(403, "local.rce_subshell", "$((")
+    }
+    if str_contains(hay, "/etc/passwd") {
+        return waf_result_block(403, "local.lfi_passwd", "/etc/passwd")
+    }
+    let _ = method
+    return waf_result_allow()
+}
+
+// Parse http://host:port/path into components. Defaults port 80.
+fn waf_parse_url(url: string) -> (string, int, string) {
+    let mut u = url
+    if str_has_prefix(u, "http://") {
+        u = substr(u, 7, str_len(u))
+    } else {
+        if str_has_prefix(u, "https://") {
+            // TLS upstream for WAF not supported in v1 — treat host:port still.
+            u = substr(u, 8, str_len(u))
+        }
+    }
+    let slash = str_index(u, "/")
+    let mut hostport = u
+    let mut path = "/v1/inspect"
+    if slash >= 0 {
+        hostport = substr(u, 0, slash)
+        path = substr(u, slash, str_len(u))
+    }
+    let hp = parse_host_port(hostport)
+    let mut port = to_int(hp.port)
+    if port <= 0 {
+        port = 80
+    }
+    let mut host = hp.host
+    if str_eq(host, "") {
+        host = hostport
+    }
+    let mut out_path = path
+    if str_eq(out_path, "") {
+        out_path = "/v1/inspect"
+    }
+    return (host, port, out_path)
+}
+
+// Remote inspect: POST raw request (truncated) to sidecar. Returns allow/block/error.
+fn waf_remote_inspect(
+    waf_url: string,
+    timeout_ms: int,
+    req_id: string,
+    raw: string
+) -> WafResult {
+    if str_eq(waf_url, "") {
+        return waf_result_allow()
+    }
+    let host, port, path = waf_parse_url(waf_url)
+    if str_eq(host, "") {
+        return WafResult {
+            action: "error",
+            status: 503,
+            rule: "remote.bad_url",
+            detail: "empty host"
+        }
+    }
+    let mut t = timeout_ms
+    if t <= 0 {
+        t = 50
+    }
+    // Cap body sent to WAF for cost control.
+    let mut payload = raw
+    if str_len(payload) > 65536 {
+        payload = substr(payload, 0, 65536)
+    }
+    let mut headers = str_builder()
+    builder_write(headers, "Content-Type: application/octet-stream\r\n")
+    builder_write(headers, "X-Leba-Request-Id: ")
+    builder_write(headers, req_id)
+    builder_write(headers, "\r\n")
+    let fr = http_forward_full(host, port, "POST", path, builder_string(headers), payload, t)
+    if http_forward_ok(fr) == 0 {
+        return WafResult {
+            action: "error",
+            status: 503,
+            rule: "remote.unreachable",
+            detail: "inspect failed"
+        }
+    }
+    let st = http_forward_status(fr)
+    let body = http_forward_body(fr)
+    if st == 403 {
+        return waf_result_block(403, "remote.block", "status 403")
+    }
+    if st >= 500 {
+        return WafResult {
+            action: "error",
+            status: st,
+            rule: "remote.5xx",
+            detail: int_to_string(st)
+        }
+    }
+    // Prefer JSON action field.
+    if str_contains(body, "\"action\":\"block\"") {
+        return waf_result_block(403, "remote.json_block", "action=block")
+    }
+    if str_contains(body, "\"action\": \"block\"") {
+        return waf_result_block(403, "remote.json_block", "action=block")
+    }
+    if str_contains(body, "\"action\":\"deny\"") {
+        return waf_result_block(403, "remote.json_deny", "action=deny")
+    }
+    return waf_result_allow()
+}
+
+// Full inspect pipeline for a frontend.
+// mode: detect|block|on  fail: open|closed
+fn waf_inspect(
+    mode: string,
+    waf_url: string,
+    fail_mode: string,
+    timeout_ms: int,
+    method: string,
+    path: string,
+    body: string,
+    raw: string
+) -> WafResult {
+    if waf_mode_active(mode) == 0 {
+        return waf_result_allow()
+    }
+    let local = waf_local_scan(method, path, body)
+    if str_eq(local.action, "block") {
+        if str_eq(mode, "detect") {
+            // Detect: log-style allow but mark detail for caller to log.
+            return WafResult {
+                action: "detect",
+                status: local.status,
+                rule: local.rule,
+                detail: local.detail
+            }
+        }
+        return local
+    }
+    if not str_eq(waf_url, "") {
+        let rid = make_req_id()
+        let remote = waf_remote_inspect(waf_url, timeout_ms, rid, raw)
+        if str_eq(remote.action, "block") {
+            if str_eq(mode, "detect") {
+                return WafResult {
+                    action: "detect",
+                    status: remote.status,
+                    rule: remote.rule,
+                    detail: remote.detail
+                }
+            }
+            return remote
+        }
+        if str_eq(remote.action, "error") {
+            if str_eq(fail_mode, "closed") {
+                if str_eq(mode, "detect") {
+                    return WafResult {
+                        action: "detect",
+                        status: 503,
+                        rule: remote.rule,
+                        detail: "fail_closed"
+                    }
+                }
+                return waf_result_block(503, remote.rule, "fail_closed")
+            }
+            // fail open
+            return waf_result_allow()
+        }
+    }
+    return waf_result_allow()
+}

@@ -37,6 +37,7 @@ gh repo clone loreste/leba
 - ACL engine: deny/allow by path, host, method, header, source IP
 - IP allowlist/blocklist via `src` ACL rules (access lists)
 - Application HTTP Basic (`auth_basic` + `auth_user` on frontends)
+- WAF adapter: local signatures + optional remote inspect sidecar
 - ACME HTTP-01 webroot (`acme_webroot`) + live TLS reload
 - Per-frontend and per-client-IP rate limiting (token bucket)
 - Request body size limits

@@ -25,6 +25,10 @@
 //     acme_webroot PATH       # HTTP-01 challenge tokens (defaults inherit)
 //     auth_basic REALM        # require HTTP Basic for proxied apps (non-ACME)
 //     auth_user USER PASS     # credential for auth_basic on this frontend
+//     waf detect|block|off    # local rules; optional remote inspect
+//     waf_url http://127.0.0.1:8999/v1/inspect
+//     waf_fail open|closed
+//     waf_timeout 50ms
 //     auth USER:PASS[:ROLE]   # stats admin; ROLE viewer|operator|admin
 //     admin_user USER PASS ROLE
 //     auth_hash USER HASH ROLE
@@ -1015,6 +1019,32 @@ fn parse_config_text(raw: string) -> World {
                                                         fe.acme_webroot = expand_env(fields[1])
                                                     }
                                                 } else {
+                                                if str_eq(head, "waf") {
+                                                    // waf detect|block|off|on
+                                                    if len(fields) >= 2 {
+                                                        fe.waf_mode = fields[1]
+                                                    }
+                                                } else {
+                                                if str_eq(head, "waf_url") {
+                                                    if len(fields) >= 2 {
+                                                        fe.waf_url = expand_env(fields[1])
+                                                    }
+                                                } else {
+                                                if str_eq(head, "waf_fail") {
+                                                    if len(fields) >= 2 {
+                                                        fe.waf_fail = fields[1]
+                                                    }
+                                                } else {
+                                                if str_eq(head, "waf_timeout") {
+                                                    if len(fields) >= 2 {
+                                                        fe.waf_timeout_ms = parse_duration_ms(fields[1])
+                                                    }
+                                                } else {
+                                                if str_eq(head, "waf_timeout_ms") {
+                                                    if len(fields) >= 2 {
+                                                        fe.waf_timeout_ms = to_int(fields[1])
+                                                    }
+                                                } else {
                                                 if str_eq(head, "auth_basic") {
                                                     // auth_basic "My Realm"  or  auth_basic MyRealm
                                                     if len(fields) >= 2 {
@@ -1152,6 +1182,11 @@ fn parse_config_text(raw: string) -> World {
                                                             }
                                                         }
                                                     }
+                                                }
+                                                }
+                                                }
+                                                }
+                                                }
                                                 }
                                                 }
                                                 }

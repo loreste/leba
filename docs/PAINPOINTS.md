@@ -112,6 +112,7 @@ configured runtime state has eligible upstream capacity.
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
 - [x] Local stick tables (`stick on src`).
 - [x] HA active/standby docs (`docs/HA.md`).
+- [x] WAF adapter (local + remote inspect).
 - [ ] More exhaustive concurrent connection tests.
 - [x] Upstream forwarding of validated trace headers.
 

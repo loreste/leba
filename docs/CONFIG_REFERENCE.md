@@ -95,6 +95,10 @@ Supported keys:
 | `acme_webroot` | path | Directory of ACME HTTP-01 challenge tokens. Serves `GET /.well-known/acme-challenge/<token>` as plain text from `<path>/<token>` (no traversal). Bypasses redirect, rate limit, ACL, and app Basic auth. Inherited from `defaults` when unset. |
 | `auth_basic` | realm string | Require HTTP Basic for all non-ACME requests on this frontend. Example: `auth_basic "My App"`. |
 | `auth_user` | `USER PASS` | Credential for `auth_basic` on this frontend (repeatable). Plaintext in config — prefer network-restricted frontends. |
+| `waf` | `off`/`detect`/`block`/`on` | Enable WAF. Local signatures always; optional remote via `waf_url`. See `docs/WAF.md`. |
+| `waf_url` | URL | Remote inspect endpoint, e.g. `http://127.0.0.1:8999/v1/inspect`. |
+| `waf_fail` | `open`/`closed` | Remote error policy (default `open`). |
+| `waf_timeout` | duration | Remote inspect budget (default `50ms`). |
 | `auth` | `user:pass[:role]` | Backward-compatible stats admin credential. Role defaults to `admin`. |
 | `admin_user` | `user pass role` | Additional stats user. Role is `viewer`, `operator`, or `admin`. |
 | `auth_hash` | `user hash role` | Stats admin credential using Argon2id PHC, `leba-kdf-v1`, or legacy SHA-256. |

@@ -1794,6 +1794,28 @@ fn prepare_raw_dispatch(
         }
     }
 
+    // WAF (local signatures + optional remote inspect). ACME already bypassed.
+    if waf_mode_active(fe.waf_mode) == 1 {
+        let wr = waf_inspect(fe.waf_mode, fe.waf_url, fe.waf_fail, fe.waf_timeout_ms, method, path, body, req.raw)
+        if str_eq(wr.action, "detect") {
+            log_warn_event("waf_detect", f"frontend={fe.name} rule={wr.rule} path={path}")
+        }
+        if str_eq(wr.action, "block") {
+            log_proxy_reject("waf_block", method, path, host, f"status={wr.status} rule={wr.rule}")
+            let mut msg = "forbidden\n"
+            if wr.status == 503 {
+                msg = "service unavailable\n"
+            }
+            let _ = raw_http_respond_method(c, method, wr.status, msg)
+            let mut dwaf = empty
+            dwaf.denied = 1
+            dwaf.servers = srv_list
+            dwaf.backends = be_list
+            dwaf.buckets = rate_list
+            return dwaf
+        }
+    }
+
     // Force HTTPS: answer on the cleartext frontend with a scheme redirect.
     // Exempt /.well-known/acme-challenge/ when webroot not configured (fall through).
     if fe.redirect_https == 1 {

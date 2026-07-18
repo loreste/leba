@@ -119,6 +119,12 @@ struct Frontend {
     acme_webroot: string
     // Non-empty = require HTTP Basic for all non-ACME requests on this frontend.
     auth_basic_realm: string
+    // WAF: ""|"off"|"detect"|"block"|"on"; optional remote inspect URL.
+    waf_mode: string
+    waf_url: string
+    // "open" (default) or "closed" when remote WAF errors.
+    waf_fail: string
+    waf_timeout_ms: int
     // 1 = answer with HTTP→HTTPS redirect (no backend). code defaults to 301.
     redirect_https: int
     redirect_code: int
@@ -288,6 +294,10 @@ fn frontend_new(name: string) -> Frontend {
         root: "",
         acme_webroot: "",
         auth_basic_realm: "",
+        waf_mode: "",
+        waf_url: "",
+        waf_fail: "open",
+        waf_timeout_ms: 50,
         redirect_https: 0,
         redirect_code: 301
     }

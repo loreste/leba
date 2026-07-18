@@ -793,6 +793,30 @@ fn TestDnsPreferIpv4AndResolveFlag() {
     assert(resolved[0].last_resolve_ms > 0)
 }
 
+fn TestDnsExpandCreatesMembers() {
+    assert_eq_str(dns_member_name("app", "10.0.0.1"), "app-10_0_0_1")
+    let ips = dns_split_ips("10.0.0.1,10.0.0.2")
+    assert_eq(len(ips), 2)
+    let raw = "backend app\n  resolve_interval 5s\n  server svc localhost:8080 weight 50 check resolve expand\nfrontend web\n  bind 1\n  mode http\n  default_backend app\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.servers[0].resolve_expand, 1)
+    assert_eq(server_eligible(w.servers[0]), 0)
+    let expanded = run_dns_resolve(w.servers, w.backends, 1)
+    // template + at least one member for localhost
+    assert(len(expanded) >= 2)
+    let mut members = 0
+    for _, s in range expanded {
+        if str_eq(s.resolve_parent, "svc") {
+            members = members + 1
+            assert(server_eligible(s) == 1 or s.alive == 1)
+            assert_eq(s.port, 8080)
+            assert_eq(s.weight, 50)
+        }
+    }
+    assert(members >= 1)
+}
+
 fn TestWafLocalBlocksTraversalAndSqli() {
     let a = waf_local_scan("GET", "/ok", "")
     assert_eq_str(a.action, "allow")

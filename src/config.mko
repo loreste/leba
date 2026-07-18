@@ -253,6 +253,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     let mut maxconn = 0
     let mut check = 1
     let mut resolve = 0
+    let mut resolve_expand = 0
     let mut i = 3
     while i < len(fields) {
         if str_eq(fields[i], "weight") {
@@ -283,7 +284,13 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
                             resolve = 1
                             i = i + 1
                         } else {
-                            i = i + 1
+                            if str_eq(fields[i], "expand") {
+                                resolve_expand = 1
+                                resolve = 1
+                                i = i + 1
+                            } else {
+                                i = i + 1
+                            }
                         }
                     }
                 }
@@ -293,6 +300,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     let mut s = server_new(name, host, port, weight, check, backend)
     s.maxconn = maxconn
     s.resolve = resolve
+    s.resolve_expand = resolve_expand
     if resolve == 1 {
         s.resolve_name = host
     }

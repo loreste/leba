@@ -30,14 +30,30 @@ Literal IP addresses ignore resolve (no-op).
 4. Runtime state (drain/alive/counters) is preserved across config reload when the
    resolve name is unchanged.
 
+## Multi-IP expand
+
+```text
+backend app
+  resolve_interval 10s
+  server svc my-headless.default.svc.cluster.local:8080 weight 100 check resolve expand
+```
+
+When `expand` is set (implies `resolve`):
+
+1. The configured server is a **template** (not pickable).
+2. Each A/AAAA answer becomes a synthetic member `svc-<sanitized-ip>` (e.g. `svc-10_0_0_5`).
+3. Members inherit weight/port/check/maxconn from the template.
+4. Obsolete IPs are drained (if still busy) then removed when idle.
+
+Use with **headless** Kubernetes services or DNS that returns multiple pod IPs.
+
+Without `expand`, only the preferred single IP is used on that server row.
+
 ## Notes
 
-- This is **not** full SRV-based multi-target expansion yet (one configured server
-  → one active IP). Multiple `server` lines or external automation remain the
-  way to list N stable members.
-- Pair with Kubernetes headless services or external DNS that returns the VIP /
-  preferred address you want to hit.
-- Failed lookups log `dns_resolve_failed` and keep the last known IP.
+- DNS **SRV** records are not parsed yet.
+- Failed lookups log `dns_resolve_failed` and keep the last known members/IP.
+- Pair expand with health checks so bad pods leave the pool.
 
 ## Related
 

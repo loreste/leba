@@ -284,7 +284,8 @@ Server lines:
 server NAME HOST:PORT [weight N] [maxconn N] [check|no_check] [resolve]
 ```
 
-Optional `resolve` re-resolves `HOST` on `resolve_interval` (see `docs/DNS.md`).
+Optional `resolve` re-resolves `HOST` on `resolve_interval`. Add `expand` to
+create one pool member per A/AAAA answer (see `docs/DNS.md`).
 
 Examples:
 

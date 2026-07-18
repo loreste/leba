@@ -25,6 +25,10 @@ struct Server {
     resolve: int
     resolve_name: string
     last_resolve_ms: int
+    // 1 = expand A/AAAA into multiple members (template itself is not pickable).
+    resolve_expand: int
+    // If non-empty, this row is a synthetic child of that template server name.
+    resolve_parent: string
 }
 
 struct Backend {
@@ -258,7 +262,9 @@ fn server_new(name: string, host: string, port: int, weight: int, check: int, ba
         backend: backend,
         resolve: 0,
         resolve_name: "",
-        last_resolve_ms: 0
+        last_resolve_ms: 0,
+        resolve_expand: 0,
+        resolve_parent: ""
     }
 }
 

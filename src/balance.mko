@@ -262,6 +262,170 @@ fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Serve
     return out
 }
 
+// --- Stick tables (accept-thread only; map[string]string values "server|expires_ms") ---
+
+fn stick_make_key(backend: string, kind: string, val: string) -> string {
+    return backend + "|" + kind + "|" + val
+}
+
+fn stick_encode(server_name: string, expires_ms: int) -> string {
+    return server_name + "|" + int_to_string(expires_ms)
+}
+
+fn stick_decode_server(encoded: string) -> string {
+    let cut = str_index(encoded, "|")
+    if cut < 0 {
+        return encoded
+    }
+    return substr(encoded, 0, cut)
+}
+
+fn stick_decode_expires(encoded: string) -> int {
+    let cut = str_index(encoded, "|")
+    if cut < 0 {
+        return 0
+    }
+    return to_int(substr(encoded, cut + 1, str_len(encoded)))
+}
+
+fn stick_table_get(table: map[string]string, key: string, now_ms: int) -> string {
+    if str_eq(key, "") {
+        return ""
+    }
+    let enc = table[key]
+    if str_eq(enc, "") {
+        return ""
+    }
+    let exp = stick_decode_expires(enc)
+    if exp > 0 {
+        if now_ms > exp {
+            return ""
+        }
+    }
+    return stick_decode_server(enc)
+}
+
+// Returns updated table and new entry count (approx: +1 only when key was empty).
+fn stick_table_set(
+    table: map[string]string,
+    key: string,
+    server_name: string,
+    expire_ms: int,
+    max_size: int,
+    now_ms: int,
+    entry_count: int
+) -> (map[string]string, int) {
+    if str_eq(key, "") {
+        return (table, entry_count)
+    }
+    if str_eq(server_name, "") {
+        return (table, entry_count)
+    }
+    let mut out = table
+    let mut count = entry_count
+    let mut max = max_size
+    if max <= 0 {
+        max = 100000
+    }
+    let existing = out[key]
+    if str_eq(existing, "") {
+        if count >= max {
+            // At capacity — refuse new keys (existing keys still refresh).
+            return (out, count)
+        }
+        count = count + 1
+    }
+    let mut ttl = expire_ms
+    if ttl <= 0 {
+        ttl = 1800000
+    }
+    out[key] = stick_encode(server_name, now_ms + ttl)
+    return (out, count)
+}
+
+fn find_server_idx_by_name(servers: []Server, backend: string, name: string) -> int {
+    for i, s in range servers {
+        if str_eq(s.backend, backend) {
+            if str_eq(s.name, name) {
+                return i
+            }
+        }
+    }
+    return 0 - 1
+}
+
+// Pick with sticky cookie (first), then stick table, then balance; may update stick table.
+// Returns (server_idx, table, entry_count).
+fn pick_server_stick(
+    servers: []Server,
+    be: Backend,
+    client_key: string,
+    sticky_name: string,
+    sticky_val: string,
+    stick_table: map[string]string,
+    stick_key: string,
+    now_ms: int,
+    entry_count: int
+) -> (int, map[string]string, int) {
+    let mut table = stick_table
+    let mut count = entry_count
+    // Cookie sticky first (inside pick_server). Table only when no usable cookie pin.
+    let mut cookie_pinned = 0
+    if not str_eq(sticky_name, "") {
+        if not str_eq(sticky_val, "") {
+            let pi = find_server_idx_by_name(servers, be.name, sticky_val)
+            if pi >= 0 {
+                if server_eligible(servers[pi]) == 1 {
+                    cookie_pinned = 1
+                    return (pi, table, count)
+                }
+            }
+        }
+    }
+    if not str_eq(be.stick_on, "") {
+        if not str_eq(stick_key, "") {
+            let hit = stick_table_get(table, stick_key, now_ms)
+            if not str_eq(hit, "") {
+                let hi = find_server_idx_by_name(servers, be.name, hit)
+                if hi >= 0 {
+                    if server_eligible(servers[hi]) == 1 {
+                        return (hi, table, count)
+                    }
+                }
+            }
+        }
+    }
+    let si = pick_server(servers, be, client_key, sticky_name, sticky_val)
+    if si >= 0 {
+        if not str_eq(be.stick_on, "") {
+            if not str_eq(stick_key, "") {
+                if cookie_pinned == 0 {
+                    let t2, c2 = stick_table_set(table, stick_key, servers[si].name, be.stick_expire_ms, be.stick_size, now_ms, count)
+                    table = t2
+                    count = c2
+                }
+            }
+        }
+    }
+    return (si, table, count)
+}
+
+// Client identity for stick-on-src (optional first X-Forwarded-For hop).
+fn stick_client_key(fe: Frontend, peer_ip: string, xff_header: string) -> string {
+    if fe.xff == 1 {
+        if not str_eq(xff_header, "") {
+            let parts = str_split(xff_header, ",")
+            if len(parts) > 0 {
+                let first = str_trim_space(parts[0])
+                if not str_eq(first, "") {
+                    return first
+                }
+            }
+        }
+    }
+    return peer_ip
+}
+
 fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
     if idx < 0 {
         return servers

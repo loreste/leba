@@ -222,6 +222,8 @@ Supported keys:
 | Key | Value | Notes |
 |-----|-------|-------|
 | `balance` | policy | `round_robin`, `least_conn`, `ip_hash`, `sip_call_id`, `weighted`, `random`, `consistent_hash`. |
+| `stick on` | `src` | Source-IP stick table (accept-thread). Cookie sticky on the frontend still wins when present. With `xff on`, first `X-Forwarded-For` hop is used. |
+| `stick_table` | `size N expire DUR` | Table capacity (default 100000) and entry TTL (default 30m). Example: `stick_table size 100000 expire 30m`. |
 | `servers_file` | path | Loads server lines at startup and via protected admin reload. |
 | `health_path` | path or `tcp` | HTTP path or TCP connect probe. |
 | `health_interval` | duration | Probe interval. |

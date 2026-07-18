@@ -775,6 +775,41 @@ fn TestRetryPlanPicksAlternates() {
     assert(plan.h1.server_idx != 0)
 }
 
+fn TestStickTableGetSetAndPick() {
+    let mut servers = make([]Server, 0, 2)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "app"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "app"))
+    let mut be = backend_new("app")
+    be.stick_on = "src"
+    be.stick_size = 100
+    be.stick_expire_ms = 60000
+    let mut table = make(map[string]string)
+    let key = stick_make_key("app", "src", "10.0.0.9")
+    let now = 1000000
+    let t1, c1 = stick_table_set(table, key, "b", be.stick_expire_ms, be.stick_size, now, 0)
+    assert_eq(c1, 1)
+    assert_eq_str(stick_table_get(t1, key, now + 10), "b")
+    assert_eq_str(stick_table_get(t1, key, now + 999999), "")
+    let si, t2, c2 = pick_server_stick(servers, be, "client", "", "", t1, key, now + 10, c1)
+    assert_eq(si, 1)
+    assert_eq(c2, 1)
+    let _ = t2
+    // Cookie sticky wins over table
+    let si2, t3, c3 = pick_server_stick(servers, be, "client", "SID", "a", t1, key, now + 10, c1)
+    assert_eq(si2, 0)
+    let _ = t3
+    let _ = c3
+}
+
+fn TestStickOnSrcParse() {
+    let raw = "backend app\n  balance least_conn\n  stick on src\n  stick_table size 5000 expire 10m\n  server a 127.0.0.1:1 weight 1 check\nfrontend web\n  bind 1\n  mode http\n  default_backend app\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq_str(w.backends[0].stick_on, "src")
+    assert_eq(w.backends[0].stick_size, 5000)
+    assert_eq(w.backends[0].stick_expire_ms, 600000)
+}
+
 fn TestRedirectAndDeadRouteParse() {
     let raw = "frontend web\n  bind 80\n  mode http\n  route host old.example redirect https://new.example 308\n  route host gone.example dead 410\n  route default -> app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
     let w = parse_config_text(raw)

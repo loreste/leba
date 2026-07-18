@@ -13,6 +13,7 @@ gh repo clone loreste/leba
 - Round-robin, least-connection, IP-hash, weighted, random, SIP Call-ID,
   and consistent-hash algorithms
 - Sticky cookie session persistence
+- Source-IP stick tables (`stick on src`, capacity/TTL)
 - Per-server weight and maxconn limits
 - Per-backend maxconn limits
 - Connection draining (graceful removal from pool)

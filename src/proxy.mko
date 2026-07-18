@@ -155,6 +155,9 @@ struct Dispatch {
     frontend_idx: int = 0 - 1
     // Prior keep-alive request count on this connection (for max_keepalive_requests).
     ka_count: int = 0
+    // Stick table snapshot for accept-thread update (map is accept-only).
+    stick_table: map[string]string
+    stick_count: int = 0
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
@@ -1500,7 +1503,9 @@ fn prepare_dispatch(
         resp_extra_headers: resp_extra,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 
     if str_eq(method, "") {
@@ -1675,7 +1680,9 @@ fn prepare_dispatch(
         resp_extra_headers: resp_extra,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 }
 
@@ -1693,7 +1700,9 @@ fn prepare_raw_dispatch(
     header_rules: []HeaderRule,
     app_auth_users: []AppAuthUser,
     frontend_idx: int,
-    ka_count: int
+    ka_count: int,
+    stick_table: map[string]string,
+    stick_count: int
 ) -> Dispatch {
     let method = req.method
     let path = req.path
@@ -1708,6 +1717,8 @@ fn prepare_raw_dispatch(
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
+    let mut stick = stick_table
+    let mut stick_n = stick_count
     let empty = Dispatch {
         need_worker: 0,
         c: c,
@@ -1738,9 +1749,11 @@ fn prepare_raw_dispatch(
         retry_plan: retry_plan_empty(),
         frontend_idx: frontend_idx,
         ka_count: ka_count,
+        stick_table: stick,
+        stick_count: stick_n,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
     }
 
     if req.bytes_in == 0 {
@@ -1993,7 +2006,15 @@ fn prepare_raw_dispatch(
         sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
     }
 
-    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    let mut stick_key = ""
+    if str_eq(be.stick_on, "src") {
+        let xff = raw_header(req.raw, "X-Forwarded-For")
+        let ck = stick_client_key(fe, client_ip, xff)
+        stick_key = stick_make_key(be.name, "src", ck)
+    }
+    let si, stick2, stick_n2 = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
+    stick = stick2
+    stick_n = stick_n2
     be = next_rr(be)
     be_list[bi] = be
     if si < 0 {
@@ -2006,6 +2027,8 @@ fn prepare_raw_dispatch(
         d.servers = srv_list
         d.backends = be_list
         d.buckets = rate_list
+        d.stick_table = stick
+        d.stick_count = stick_n
         return d
     }
 
@@ -2057,9 +2080,11 @@ fn prepare_raw_dispatch(
         retry_plan: plan,
         frontend_idx: frontend_idx,
         ka_count: ka_count,
+        stick_table: stick,
+        stick_count: stick_n,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
     }
 }
 
@@ -2921,7 +2946,9 @@ fn prepare_ws_dispatch(
         resp_extra_headers: resp_extra,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 
     if req.ok == 0 {
@@ -3020,7 +3047,9 @@ fn prepare_ws_dispatch(
         resp_extra_headers: resp_extra,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 }
 
@@ -3302,7 +3331,9 @@ fn prepare_tcp_dispatch(
         bytes_in: 0,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 
     if frontend_at_maxconn(srv_list, fe) == 1 {
@@ -3406,7 +3437,9 @@ fn prepare_tcp_dispatch(
         bytes_in: str_len(initial_data),
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: make(map[string]string),
+        stick_count: 0,
     }
 }
 

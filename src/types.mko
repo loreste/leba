@@ -36,6 +36,10 @@ struct Backend {
     maxconn: int
     retries: int
     rr_idx: int
+    // Stick table: "" | "src" (client IP, respects xff). Cookie sticky remains frontend-level.
+    stick_on: string
+    stick_size: int
+    stick_expire_ms: int
 }
 
 // --- routing & ACL ---------------------------------------------------------
@@ -254,7 +258,10 @@ fn backend_new(name: string) -> Backend {
         connect_timeout_ms: 5000,
         maxconn: 0,
         retries: 1,
-        rr_idx: 0
+        rr_idx: 0,
+        stick_on: "",
+        stick_size: 100000,
+        stick_expire_ms: 1800000
     }
 }
 

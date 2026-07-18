@@ -70,7 +70,8 @@ configured runtime state has eligible upstream capacity.
 ## Honest Boundaries
 
 - Leba covers a focused subset of load-balancing behavior.
-- Config hot-reload is not implemented yet.
+- Config **table** reload is implemented (`SIGHUP` / `POST /admin/reload`);
+  listen bind rebind still needs restart.
 - Runtime server state is persisted across restart when `state_file` is
   configured; otherwise it is in-memory only.
 - TLS, HTTP/2 (multiplexed request/response), and HTTP/3/QUIC ingress (when
@@ -85,7 +86,7 @@ configured runtime state has eligible upstream capacity.
 
 ## Roadmap
 
-- [ ] Hitless config reload.
+- [x] Config table reload (bind rebind still open).
 - [x] Protected manual `servers_file` reload.
 - [x] Watched `servers_file` reload.
 - [x] TLS termination for simple HTTP proxying.
@@ -109,6 +110,8 @@ configured runtime state has eligible upstream capacity.
 - [ ] Built-in ACME client (external lego/acme.sh + hook for now).
 - [x] Config table reload (`SIGHUP` / `POST /admin/reload`; bind rebind later).
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
+- [x] Local stick tables (`stick on src`).
+- [x] HA active/standby docs (`docs/HA.md`).
 - [ ] More exhaustive concurrent connection tests.
 - [x] Upstream forwarding of validated trace headers.
 

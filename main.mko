@@ -113,6 +113,8 @@ fn main() {
     let mut acls = w.acls
     let mut header_rules = w.header_rules
     let mut app_auth_users = w.app_auth_users
+    let mut stick_table = make(map[string]string)
+    let mut stick_count = 0
     let mut config_path = path
     let config_dir = path_dir(path)
     log_info_event("server_pools_ready", f"servers={len(servers)}")
@@ -657,10 +659,12 @@ fn main() {
                                     if pc.frontend_idx < len(http_listeners) {
                                         let ph = http_listeners[pc.frontend_idx]
                                         let raw_reqp = parse_raw_request(raw_pending)
-                                        let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets, header_rules, app_auth_users, pc.frontend_idx, pc.ka_count)
+                                        let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets, header_rules, app_auth_users, pc.frontend_idx, pc.ka_count, stick_table, stick_count)
                                         servers = dp.servers
                                         backends = dp.backends
                                         buckets = dp.buckets
+                                        stick_table = dp.stick_table
+                                        stick_count = dp.stick_count
                                         if dp.need_worker == 0 {
                                             let _ = tcp_close(pc.fd)
                                             if dp.bytes_in > 0 {

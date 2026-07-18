@@ -159,6 +159,10 @@ fn apply_backend_kv(b: Backend, key: string, val: string) -> Backend {
         "connect_timeout_ms" => { out.connect_timeout_ms = to_int(val) },
         "maxconn" => { out.maxconn = to_int(val) },
         "retries" => { out.retries = to_int(val) },
+        "stick_on" => { out.stick_on = val },
+        "stick_size" => { out.stick_size = to_int(val) },
+        "stick_expire" => { out.stick_expire_ms = parse_duration_ms(val) },
+        "stick_expire_ms" => { out.stick_expire_ms = to_int(val) },
         _ => {}
     }
     return out
@@ -1197,8 +1201,43 @@ fn parse_config_text(raw: string) -> World {
                     w.servers = append(w.servers, parse_server_line(fields, cur_name))
                 }
             } else {
-                if len(fields) >= 2 {
-                    be = apply_backend_kv(be, head, expand_env(fields[1]))
+                if str_eq(head, "stick") {
+                    // stick on src
+                    if len(fields) >= 3 {
+                        if str_eq(fields[1], "on") {
+                            be.stick_on = fields[2]
+                        }
+                    }
+                } else {
+                    if str_eq(head, "stick_table") {
+                        // stick_table size 100000 expire 30m
+                        let mut ti = 1
+                        while ti < len(fields) {
+                            if str_eq(fields[ti], "size") {
+                                if ti + 1 < len(fields) {
+                                    be.stick_size = to_int(fields[ti + 1])
+                                    ti = ti + 2
+                                } else {
+                                    ti = ti + 1
+                                }
+                            } else {
+                                if str_eq(fields[ti], "expire") {
+                                    if ti + 1 < len(fields) {
+                                        be.stick_expire_ms = parse_duration_ms(fields[ti + 1])
+                                        ti = ti + 2
+                                    } else {
+                                        ti = ti + 1
+                                    }
+                                } else {
+                                    ti = ti + 1
+                                }
+                            }
+                        }
+                    } else {
+                        if len(fields) >= 2 {
+                            be = apply_backend_kv(be, head, expand_env(fields[1]))
+                        }
+                    }
                 }
             }
             bes[bi] = be

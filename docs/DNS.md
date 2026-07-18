@@ -49,11 +49,34 @@ Use with **headless** Kubernetes services or DNS that returns multiple pod IPs.
 
 Without `expand`, only the preferred single IP is used on that server row.
 
+## DNS SRV
+
+```text
+backend sip
+  resolve_interval 10s
+  # port on the template is fallback only; live members use SRV ports
+  server sip _sip._udp.sip.voice.google.com:5060 weight 100 check resolve srv
+```
+
+When `srv` is set (implies `resolve` + `expand`):
+
+1. The configured server is a **template** (not pickable).
+2. Leba queries DNS **SRV** for `resolve_name` (UDP to the first `nameserver` in
+   `/etc/resolv.conf`, with optional `dig +short SRV` fallback).
+3. Records are ordered by priority (then weight). Each answer’s **target** is
+   A/AAAA-resolved; the **port** and **weight** come from the SRV RR (weight
+   falls back to the template weight when the RR weight is 0).
+4. Synthetic members are named `parent-<target>-<port>` (sanitized).
+5. Obsolete targets are drained then removed when idle.
+
+Typical uses: SIP (`_sip._udp…`), Consul/Nomad (`_http._tcp.service.consul`),
+Kubernetes headless + SRV.
+
 ## Notes
 
-- DNS **SRV** records are not parsed yet.
-- Failed lookups log `dns_resolve_failed` and keep the last known members/IP.
-- Pair expand with health checks so bad pods leave the pool.
+- Failed lookups log `dns_resolve_failed` / `dns_srv` and keep the last known members/IP.
+- Pair expand/SRV with health checks so bad targets leave the pool.
+- SRV names may only contain letters, digits, dots, underscores, and hyphens.
 
 ## Related
 

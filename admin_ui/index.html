@@ -133,7 +133,7 @@ function nav(tab){TAB=tab;$$('.nav button').forEach(b=>b.classList.toggle('activ
 function render(){
   const v=$('#view');if(!v)return;
   const views={overview:viewOverview,servers:viewServers,hosts:viewHosts,backends:viewBackends,
-    frontends:viewFrontends,analytics:viewAnalytics,config:viewConfig,api:viewAPI};
+    frontends:viewFrontends,platform:viewPlatform,analytics:viewAnalytics,config:viewConfig,api:viewAPI};
   const fn=views[TAB];
   if(fn)v.innerHTML=fn();
   else if(TAB==='analyticsData'){loadAnalyticsData()}
@@ -184,9 +184,13 @@ function renderChart(){
 
 function viewServers(){
   if(!DATA)return '';const d=DATA;
-  let h=metrics()+'<div class="panel"><h3>Servers</h3><table><tr><th>Backend</th><th>Server</th><th>Address</th><th>State</th><th>Conns</th><th>Req</th><th>Err</th><th>Bytes</th><th class="op-only">Actions</th></tr>';
+  let h=metrics()+'<div class="panel"><div class="row" style="justify-content:space-between;margin-bottom:.8rem"><h3 style="margin:0">Servers</h3>';
+  h+='<button class="btn sm op-only" onclick="reloadServers()">Reload servers_file</button></div>';
+  h+='<table><tr><th>Backend</th><th>Server</th><th>Address</th><th>DNS</th><th>State</th><th>Conns</th><th>Req</th><th>Err</th><th>Bytes</th><th class="op-only">Actions</th></tr>';
   (d.servers||[]).forEach(s=>{
+    const dns=+s.resolve_srv?'srv':(+s.resolve_expand?'expand':(+s.resolve?'resolve':(+s.resolve_parent?'member':'—')));
     h+=`<tr><td>${esc(s.backend)}</td><td><strong>${esc(s.name)}</strong></td><td class="mono">${esc(s.host)}:${s.port}</td>
+    <td>${dns==='—'?dns:`<span class="pill">${dns}</span>`}</td>
     <td>${pill(s)}</td><td>${s.conns}</td><td>${s.total_req}</td><td>${s.total_err}</td><td>${fmtBytes(s.total_bytes)}</td>
     <td class="op-only actions">
       <button class="btn sm ${+s.drain?'ok':'warn'}" onclick="act('${+s.drain?'ready':'drain'}','${esc(s.backend)}','${esc(s.name)}')">${+s.drain?'Ready':'Drain'}</button>
@@ -261,25 +265,48 @@ function viewHosts(){
 
 function viewBackends(){
   if(!DATA)return '';const d=DATA;
-  let h='<div class="panel"><h3>Backends</h3><table><tr><th>Name</th><th>Balance</th><th>Servers</th><th>Up</th><th>Health path</th><th>Interval</th></tr>';
+  let h='<div class="panel"><h3>Backends</h3><table><tr><th>Name</th><th>Balance</th><th>Stick</th><th>DNS</th><th>Servers</th><th>Up</th><th>Health</th></tr>';
   (d.backends||[]).forEach(b=>{
-    h+=`<tr><td><strong>${esc(b.name)}</strong></td><td>${esc(b.balance)}</td><td>${b.servers}</td>
-    <td>${b.up}</td><td class="mono">${esc(b.health_path||'—')}</td><td>${b.health_interval_ms||'—'}ms</td></tr>`;
+    const stick=b.stick_on?`<span class="pill up">on ${esc(b.stick_on)}</span>`:'off';
+    const dns=b.resolve_interval_ms?`<span class="pill">${b.resolve_interval_ms}ms</span>`:'—';
+    h+=`<tr><td><strong>${esc(b.name)}</strong></td><td>${esc(b.balance)}</td><td>${stick}</td><td>${dns}</td>
+    <td>${b.servers}</td><td>${b.up}</td><td class="mono">${esc(b.health_path||'—')}</td></tr>`;
   });
+  h+='</table></div>';
+  h+='<div class="panel"><h3>Stick tables</h3><p class="muted" style="margin-bottom:.8rem">Source-IP stick (<code>stick on src</code>) applies on cleartext, TLS, and HTTP/3 (H3 uses XFF or cookie; shared table + peers). Peers sync is configured in <code>leba.conf</code>.</p>';
+  h+='<table><tr><th>Backend</th><th>stick_on</th><th>Size</th><th>Expire</th></tr>';
+  (d.backends||[]).filter(b=>b.stick_on).forEach(b=>{
+    h+=`<tr><td>${esc(b.name)}</td><td class="mono">${esc(b.stick_on)}</td><td>${b.stick_size||100000}</td><td>${b.stick_expire_ms||0}ms</td></tr>`;
+  });
+  if(!(d.backends||[]).some(b=>b.stick_on))h+='<tr><td colspan=4 class="muted">No backends with stick tables</td></tr>';
   h+='</table></div>';return h;
 }
 
 function viewFrontends(){
   if(!DATA)return '';const d=DATA;
-  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS</th><th>Auth</th><th>ACME</th><th>Rate</th><th>Maxconn</th></tr>';
+  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS / SNI</th><th>WAF</th><th>Auth</th><th>ACME</th><th>Protocols</th><th>Rate</th></tr>';
   (d.frontends||[]).forEach(f=>{
-    h+=`<tr><td><strong>${esc(f.name)}</strong></td><td>:${f.port}</td><td><span class="pill">${esc(f.mode)}</span></td>
-    <td>${f.tls_cert?'<span class="pill up">ON</span>':'off'}</td>
+    const sni=(f.tls_sni||[]).length;
+    const tls=f.tls_cert?(sni?`<span class="pill up">TLS+${sni} SNI</span>`:'<span class="pill up">TLS</span>'):'off';
+    const waf=f.waf_mode&&f.waf_mode!=='off'?`<span class="pill warn">${esc(f.waf_mode)}</span>`:'off';
+    h+=`<tr><td><strong>${esc(f.name)}</strong></td><td class="mono">${esc(f.bind_host||'')}:${f.port}</td><td><span class="pill">${esc(f.mode)}</span></td>
+    <td>${tls}</td><td>${waf}</td>
     <td>${f.auth_basic_realm?'<span class="pill warn">Basic</span>':'off'}</td>
     <td>${f.acme_webroot?'<span class="pill up" title="'+esc(f.acme_webroot)+'">webroot</span>':'—'}</td>
-    <td>${f.rate_limit||0}/s</td><td>${f.maxconn||0}</td></tr>`;
+    <td class="mono">${esc(f.protocols||'http/1.1')}</td>
+    <td>${f.rate_limit||0}/s</td></tr>`;
   });
   h+='</table></div>';
+  // SNI table
+  h+='<div class="panel"><h3>TLS SNI certificates</h3>';
+  let sniRows='';
+  (d.frontends||[]).forEach(f=>{(f.tls_sni||[]).forEach(s=>{
+    sniRows+=`<tr><td>${esc(f.name)}</td><td class="mono">${esc(s.hostname)}</td><td class="mono">${esc(s.cert)}</td></tr>`;
+  })});
+  if(sniRows){
+    h+='<table><tr><th>Frontend</th><th>Hostname</th><th>Cert path</th></tr>'+sniRows+'</table>';
+  }else h+='<p class="muted">No multi-cert SNI entries. Use proxy-host cert+domain or <code>tls_sni HOST CERT KEY</code>.</p>';
+  h+='</div>';
   h+='<div class="panel"><h3>Routes</h3><table><tr><th>Frontend</th><th>Kind</th><th>Match</th><th>Backend</th><th>Status</th></tr>';
   (d.routes||[]).forEach(r=>{
     const srvs=(d.servers||[]).filter(s=>s.backend===r.backend);
@@ -289,6 +316,60 @@ function viewFrontends(){
     <td>${esc(r.backend)}</td><td>${up}/${srvs.length} UP</td></tr>`;
   });
   h+='</table></div>';return h;
+}
+
+function viewPlatform(){
+  if(!DATA)return '';const d=DATA;
+  const srvs=d.servers||[],bes=d.backends||[],fes=d.frontends||[];
+  const dns=srvs.filter(s=>+s.resolve||+s.resolve_expand||+s.resolve_srv);
+  const stick=bes.filter(b=>b.stick_on);
+  const sni=fes.reduce((n,f)=>n+(f.tls_sni||[]).length,0);
+  const waf=fes.filter(f=>f.waf_mode&&f.waf_mode!=='off'&&f.waf_mode!=='');
+  let h=metrics();
+  h+=`<div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:1rem">
+    <div class="stat-card"><div class="label">DNS discovery</div><div class="value">${dns.length}</div><div class="sub">resolve / expand / srv</div></div>
+    <div class="stat-card"><div class="label">Stick tables</div><div class="value">${stick.length}</div><div class="sub">backends with stick on</div></div>
+    <div class="stat-card"><div class="label">TLS SNI</div><div class="value">${sni}</div><div class="sub">extra cert entries</div></div>
+    <div class="stat-card"><div class="label">WAF frontends</div><div class="value">${waf.length}</div><div class="sub">detect / block</div></div>
+  </div>`;
+  h+='<div class="panel"><h3>DNS service discovery</h3>';
+  h+='<table><tr><th>Backend</th><th>Server</th><th>Mode</th><th>Resolve name</th><th>Live host</th><th>Parent</th></tr>';
+  dns.forEach(s=>{
+    const mode=+s.resolve_srv?'SRV':(+s.resolve_expand?'expand':(+s.resolve?'resolve':''));
+    h+=`<tr><td>${esc(s.backend)}</td><td>${esc(s.name)}</td><td><span class="pill">${mode}</span></td>
+    <td class="mono">${esc(s.resolve_name||'—')}</td><td class="mono">${esc(s.host)}:${s.port}</td>
+    <td class="mono">${esc(s.resolve_parent||'—')}</td></tr>`;
+  });
+  if(!dns.length)h+='<tr><td colspan=6 class="muted">No servers with <code>resolve</code> / <code>expand</code> / <code>srv</code></td></tr>';
+  h+='</table><p class="muted" style="margin-top:.75rem;font-size:.8rem">Configure in backend server lines. See docs/DNS.md.</p></div>';
+
+  h+='<div class="panel"><h3>WAF</h3><table><tr><th>Frontend</th><th>Mode</th><th>Remote URL</th><th>Fail policy</th></tr>';
+  fes.forEach(f=>{
+    if(!f.waf_mode||f.waf_mode==='off')return;
+    h+=`<tr><td>${esc(f.name)}</td><td><span class="pill warn">${esc(f.waf_mode)}</span></td>
+    <td class="mono">${esc(f.waf_url||'local only')}</td><td>${esc(f.waf_fail||'open')}</td></tr>`;
+  });
+  if(!waf.length)h+='<tr><td colspan=4 class="muted">WAF off on all frontends. Use <code>waf detect|block</code>.</td></tr>';
+  h+='</table></div>';
+
+  h+='<div class="panel"><h3>Operations</h3><div class="row op-only" style="gap:.6rem;flex-wrap:wrap">';
+  h+='<button class="btn primary" onclick="tlsReload()">TLS reload</button>';
+  h+='<button class="btn primary" onclick="fullReload()">Full config reload</button>';
+  h+='<button class="btn" onclick="reloadServers()">Reload servers_file</button>';
+  h+='</div><p class="muted" style="margin-top:.75rem;font-size:.8rem">Full reload rebinds HTTP/TCP/UDP/H3/stats/peers and re-applies OIDC discovery. Configure peers &amp; OIDC in <code>leba.conf</code>.</p></div>';
+
+  h+='<div class="panel"><h3>Enterprise features</h3><table><tr><th>Feature</th><th>Status</th><th>Notes</th></tr>';
+  h+=`<tr><td>Multi-cert SNI</td><td>${sni?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>tls_sni / proxy-host cert</td></tr>`;
+  h+=`<tr><td>Stick tables (H1/H2/H3)</td><td>${stick.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>stick on src · cookie · peers</td></tr>`;
+  h+=`<tr><td>DNS resolve / expand / SRV</td><td>${dns.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>docs/DNS.md</td></tr>`;
+  h+=`<tr><td>WAF adapter</td><td>${waf.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>local + remote inspect</td></tr>`;
+  h+=`<tr><td>Stick peers (HA)</td><td><span class="pill">config</span></td><td>peers section · docs/HA.md</td></tr>`;
+  const oidc=d.oidc||{};const peers=d.peers||{};
+  h+=`<tr><td>Admin OIDC SSO</td><td>${oidc.ready?'<span class="pill up">READY</span>':(oidc.enabled?'<span class="pill">enabled</span>':'<span class="pill">off</span>')}</td><td>${esc(oidc.issuer||'oidc section')} · /oidc/login</td></tr>`;
+  h+=`<tr><td>Stick peers</td><td>${peers.ready?'<span class="pill up">READY</span>':(peers.enabled?'<span class="pill">enabled</span>':'<span class="pill">off</span>')}</td><td>${esc(peers.name||'—')} / ${esc(peers.cluster||'—')} · remotes ${peers.remote_count||0}</td></tr>`;
+  h+=`<tr><td>Listener rebind</td><td><span class="pill up">HTTP/TCP/UDP/H3/stats/peers</span></td><td>SIGHUP / POST /admin/reload · OIDC re-discover</td></tr>`;
+  h+='</table></div>';
+  return h;
 }
 
 function viewAnalytics(){return '<div class="panel"><h3>Loading analytics...</h3></div>';}
@@ -314,48 +395,61 @@ function viewConfig(){
   const fes=DATA?.frontends||[];
   const acme=fes.filter(f=>f.acme_webroot);
   const basic=fes.filter(f=>f.auth_basic_realm);
+  const sni=fes.reduce((n,f)=>n+(f.tls_sni||[]).length,0);
+  const waf=fes.filter(f=>f.waf_mode&&f.waf_mode!=='off');
   return `<div class="panel"><h3>Security status</h3>
   <table><tr><th>Setting</th><th>Status</th></tr>
   <tr><td>TLS</td><td>${fes.some(f=>f.tls_cert)?'<span class="pill up">ENABLED</span>':'<span class="pill down">OFF</span>'}</td></tr>
-  <tr><td>Admin auth</td><td><span class="pill up">SESSION COOKIE</span></td></tr>
+  <tr><td>Multi-cert SNI</td><td>${sni?'<span class="pill up">'+sni+' entr'+(sni===1?'y':'ies')+'</span>':'none'}</td></tr>
+  <tr><td>Admin auth</td><td><span class="pill up">SESSION + Basic</span></td></tr>
+  <tr><td>OIDC SSO</td><td>${(d.oidc&&d.oidc.ready)?'<span class="pill up">ready</span>':(d.oidc&&d.oidc.enabled)?'enabled':'off'} · /oidc/login</td></tr>
+  <tr><td>Stick peers</td><td>${(d.peers&&d.peers.ready)?'<span class="pill up">ready</span>':(d.peers&&d.peers.enabled)?'enabled':'off'} · remotes ${(d.peers&&d.peers.remote_count)||0}</td></tr>
   <tr><td>App HTTP Basic</td><td>${basic.length?'<span class="pill up">'+basic.length+' frontend(s)</span>':'off'}</td></tr>
+  <tr><td>WAF</td><td>${waf.length?'<span class="pill warn">'+waf.length+' frontend(s)</span>':'off'}</td></tr>
   <tr><td>ACME webroot</td><td>${acme.length?'<span class="pill up">'+acme.map(f=>esc(f.name)).join(', ')+'</span>':'not set'}</td></tr>
   <tr><td>RBAC</td><td><span class="pill up">ENFORCED</span></td></tr>
-  <tr><td>Config API write</td><td><span class="pill up">DISABLED</span></td></tr>
   <tr><td>Audit logging</td><td><span class="pill up">ON</span></td></tr></table></div>
-  <div class="panel"><h3>ACME / TLS ops</h3><div class="muted" style="line-height:1.6">
-  <p>HTTP-01: set <code>acme_webroot /path</code>, point lego/certbot at the same path.</p>
-  <p>After renew: <code>curl -u user:pass -X POST /admin/tls-reload</code> or <code>leba admin tls-reload</code>.</p>
-  <p>See <code>docs/ACME.md</code>.</p>
-  <button class="btn primary op-only" onclick="tlsReload()">Live-reload TLS certs</button>
-  </div></div>
+  <div class="panel"><h3>TLS / ACME ops</h3>
+  <div class="form-grid op-only">
+    <div><label>Frontend</label><select id="certFe">${fes.filter(f=>f.mode==='http'||f.mode==='stats').map(f=>'<option value="'+esc(f.name)+'">'+esc(f.name)+'</option>').join('')}</select></div>
+    <div><label>SNI hostname (optional)</label><input id="certHost" placeholder="api.example.com or *.example.com"></div>
+    <div><label>Certificate path</label><input id="certPath" placeholder="/etc/leba/certs/fullchain.pem"></div>
+    <div><label>Key path</label><input id="certKey" placeholder="/etc/leba/certs/privkey.pem"></div>
+  </div>
+  <div class="row op-only" style="gap:.6rem;margin-top:.5rem">
+    <button class="btn primary" onclick="saveCert()">Save cert (default or SNI)</button>
+    <button class="btn primary" onclick="tlsReload()">Live TLS reload</button>
+    <button class="btn" onclick="fullReload()">Full config reload</button>
+  </div>
+  <p class="muted" style="margin-top:.8rem;font-size:.8rem;line-height:1.5">HTTP-01: <code>acme_webroot</code> + lego/certbot. After renew run TLS reload. Multi-cert: set hostname for SNI. See docs/ACME.md and docs/OIDC.md.</p>
+  </div>
   <div class="panel"><h3>Admin guide</h3><div class="muted" style="line-height:1.6">
-  <p><strong>App Basic auth:</strong> <code>auth_basic "Realm"</code> + <code>auth_user name pass</code> on a frontend.</p>
-  <p><strong>IP access list:</strong> <code>allow src …</code> / <code>deny src …</code> ACL rules on the frontend.</p>
-  <p><strong>Change admin password:</strong> <code>leba admin hash-password NEW_PASS</code>.</p>
+  <p><strong>OIDC:</strong> configure <code>oidc { … }</code>, then open <a href="/oidc/login">/oidc/login</a>.</p>
+  <p><strong>Peers:</strong> <code>peers { … }</code> for stick-table HA sync (docs/HA.md).</p>
+  <p><strong>App Basic:</strong> <code>auth_basic "Realm"</code> + <code>auth_user</code>.</p>
+  <p><strong>Password:</strong> <code>leba admin hash-password NEW_PASS</code>.</p>
   </div></div>`;
 }
 
 function viewAPI(){
   return `<div class="panel"><h3>API reference</h3>
   <table><tr><th>Method</th><th>Path</th><th>Description</th></tr>
-  <tr><td>GET</td><td class="mono">/stats</td><td>Full cluster snapshot</td></tr>
+  <tr><td>GET</td><td class="mono">/stats</td><td>Full cluster snapshot (SNI, DNS, stick, WAF fields)</td></tr>
   <tr><td>GET</td><td class="mono">/stats/whoami</td><td>Current user and role</td></tr>
   <tr><td>GET</td><td class="mono">/stats/analytics</td><td>Access log analytics</td></tr>
   <tr><td>GET</td><td class="mono">/admin/servers</td><td>Server inventory</td></tr>
   <tr><td>GET</td><td class="mono">/admin/vhosts</td><td>Virtual host list</td></tr>
-  <tr><td>GET</td><td class="mono">/admin/config</td><td>Running config (redacted)</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/drain/{be}/{srv}</td><td>Drain a server</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/ready/{be}/{srv}</td><td>Mark server ready</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/disable/{be}/{srv}</td><td>Force server down</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/enable/{be}/{srv}</td><td>Force server up</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/proxy-host</td><td>Add a proxy host</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/proxy-host-delete</td><td>Delete a proxy host</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/tls-reload</td><td>Live-reload TLS certificates</td></tr>
-  <tr><td>POST</td><td class="mono">/admin/reload-servers</td><td>Reload servers file</td></tr>
-  <tr><td>GET</td><td class="mono">/metrics</td><td>Prometheus text format</td></tr>
-  <tr><td>GET</td><td class="mono">/readyz</td><td>Readiness probe</td></tr>
-  <tr><td>GET</td><td class="mono">/livez</td><td>Liveness probe</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/config</td><td>Running config</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/drain|ready|disable|enable/…</td><td>Server state</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/proxy-host</td><td>Add host (+ optional per-domain SNI cert)</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/proxy-host-delete</td><td>Delete host route</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/vhost-cert</td><td>Default or SNI cert (<code>hostname=</code>)</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/tls-reload</td><td>Live TLS + SNI refresh</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/reload</td><td>Full config reload + rebind</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/reload-servers</td><td>Reload servers_file</td></tr>
+  <tr><td>GET</td><td class="mono">/oidc/login</td><td>Start OIDC SSO</td></tr>
+  <tr><td>GET</td><td class="mono">/metrics</td><td>Prometheus</td></tr>
+  <tr><td>GET</td><td class="mono">/readyz · /livez</td><td>Probes</td></tr>
   </table></div>`;
 }
 
@@ -375,7 +469,7 @@ async function addHost(){
       '&backend='+encodeURIComponent(be)+'&server='+encodeURIComponent(srv)+'&addr='+encodeURIComponent(addr)+
       '&cert='+encodeURIComponent(cert)+'&key='+encodeURIComponent(key);
     const r=await api(p,'POST');toast('Created proxy host: '+domain);
-    if(r.tls_reload_recommended)toast('Cert paths saved — run TLS reload',0);
+    if(r.tls_reload||r.sni||r.tls_reload_recommended)toast('TLS/SNI applied live (or run TLS reload)',0);
     $('#addForm').style.display='none';await refresh();
   }catch(e){toast('Failed: '+e.message,1)}
 }
@@ -393,13 +487,35 @@ async function tlsReload(){
   catch(e){toast(e.message,1)}
 }
 
+async function fullReload(){
+  try{const r=await api('/admin/reload','POST');toast('Full config reload: '+(r.action||'ok'));await refresh();}
+  catch(e){toast(e.message,1)}
+}
+
+async function reloadServers(){
+  try{const r=await api('/admin/reload-servers','POST');toast('Reloaded '+(r.loaded||0)+' servers_file entries');await refresh();}
+  catch(e){toast(e.message,1)}
+}
+
+async function saveCert(){
+  const fe=$('#certFe')?.value,cert=$('#certPath')?.value,key=$('#certKey')?.value,host=$('#certHost')?.value||'';
+  if(!fe||!cert||!key){toast('Frontend, cert, and key required',1);return}
+  try{
+    let p='/admin/vhost-cert?frontend='+encodeURIComponent(fe)+'&cert='+encodeURIComponent(cert)+'&key='+encodeURIComponent(key);
+    if(host)p+='&hostname='+encodeURIComponent(host);
+    const r=await api(p,'POST');
+    toast(r.sni?'SNI cert saved for '+host:'Default cert saved — TLS reload applied');
+    await refresh();
+  }catch(e){toast(e.message,1)}
+}
+
 async function doLogout(){window.location.href='/logout'}
 
 // ---- Init ----
 const tabs=[
   ['overview','Overview'],['hosts','Proxy Hosts'],['servers','Servers'],
-  ['backends','Backends'],['frontends','Frontends & Routes'],
-  ['analyticsData','Analytics'],['config','Security','admin-only'],['api','API']
+  ['backends','Backends'],['frontends','Frontends & Routes'],['platform','Platform'],
+  ['analyticsData','Analytics'],['config','Security'],['api','API']
 ];
 const navEl=$('#nav');
 tabs.forEach(([id,label,cls])=>{

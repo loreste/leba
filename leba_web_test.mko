@@ -8,6 +8,8 @@ pull . "./src/balance.mko"
 pull . "./src/health.mko"
 pull . "./src/rate.mko"
 pull . "./src/admin.mko"
+pull . "./src/oidc.mko"
+pull . "./src/peers.mko"
 pull . "./src/stats.mko"
 pull . "./src/webadmin.mko"
 
@@ -30,20 +32,45 @@ fn TestStatsJsonShape() {
     let mut routes = make([]Route, 0, 1)
     routes = append(routes, route_new("web", "default", "", "api"))
     let acls = make([]AclRule, 0, 0)
-    let j = stats_json(st, fes, bes, servers, routes, acls)
+    let mut oidc = oidc_config_new()
+    oidc.enabled = 1
+    oidc.issuer = "https://idp.example"
+    oidc.client_id = "cid"
+    oidc.client_secret = "secret"
+    oidc.redirect_uri = "https://admin/oidc/callback"
+    let mut peers = peers_config_new()
+    peers.enabled = 1
+    peers.name = "n1"
+    peers.cluster = "edge"
+    peers.bind_port = 1024
+    peers.secret = "s"
+    let j = stats_json(st, fes, bes, servers, routes, acls, oidc, peers)
     assert(str_contains(j, "\"version\""))
     assert(str_contains(j, "\"frontends\""))
     assert(str_contains(j, "\"bind_host\""))
     assert(str_contains(j, "\"routes\""))
     assert(str_contains(j, "\"acls\""))
     assert(str_contains(j, "\"servers\""))
-    assert(str_contains(j, "0.7.1"))
+    assert(str_contains(j, "0.10.0"))
     assert(str_contains(j, "rate_limit"))
     assert(str_contains(j, "request_body_limit_bytes"))
     assert(str_contains(j, "health_interval_ms"))
     assert(str_contains(j, "servers_file"))
     assert(str_contains(j, "\"maxconn\":9"))
     assert(str_contains(j, "\"maxconn\":4"))
+    assert(str_contains(j, "tls_sni"))
+    assert(str_contains(j, "stick_on"))
+    assert(str_contains(j, "resolve"))
+    assert(str_contains(j, "waf_mode"))
+    assert(str_contains(j, "protocols"))
+    assert(str_contains(j, "\"oidc\""))
+    assert(str_contains(j, "\"ready\":1"))
+    assert(str_contains(j, "idp.example"))
+    assert(str_contains(j, "\"peers\""))
+    assert(str_contains(j, "\"cluster\":\"edge\""))
+    // Secrets must not appear in stats JSON
+    assert(not str_contains(j, "client_secret"))
+    assert(not str_contains(j, "\"secret\":"))
 }
 
 fn TestWebadminHtmlComplete() {
@@ -53,7 +80,8 @@ fn TestWebadminHtmlComplete() {
     assert(str_contains(html, "function refresh"))
     assert(str_contains(html, "nav('servers')"))
     assert(str_contains(html, "nav('explain')"))
-    assert(str_contains(html, "/admin/drain/"))
+    assert(str_contains(html, "nav('platform')"))
+    assert(str_contains(html, "/admin/'+action"))
     assert(str_contains(html, "Drain"))
     assert(str_contains(html, "Ready"))
     assert(str_contains(html, "Explain"))
@@ -70,6 +98,12 @@ fn TestWebadminHtmlComplete() {
     assert(str_contains(html, "/admin/vhost-create"))
     assert(str_contains(html, "/admin/vhost-cert"))
     assert(str_contains(html, "saveVhost"))
+    assert(str_contains(html, "tlsReload"))
+    assert(str_contains(html, "fullReload"))
+    assert(str_contains(html, "/admin/tls-reload"))
+    assert(str_contains(html, "/admin/reload"))
+    assert(str_contains(html, "viewPlatform"))
+    assert(str_contains(html, "Platform"))
 }
 
 fn TestWebadminHasNoAutoMetaRefresh() {
@@ -86,7 +120,7 @@ fn TestStatsJsonEscapesQuotesInNames() {
     servers = append(servers, server_new("q\"q", "h", 1, 1, 1, "b"))
     let routes = make([]Route, 0, 0)
     let acls = make([]AclRule, 0, 0)
-    let j = stats_json(st, fes, bes, servers, routes, acls)
+    let j = stats_json(st, fes, bes, servers, routes, acls, oidc_config_new(), peers_config_new())
     assert(str_contains(j, "\\\""))
 }
 
@@ -104,6 +138,7 @@ fn TestMetricsTextShape() {
     let mut bes = make([]Backend, 0, 1)
     let mut be = backend_new("api")
     be.maxconn = 3
+    be.stick_on = "src"
     bes = append(bes, be)
     let mut servers = make([]Server, 0, 1)
     let mut s = server_new("s1", "127.0.0.1", 9, 1, 1, "api")
@@ -113,7 +148,18 @@ fn TestMetricsTextShape() {
     s.conns = 2
     s.maxconn = 5
     servers = append(servers, s)
-    let m = metrics_text(st, fes, bes, servers)
+    let mut oidc = oidc_config_new()
+    oidc.enabled = 1
+    oidc.client_id = "c"
+    oidc.client_secret = "s"
+    oidc.redirect_uri = "https://x/cb"
+    oidc.issuer = "https://idp"
+    let mut peers = peers_config_new()
+    peers.enabled = 1
+    peers.name = "n"
+    peers.secret = "sec"
+    peers.bind_port = 9
+    let m = metrics_text(st, fes, bes, servers, oidc, peers, 42)
     assert(str_contains(m, "# TYPE leba_requests_total counter"))
     assert(str_contains(m, "leba_requests_total 7"))
     assert(str_contains(m, "leba_denied_total 2"))
@@ -124,6 +170,12 @@ fn TestMetricsTextShape() {
     assert(str_contains(m, "leba_backend_maxconn{backend=\"api\"} 3"))
     assert(str_contains(m, "leba_server_maxconn{backend=\"api\",server=\"s1\"} 5"))
     assert(str_contains(m, "leba_server_requests_total{backend=\"api\",server=\"s1\"} 4"))
+    assert(str_contains(m, "leba_info{version=\"0.10.0\"} 1"))
+    assert(str_contains(m, "leba_stick_entries 42"))
+    assert(str_contains(m, "leba_backend_stick{backend=\"api\""))
+    assert(str_contains(m, "leba_oidc_ready 1"))
+    assert(str_contains(m, "leba_peers_ready 1"))
+    assert(str_contains(m, "leba_peers_remotes 0"))
 }
 
 fn TestMetricsEscapesLabels() {
@@ -133,7 +185,7 @@ fn TestMetricsEscapesLabels() {
     let bes = make([]Backend, 0, 0)
     let mut servers = make([]Server, 0, 1)
     servers = append(servers, server_new("s\\1", "h", 1, 1, 1, "b"))
-    let m = metrics_text(st, fes, bes, servers)
+    let m = metrics_text(st, fes, bes, servers, oidc_config_new(), peers_config_new(), 0)
     assert(str_contains(m, "frontend=\"we\\\"b\""))
     assert(str_contains(m, "server=\"s\\\\1\""))
 }
@@ -204,15 +256,80 @@ fn TestAdminVhostCreateMutatesAndPersists() {
     assert_eq_str(ar.routes[0].value, "example.com")
     assert_eq_str(ar.servers[0].host, "127.0.0.1")
     assert_eq(ar.servers[0].port, 9000)
+    // Per-domain cert is stored as multi-cert SNI; first cert also becomes default when empty.
     assert_eq_str(ar.frontends[0].tls_cert, "/tmp/fullchain.pem")
+    assert_eq(len(ar.frontends[0].tls_sni), 1)
+    assert_eq_str(ar.frontends[0].tls_sni[0].hostname, "example.com")
+    assert_eq_str(ar.frontends[0].tls_sni[0].cert, "/tmp/fullchain.pem")
+    assert(str_contains(ar.body, "\"sni\":true"))
     assert(str_contains(read_file(cfg), "include leba.vhosts.conf"))
     assert(str_contains(read_file("/tmp/leba.vhosts.conf"), "route host example.com -> example"))
+    assert(str_contains(read_file("/tmp/leba.vhosts.conf"), "tls_sni example.com /tmp/fullchain.pem /tmp/privkey.pem"))
 
     let w = parse_config_file(cfg)
     assert_eq(w.ok, 1)
     assert_eq(len(w.routes), 1)
     assert_eq(len(w.servers), 1)
     assert_eq_str(w.routes[0].backend, "example")
+    // Managed include re-parse picks up tls_sni.
+    let mut found_sni = 0
+    for _, fe in range w.frontends {
+        if str_eq(fe.name, "web") {
+            if len(fe.tls_sni) >= 1 {
+                found_sni = 1
+                assert_eq_str(fe.tls_sni[0].hostname, "example.com")
+            }
+        }
+    }
+    assert_eq(found_sni, 1)
+}
+
+fn TestConfigTlsSniParse() {
+    let raw = "frontend web\n  bind :443\n  mode http\n  tls_cert /tmp/default.crt\n  tls_key /tmp/default.key\n  tls_sni api.example.com /tmp/api.crt /tmp/api.key\n  tls_sni *.example.com /tmp/wild.crt /tmp/wild.key\n  default_backend app\nbackend app\n  server a 127.0.0.1:9 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(len(w.frontends), 1)
+    assert_eq(len(w.frontends[0].tls_sni), 2)
+    assert_eq_str(w.frontends[0].tls_sni[0].hostname, "api.example.com")
+    assert_eq_str(w.frontends[0].tls_sni[0].cert, "/tmp/api.crt")
+    assert_eq_str(w.frontends[0].tls_sni[1].hostname, "*.example.com")
+    assert_eq_str(frontend_tls_sni_fingerprint(w.frontends[0]), "api.example.com|/tmp/api.crt|/tmp/api.key;*.example.com|/tmp/wild.crt|/tmp/wild.key")
+}
+
+fn TestAdminVhostCertSni() {
+    let mut fes = make([]Frontend, 0, 1)
+    let mut fe = frontend_new("web")
+    fe.bind_port = 443
+    fe.mode = "http"
+    fe.tls_cert = "/tmp/default.crt"
+    fe.tls_key = "/tmp/default.key"
+    fes = append(fes, fe)
+    let mut pb = str_builder()
+    builder_write(pb, "/tmp/leba-admin-sni-")
+    builder_write(pb, int_to_string(now_ms()))
+    builder_write(pb, ".conf")
+    let cfg = builder_string(pb)
+    let _ = write_file(cfg, "frontend web\n  bind :443\n  mode http\n  tls_cert /tmp/default.crt\n  tls_key /tmp/default.key\n")
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/vhost-cert",
+        "/admin/vhost-cert?frontend=web&hostname=api.example.com&cert=%2Ftmp%2Fapi.crt&key=%2Ftmp%2Fapi.key",
+        make([]Server, 0, 0),
+        fes,
+        make([]Backend, 0, 0),
+        make([]Route, 0, 0),
+        make([]AclRule, 0, 0),
+        cfg,
+        "/tmp"
+    )
+    assert_eq(ar.status, 200)
+    assert_eq(len(ar.frontends[0].tls_sni), 1)
+    assert_eq_str(ar.frontends[0].tls_sni[0].hostname, "api.example.com")
+    assert_eq_str(ar.frontends[0].tls_cert, "/tmp/default.crt")
+    assert(str_contains(ar.body, "\"sni\":true"))
+    assert_eq(valid_sni_hostname("*.example.com"), 1)
+    assert_eq(valid_sni_hostname("a.*.example.com"), 0)
+    assert_eq(valid_sni_hostname("api.example.com"), 1)
 }
 
 fn TestAdminVhostRejectsBadInput() {
@@ -304,4 +421,72 @@ fn TestSessionSecretPrefersStateKey() {
     let u2, r2 = session_verify(token, "key-b")
     assert_eq_str(u2, "")
     assert_eq_str(r2, "")
+}
+
+fn TestOidcConfigParseAndRoleMap() {
+    let raw = "oidc\n  enabled on\n  issuer https://idp.example.com\n  client_id cid\n  client_secret csec\n  redirect_uri https://admin.example.com/oidc/callback\n  jwks_uri https://idp.example.com/jwks\n  verify_jwt on\n  default_role viewer\n  admin_group leba-admins\n  operator_group leba-ops\nfrontend stats\n  bind 127.0.0.1:1\n  mode stats\n  auth admin:pass:admin\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.oidc.enabled, 1)
+    assert_eq_str(w.oidc.client_id, "cid")
+    assert_eq_str(w.oidc.redirect_uri, "https://admin.example.com/oidc/callback")
+    assert_eq_str(w.oidc.jwks_uri, "https://idp.example.com/jwks")
+    assert_eq(w.oidc.verify_jwt, 1)
+    assert_eq(oidc_ready(w.oidc), 1)
+    assert_eq(oidc_ready(oidc_config_new()), 0)
+
+    let host, port, path = oidc_parse_https_url("https://idp.example.com/oauth/token")
+    assert_eq_str(host, "idp.example.com")
+    assert_eq(port, 443)
+    assert_eq_str(path, "/oauth/token")
+
+    let claims_admin = "{\"email\":\"a@x.com\",\"groups\":[\"leba-admins\",\"other\"],\"exp\":9999999999,\"iss\":\"https://idp.example.com\",\"aud\":\"cid\"}"
+    assert_eq_str(oidc_map_role(w.oidc, claims_admin), "admin")
+    assert_eq_str(oidc_pick_user(w.oidc, claims_admin), "a@x.com")
+    let claims_ops = "{\"email\":\"o@x.com\",\"groups\":\"leba-ops team\",\"exp\":9999999999}"
+    assert_eq_str(oidc_map_role(w.oidc, claims_ops), "operator")
+    let claims_view = "{\"email\":\"v@x.com\",\"groups\":[]}"
+    assert_eq_str(oidc_map_role(w.oidc, claims_view), "viewer")
+    let claims_direct = "{\"leba_role\":\"admin\",\"email\":\"d@x.com\"}"
+    assert_eq_str(oidc_map_role(w.oidc, claims_direct), "admin")
+
+    // JWT payload via Mako jwt_payload ( {"sub":"u1"} )
+    let mid = "eyJzdWIiOiJ1MSJ9"
+    let fake_jwt = "aaa." + mid + ".bbb"
+    let payload = oidc_jwt_payload_json(fake_jwt)
+    assert(str_contains(payload, "u1"))
+    assert_eq_str(payload, jwt_payload(fake_jwt))
+
+    // Soft-trust when no JWKS/PEM material
+    let mut soft = oidc_config_new()
+    soft.verify_jwt = 1
+    soft.jwks_uri = ""
+    soft.rsa_public_key = ""
+    assert_eq(oidc_verify_id_token(soft, fake_jwt), 1)
+    soft.verify_jwt = 0
+    assert_eq(oidc_verify_id_token(soft, fake_jwt), 1)
+    // Fail closed when rsa_public_key is set but invalid
+    soft.verify_jwt = 1
+    soft.rsa_public_key = "not-a-pem-key"
+    assert_eq(oidc_verify_id_token(soft, fake_jwt), 0)
+    soft.rsa_public_key = ""
+
+    let st = oidc_make_state("secret-key")
+    assert_eq(oidc_check_state(st, "secret-key"), 1)
+    assert_eq(oidc_check_state(st, "other-key"), 0)
+    assert_eq(oidc_check_state("bad", "secret-key"), 0)
+
+    let mut cfg = w.oidc
+    cfg.authorize_url = "https://idp.example.com/auth"
+    let url = oidc_authorize_redirect_url(cfg, "abc.state")
+    assert(str_contains(url, "client_id=cid"))
+    assert(str_contains(url, "response_type=code"))
+    assert(str_contains(url, "state=abc.state"))
+
+    let html = login_page_html(1, 0)
+    assert(str_contains(html, "/oidc/login"))
+    assert(str_contains(html, "Sign in with SSO"))
+    let html2 = login_page_html(1, 1)
+    assert(str_contains(html2, "/oidc/login"))
+    assert(not str_contains(html2, "loginForm"))
 }

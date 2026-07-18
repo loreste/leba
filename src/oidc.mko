@@ -1,0 +1,636 @@
+// Admin OIDC (authorization code flow) → Leba session cookie.
+// IdP HTTPS uses Mako verified https_* / oidc_* (0.2.2+). Legacy TLS client
+// remains for insecure=1 (dev) and userinfo Bearer headers (https_* has no auth hdr).
+pack oidc
+
+fn oidc_ready(cfg: OidcConfig) -> int {
+    if cfg.enabled != 1 {
+        return 0
+    }
+    if str_eq(cfg.client_id, "") {
+        return 0
+    }
+    if str_eq(cfg.client_secret, "") {
+        return 0
+    }
+    if str_eq(cfg.redirect_uri, "") {
+        return 0
+    }
+    if str_eq(cfg.issuer, "") {
+        if str_eq(cfg.authorize_url, "") {
+            return 0
+        }
+        if str_eq(cfg.token_url, "") {
+            return 0
+        }
+    }
+    return 1
+}
+
+// CA path for Mako https_*: empty string = platform trust store.
+fn oidc_ca_pem(cfg: OidcConfig) -> string {
+    if not str_eq(cfg.ca_file, "") {
+        return cfg.ca_file
+    }
+    return ""
+}
+
+// Parse https://host[:port]/path (also used by tests).
+fn oidc_parse_https_url(url: string) -> (string, int, string) {
+    let mut u = str_trim_space(url)
+    if str_has_prefix(u, "https://") {
+        u = substr(u, 8, str_len(u))
+    } else {
+        if str_has_prefix(u, "http://") {
+            // allow http IdP only for lab; port default 80
+            u = substr(u, 7, str_len(u))
+            let slash = str_index(u, "/")
+            let mut hostport = u
+            let mut path = "/"
+            if slash >= 0 {
+                hostport = substr(u, 0, slash)
+                path = substr(u, slash, str_len(u))
+            }
+            let colon = str_last_index(hostport, ":")
+            if colon > 0 {
+                return (substr(hostport, 0, colon), to_int(substr(hostport, colon + 1, str_len(hostport))), path)
+            }
+            return (hostport, 80, path)
+        }
+        return ("", 0, "")
+    }
+    let slash = str_index(u, "/")
+    let mut hostport = u
+    let mut path = "/"
+    if slash >= 0 {
+        hostport = substr(u, 0, slash)
+        path = substr(u, slash, str_len(u))
+    }
+    let colon = str_last_index(hostport, ":")
+    if colon > 0 {
+        // avoid IPv6 ambiguity: only treat as port if right side is all digits
+        let port_s = substr(hostport, colon + 1, str_len(hostport))
+        let p = to_int(port_s)
+        if p > 0 {
+            return (substr(hostport, 0, colon), p, path)
+        }
+    }
+    return (hostport, 443, path)
+}
+
+fn oidc_load_client(cfg: OidcConfig) -> TlsClient {
+    if cfg.insecure == 1 {
+        return tls_client_new_insecure()
+    }
+    if not str_eq(cfg.ca_file, "") {
+        return tls_client_new(cfg.ca_file)
+    }
+    // Common system CA bundles
+    let c1 = "/etc/ssl/certs/ca-certificates.crt"
+    if not str_eq(read_file(c1), "") {
+        return tls_client_new(c1)
+    }
+    let c2 = "/etc/pki/tls/certs/ca-bundle.crt"
+    if not str_eq(read_file(c2), "") {
+        return tls_client_new(c2)
+    }
+    let c3 = "/etc/ssl/cert.pem"
+    if not str_eq(read_file(c3), "") {
+        return tls_client_new(c3)
+    }
+    // Fallback insecure with warning at call site
+    return tls_client_new_insecure()
+}
+
+// Socket TLS client path: insecure IdP, cleartext http://, or extra headers (userinfo).
+fn oidc_https_legacy(
+    method: string,
+    url: string,
+    extra_headers: string,
+    body: string,
+    content_type: string,
+    cfg: OidcConfig,
+    timeout_ms: int
+) -> string {
+    let host, port, path = oidc_parse_https_url(url)
+    if str_eq(host, "") {
+        return ""
+    }
+    let mut use_tls = 1
+    if str_has_prefix(url, "http://") {
+        use_tls = 0
+    }
+    let fd = tcp_connect_timeout(host, port, timeout_ms)
+    if fd < 0 {
+        return ""
+    }
+    let _ = tcp_set_timeout(fd, timeout_ms)
+    let mut req = str_builder()
+    builder_write(req, method)
+    builder_write(req, " ")
+    builder_write(req, path)
+    builder_write(req, " HTTP/1.1\r\nHost: ")
+    builder_write(req, host)
+    builder_write(req, "\r\nConnection: close\r\nAccept: application/json\r\n")
+    if not str_eq(extra_headers, "") {
+        builder_write(req, extra_headers)
+    }
+    if not str_eq(body, "") {
+        builder_write(req, "Content-Type: ")
+        builder_write(req, content_type)
+        builder_write(req, "\r\nContent-Length: ")
+        builder_write(req, int_to_string(str_len(body)))
+        builder_write(req, "\r\n")
+    }
+    builder_write(req, "\r\n")
+    if not str_eq(body, "") {
+        builder_write(req, body)
+    }
+    let raw_req = builder_string(req)
+    let mut raw_resp = ""
+    if use_tls == 1 {
+        let cli = oidc_load_client(cfg)
+        let tconn = tls_connect(cli, fd, host)
+        if tls_conn_fd(tconn) < 0 {
+            let _ = tcp_close(fd)
+            let _ = tls_client_free(cli)
+            return ""
+        }
+        let wr = tls_write(tconn, raw_req)
+        if wr < 0 {
+            let _ = tls_conn_close(tconn)
+            let _ = tls_client_free(cli)
+            return ""
+        }
+        let mut i = 0
+        while i < 64 {
+            let chunk = tls_read(tconn, 65536)
+            if str_eq(chunk, "") {
+                i = 64
+            } else {
+                raw_resp = raw_resp + chunk
+                i = i + 1
+            }
+        }
+        let _ = tls_conn_close(tconn)
+        let _ = tls_client_free(cli)
+    } else {
+        let wr2 = tcp_write(fd, raw_req)
+        if wr2 < 0 {
+            let _ = tcp_close(fd)
+            return ""
+        }
+        let mut j = 0
+        while j < 64 {
+            let chunk2 = tcp_read(fd)
+            if str_eq(chunk2, "") {
+                j = 64
+            } else {
+                raw_resp = raw_resp + chunk2
+                j = j + 1
+            }
+        }
+        let _ = tcp_close(fd)
+    }
+    // Strip headers
+    let sep = str_index(raw_resp, "\r\n\r\n")
+    if sep < 0 {
+        return ""
+    }
+    return substr(raw_resp, sep + 4, str_len(raw_resp))
+}
+
+// Prefer Mako verified https_* when possible.
+fn oidc_https(
+    method: string,
+    url: string,
+    extra_headers: string,
+    body: string,
+    content_type: string,
+    cfg: OidcConfig,
+    timeout_ms: int
+) -> string {
+    // Mako https_* is TLS-verify only and has no custom header API.
+    if cfg.insecure == 1 {
+        return oidc_https_legacy(method, url, extra_headers, body, content_type, cfg, timeout_ms)
+    }
+    if str_has_prefix(url, "http://") {
+        return oidc_https_legacy(method, url, extra_headers, body, content_type, cfg, timeout_ms)
+    }
+    if not str_eq(extra_headers, "") {
+        return oidc_https_legacy(method, url, extra_headers, body, content_type, cfg, timeout_ms)
+    }
+    let ca = oidc_ca_pem(cfg)
+    if str_eq(method, "GET") {
+        return https_get(url, ca, timeout_ms)
+    }
+    if str_eq(method, "POST") {
+        return https_post(url, body, content_type, ca, timeout_ms)
+    }
+    return https_request(method, url, body, content_type, ca, timeout_ms)
+}
+
+// Extract JWT payload JSON via Mako jwt_payload (does NOT verify signature).
+fn oidc_jwt_payload_json(token: string) -> string {
+    if str_eq(token, "") {
+        return ""
+    }
+    return jwt_payload(token)
+}
+
+// Fetch JWKS document over verified HTTPS (or legacy when insecure).
+fn oidc_fetch_jwks(cfg: OidcConfig) -> string {
+    if str_eq(cfg.jwks_uri, "") {
+        return ""
+    }
+    if cfg.insecure == 1 {
+        return oidc_https_legacy("GET", cfg.jwks_uri, "", "", "", cfg, 8000)
+    }
+    return https_get(cfg.jwks_uri, oidc_ca_pem(cfg), 8000)
+}
+
+// Verify id_token signature when JWKS or RSA PEM is configured.
+// Returns 1 if verified or verification not required; 0 if verify was required and failed.
+fn oidc_verify_id_token(cfg: OidcConfig, token: string) -> int {
+    if str_eq(token, "") {
+        return 0
+    }
+    if cfg.verify_jwt == 0 {
+        return 1
+    }
+    // Explicit PEM public key (RS256)
+    if not str_eq(cfg.rsa_public_key, "") {
+        let mut pem = cfg.rsa_public_key
+        // Allow path: if value looks like a file path, read it.
+        if str_has_prefix(pem, "/") or str_has_prefix(pem, "./") {
+            let file_pem = read_file(pem)
+            if not str_eq(file_pem, "") {
+                pem = file_pem
+            }
+        }
+        if jwt_verify_rs256(token, pem) == 1 {
+            return 1
+        }
+        return 0
+    }
+    // JWKS URI (typical OIDC IdP)
+    if not str_eq(cfg.jwks_uri, "") {
+        let jwks = oidc_fetch_jwks(cfg)
+        if str_eq(jwks, "") {
+            log_warn_event("oidc_jwks_fetch_failed", f"uri={cfg.jwks_uri}")
+            return 0
+        }
+        if jwt_verify_jwks(token, jwks) == 1 {
+            return 1
+        }
+        log_warn_event("oidc_jwt_verify_failed", "jwks")
+        return 0
+    }
+    // No crypto material: soft-trust token received over TLS from token endpoint.
+    return 1
+}
+
+fn oidc_discover(cfg: OidcConfig) -> OidcConfig {
+    let mut out = cfg
+    if str_eq(cfg.issuer, "") {
+        return out
+    }
+    // Skip network discovery only when all endpoints are already set.
+    if not str_eq(cfg.authorize_url, "") {
+        if not str_eq(cfg.token_url, "") {
+            if not str_eq(cfg.jwks_uri, "") {
+                return out
+            }
+        }
+    }
+    let mut base = cfg.issuer
+    if str_has_suffix(base, "/") {
+        base = substr(base, 0, str_len(base) - 1)
+    }
+    let disc = base + "/.well-known/openid-configuration"
+    let mut body = ""
+    if cfg.insecure == 1 {
+        body = oidc_https_legacy("GET", disc, "", "", "", cfg, 8000)
+    } else {
+        // Mako oidc_discovery = verified https_get of the discovery document
+        body = oidc_discovery(disc, oidc_ca_pem(cfg), 8000)
+    }
+    if str_eq(body, "") {
+        let st = https_last_status()
+        log_warn_event("oidc_discover_failed", f"issuer={cfg.issuer} https_status={st}")
+        return out
+    }
+    let az = json_get_string(body, "authorization_endpoint")
+    let tok = json_get_string(body, "token_endpoint")
+    let ui = json_get_string(body, "userinfo_endpoint")
+    let jwks = json_get_string(body, "jwks_uri")
+    if not str_eq(az, "") {
+        if str_eq(out.authorize_url, "") {
+            out.authorize_url = az
+        }
+    }
+    if not str_eq(tok, "") {
+        if str_eq(out.token_url, "") {
+            out.token_url = tok
+        }
+    }
+    if not str_eq(ui, "") {
+        if str_eq(out.userinfo_url, "") {
+            out.userinfo_url = ui
+        }
+    }
+    if not str_eq(jwks, "") {
+        if str_eq(out.jwks_uri, "") {
+            out.jwks_uri = jwks
+        }
+    }
+    return out
+}
+
+// Apply OIDC config after full reload: re-run discovery when ready.
+fn oidc_apply_reload(cfg: OidcConfig) -> OidcConfig {
+    let mut out = cfg
+    if oidc_ready(out) == 0 {
+        return out
+    }
+    out = oidc_discover(out)
+    if str_eq(out.authorize_url, "") or str_eq(out.token_url, "") {
+        log_warn_event("oidc_incomplete", "reason=missing_endpoints source=reload")
+    } else {
+        log_info_event("oidc_ready", f"issuer={out.issuer} redirect={out.redirect_uri} source=reload")
+    }
+    return out
+}
+
+// Same material policy as session cookies (state_key / LEBA_SESSION_SECRET).
+fn oidc_state_material(state_key: string) -> string {
+    if not str_eq(state_key, "") {
+        return state_key
+    }
+    let env_sec = env_get("LEBA_SESSION_SECRET")
+    if not str_eq(env_sec, "") {
+        return env_sec
+    }
+    return "leba-session-insecure-default"
+}
+
+fn oidc_make_state(state_key: string) -> string {
+    let nonce = hex_encode(random_bytes(16))
+    let sig = substr(sha256(nonce + ":" + sha256("leba-oidc-state:" + oidc_state_material(state_key))), 0, 16)
+    return nonce + "." + sig
+}
+
+fn oidc_check_state(state: string, state_key: string) -> int {
+    let cut = str_index(state, ".")
+    if cut < 0 {
+        return 0
+    }
+    let nonce = substr(state, 0, cut)
+    let sig = substr(state, cut + 1, str_len(state))
+    let expect = substr(sha256(nonce + ":" + sha256("leba-oidc-state:" + oidc_state_material(state_key))), 0, 16)
+    if str_eq(sig, expect) {
+        return 1
+    }
+    return 0
+}
+
+fn oidc_authorize_redirect_url(cfg: OidcConfig, state: string) -> string {
+    let mut scopes = cfg.scopes
+    if str_eq(scopes, "") {
+        scopes = "openid email profile"
+    }
+    let mut b = str_builder()
+    builder_write(b, cfg.authorize_url)
+    if str_contains(cfg.authorize_url, "?") {
+        builder_write(b, "&")
+    } else {
+        builder_write(b, "?")
+    }
+    builder_write(b, "response_type=code&client_id=")
+    builder_write(b, url_query_escape(cfg.client_id))
+    builder_write(b, "&redirect_uri=")
+    builder_write(b, url_query_escape(cfg.redirect_uri))
+    builder_write(b, "&scope=")
+    builder_write(b, url_query_escape(scopes))
+    builder_write(b, "&state=")
+    builder_write(b, url_query_escape(state))
+    return builder_string(b)
+}
+
+fn oidc_claim_contains(hay: string, needle: string) -> int {
+    if str_eq(needle, "") {
+        return 0
+    }
+    if str_eq(hay, "") {
+        return 0
+    }
+    // Exact or JSON array / space / comma separated
+    if str_eq(hay, needle) {
+        return 1
+    }
+    if str_contains(hay, "\"" + needle + "\"") {
+        return 1
+    }
+    if str_contains(hay, " " + needle + " ") {
+        return 1
+    }
+    if str_has_prefix(hay, needle + " ") {
+        return 1
+    }
+    if str_has_suffix(hay, " " + needle) {
+        return 1
+    }
+    if str_contains(hay, "," + needle) {
+        return 1
+    }
+    if str_contains(hay, needle + ",") {
+        return 1
+    }
+    return 0
+}
+
+fn oidc_map_role(cfg: OidcConfig, claims_json: string) -> string {
+    let mut role = cfg.default_role
+    if str_eq(role, "") {
+        role = "viewer"
+    }
+    // Explicit role claim (admin|operator|viewer)
+    let direct = json_get_string(claims_json, "leba_role")
+    if str_eq(direct, "admin") or str_eq(direct, "operator") or str_eq(direct, "viewer") {
+        return direct
+    }
+    // groups claim may be a JSON array stringified inside object — json_get_string may return ""
+    // Also try raw substring search of claim name area.
+    let mut groups = json_get_string(claims_json, cfg.groups_claim)
+    if str_eq(groups, "") {
+        // Fall back: search whole JSON for group markers
+        groups = claims_json
+    }
+    if not str_eq(cfg.admin_group, "") {
+        if oidc_claim_contains(groups, cfg.admin_group) == 1 {
+            return "admin"
+        }
+    }
+    if not str_eq(cfg.operator_group, "") {
+        if oidc_claim_contains(groups, cfg.operator_group) == 1 {
+            return "operator"
+        }
+    }
+    // Normalize unknown default
+    if not str_eq(role, "admin") {
+        if not str_eq(role, "operator") {
+            if not str_eq(role, "viewer") {
+                role = "viewer"
+            }
+        }
+    }
+    return role
+}
+
+fn oidc_pick_user(cfg: OidcConfig, claims_json: string) -> string {
+    let mut claim = cfg.email_claim
+    if str_eq(claim, "") {
+        claim = "email"
+    }
+    let email = json_get_string(claims_json, claim)
+    if not str_eq(email, "") {
+        return email
+    }
+    let sub = json_get_string(claims_json, "sub")
+    if not str_eq(sub, "") {
+        return sub
+    }
+    let preferred = json_get_string(claims_json, "preferred_username")
+    if not str_eq(preferred, "") {
+        return preferred
+    }
+    return "oidc-user"
+}
+
+struct OidcLoginResult {
+    ok: int
+    user: string
+    role: string
+    error: string
+}
+
+fn oidc_exchange_code(cfg: OidcConfig, code: string) -> OidcLoginResult {
+    let mut out = OidcLoginResult { ok: 0, user: "", role: "", error: "unknown" }
+    if str_eq(cfg.token_url, "") {
+        out.error = "no_token_url"
+        return out
+    }
+    if str_eq(code, "") {
+        out.error = "missing_code"
+        return out
+    }
+    let mut body = str_builder()
+    builder_write(body, "grant_type=authorization_code&code=")
+    builder_write(body, url_query_escape(code))
+    builder_write(body, "&redirect_uri=")
+    builder_write(body, url_query_escape(cfg.redirect_uri))
+    builder_write(body, "&client_id=")
+    builder_write(body, url_query_escape(cfg.client_id))
+    builder_write(body, "&client_secret=")
+    builder_write(body, url_query_escape(cfg.client_secret))
+    let form = builder_string(body)
+    let mut resp = ""
+    if cfg.insecure == 1 {
+        resp = oidc_https_legacy(
+            "POST",
+            cfg.token_url,
+            "",
+            form,
+            "application/x-www-form-urlencoded",
+            cfg,
+            10000
+        )
+    } else {
+        // Mako oidc_token = verified form POST over HTTPS
+        resp = oidc_token(cfg.token_url, form, oidc_ca_pem(cfg), 10000)
+    }
+    if str_eq(resp, "") {
+        let st = https_last_status()
+        if st > 0 {
+            out.error = "token_request_failed_http_" + int_to_string(st)
+        } else {
+            out.error = "token_request_failed"
+        }
+        log_warn_event("oidc_token_failed", f"status={st} url_set=1")
+        return out
+    }
+    if str_contains(resp, "\"error\"") {
+        let err = json_get_string(resp, "error")
+        if not str_eq(err, "") {
+            out.error = err
+            return out
+        }
+    }
+    let id_token = json_get_string(resp, "id_token")
+    let access = json_get_string(resp, "access_token")
+    let mut claims = ""
+    if not str_eq(id_token, "") {
+        if oidc_verify_id_token(cfg, id_token) == 0 {
+            out.error = "id_token_verify_failed"
+            return out
+        }
+        claims = oidc_jwt_payload_json(id_token)
+    }
+    if str_eq(claims, "") {
+        if not str_eq(access, "") {
+            if not str_eq(cfg.userinfo_url, "") {
+                // Authorization header requires legacy path (https_* has no custom headers)
+                let hdr = "Authorization: Bearer " + access + "\r\n"
+                let ui = oidc_https("GET", cfg.userinfo_url, hdr, "", "", cfg, 8000)
+                if not str_eq(ui, "") {
+                    claims = ui
+                }
+            }
+        }
+    }
+    if str_eq(claims, "") {
+        out.error = "no_claims"
+        return out
+    }
+    // Soft validate exp if present
+    let exp = json_get_int(claims, "exp")
+    if exp > 0 {
+        let now = now_ms() / 1000
+        if now > exp {
+            out.error = "token_expired"
+            return out
+        }
+    }
+    // Soft validate iss / aud when present
+    let iss = json_get_string(claims, "iss")
+    if not str_eq(iss, "") {
+        if not str_eq(cfg.issuer, "") {
+            let mut want = cfg.issuer
+            if str_has_suffix(want, "/") {
+                want = substr(want, 0, str_len(want) - 1)
+            }
+            let mut got = iss
+            if str_has_suffix(got, "/") {
+                got = substr(got, 0, str_len(got) - 1)
+            }
+            if not str_eq(want, got) {
+                out.error = "issuer_mismatch"
+                return out
+            }
+        }
+    }
+    let aud = json_get_string(claims, "aud")
+    if not str_eq(aud, "") {
+        if not str_contains(aud, cfg.client_id) {
+            if not str_eq(aud, cfg.client_id) {
+                out.error = "audience_mismatch"
+                return out
+            }
+        }
+    }
+    out.user = oidc_pick_user(cfg, claims)
+    out.role = oidc_map_role(cfg, claims)
+    out.ok = 1
+    out.error = ""
+    return out
+}

@@ -180,6 +180,25 @@ fn valid_domain(s: string) -> int {
     return 1
 }
 
+// SNI hostname: exact domain, or left-most wildcard (*.example.com). Mako rejects nested wildcards.
+fn valid_sni_hostname(s: string) -> int {
+    if str_eq(s, "") {
+        return 0
+    }
+    if str_has_prefix(s, "*.") {
+        // Strip "*." and validate the rest as a domain (no further wildcards).
+        let rest = substr(s, 2, str_len(s))
+        if str_contains(rest, "*") {
+            return 0
+        }
+        return valid_domain(rest)
+    }
+    if str_contains(s, "*") {
+        return 0
+    }
+    return valid_domain(s)
+}
+
 fn valid_abs_path(s: string) -> int {
     if str_eq(s, "") {
         return 1
@@ -308,7 +327,20 @@ fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Serv
         builder_write(b, json_escape(fe.tls_cert))
         builder_write(b, "\",\"tls_key\":\"")
         builder_write(b, json_escape(fe.tls_key))
-        builder_write(b, "\"}")
+        builder_write(b, "\",\"tls_sni\":[")
+        for si, se in range fe.tls_sni {
+            if si > 0 {
+                builder_write(b, ",")
+            }
+            builder_write(b, "{\"hostname\":\"")
+            builder_write(b, json_escape(se.hostname))
+            builder_write(b, "\",\"cert\":\"")
+            builder_write(b, json_escape(se.cert))
+            builder_write(b, "\",\"key\":\"")
+            builder_write(b, json_escape(se.key))
+            builder_write(b, "\"}")
+        }
+        builder_write(b, "]}")
     }
     builder_write(b, "],\"managed_file\":\"leba.vhosts.conf\"}\n")
     return builder_string(b)
@@ -329,6 +361,9 @@ fn render_managed_vhosts(frontends: []Frontend, backends: []Backend, servers: []
                         }
                         if not str_eq(fe.tls_key, "") {
                             builder_write(b, f"  tls_key {fe.tls_key}\n")
+                        }
+                        for _, se in range fe.tls_sni {
+                            builder_write(b, f"  tls_sni {se.hostname} {se.cert} {se.key}\n")
                         }
                         wrote = 1
                     }
@@ -956,11 +991,16 @@ fn handle_admin_state(
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
+        // Per-domain cert → multi-cert SNI (Mako tls_server_sni_add). Also set default
+        // cert when the frontend has none so TLS can be enabled on first proxy-host.
         if not str_eq(cert, "") {
-            fe.tls_cert = cert
-        }
-        if not str_eq(key, "") {
-            fe.tls_key = key
+            if not str_eq(key, "") {
+                fe = frontend_upsert_tls_sni(fe, domain, cert, key)
+                if str_eq(fe.tls_cert, "") {
+                    fe.tls_cert = cert
+                    fe.tls_key = key
+                }
+            }
         }
         out_frontends[fi] = fe
         let out_backends = ensure_backend(backends, backend)
@@ -980,15 +1020,25 @@ fn handle_admin_state(
         builder_write(body, json_escape(server))
         builder_write(body, "\",\"addr\":\"")
         builder_write(body, json_escape(addr))
-        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"tls_reload_recommended\":")
+        builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"tls_reload\":")
         if not str_eq(cert, "") {
-            builder_write(body, "true")
-        } else {
             if not str_eq(key, "") {
                 builder_write(body, "true")
             } else {
                 builder_write(body, "false")
             }
+        } else {
+            builder_write(body, "false")
+        }
+        builder_write(body, ",\"sni\":")
+        if not str_eq(cert, "") {
+            if not str_eq(key, "") {
+                builder_write(body, "true")
+            } else {
+                builder_write(body, "false")
+            }
+        } else {
+            builder_write(body, "false")
         }
         builder_write(body, "}\n")
         log_info_event("admin_action", "action=proxy-host status=200")
@@ -1011,6 +1061,14 @@ fn handle_admin_state(
         let frontend = query_value(full_path, "frontend")
         let cert = query_value(full_path, "cert")
         let key = query_value(full_path, "key")
+        // Optional hostname/sni → multi-cert SNI entry; omit → default tls_cert/tls_key.
+        let mut hostname = query_value(full_path, "hostname")
+        if str_eq(hostname, "") {
+            hostname = query_value(full_path, "sni")
+        }
+        if str_eq(hostname, "") {
+            hostname = query_value(full_path, "domain")
+        }
         if valid_admin_name(frontend) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
@@ -1020,22 +1078,53 @@ fn handle_admin_state(
         if valid_abs_path(key) == 0 {
             return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
+        if str_eq(cert, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if str_eq(key, "") {
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+        }
+        if not str_eq(hostname, "") {
+            if valid_sni_hostname(hostname) == 0 {
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid sni hostname\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            }
+        }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
             return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
-        fe.tls_cert = cert
-        fe.tls_key = key
+        let mut sni = 0
+        if not str_eq(hostname, "") {
+            fe = frontend_upsert_tls_sni(fe, hostname, cert, key)
+            if str_eq(fe.tls_cert, "") {
+                fe.tls_cert = cert
+                fe.tls_key = key
+            }
+            sni = 1
+        } else {
+            fe.tls_cert = cert
+            fe.tls_key = key
+        }
         out_frontends[fi] = fe
         if save_managed_vhosts(config_path, config_dir, out_frontends, backends, servers, routes) == 0 {
             return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
+        let mut body = str_builder()
+        builder_write(body, "{\"ok\":true,\"action\":\"vhost-cert\",\"managed_file\":\"leba.vhosts.conf\",\"tls_reload\":true,\"sni\":")
+        if sni == 1 {
+            builder_write(body, "true,\"hostname\":\"")
+            builder_write(body, json_escape(hostname))
+            builder_write(body, "\"")
+        } else {
+            builder_write(body, "false")
+        }
+        builder_write(body, "}\n")
         return AdminStateResult {
             handled: 1,
             status: 200,
-            body: "{\"ok\":true,\"action\":\"vhost-cert\",\"managed_file\":\"leba.vhosts.conf\",\"restart_required\":true}\n",
+            body: builder_string(body),
             servers: servers,
             frontends: out_frontends,
             backends: backends,

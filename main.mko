@@ -6,6 +6,7 @@ pull . "./src/balance.mko"
 pull . "./src/health.mko"
 pull . "./src/rate.mko"
 pull . "./src/trace.mko"
+pull . "./src/oidc.mko"
 pull . "./src/stats.mko"
 pull . "./src/proxy.mko"
 pull . "./src/waf.mko"
@@ -13,6 +14,7 @@ pull . "./src/doctor.mko"
 pull . "./src/admin.mko"
 pull . "./src/webadmin.mko"
 pull . "./src/runtime.mko"
+pull . "./src/peers.mko"
 pull . "./src/cli.mko"
 
 fn frontend_mode_index(frontends: []Frontend, mode: string, ordinal: int) -> int {
@@ -35,7 +37,7 @@ fn main() {
     let mut max_req = 0
     if argc() > 1 {
         if str_eq(arg_get(1), "version") {
-            print("leba 0.9.0")
+            print("leba 0.10.0")
             print("concurrency: crew worker pool")
             return
         }
@@ -116,6 +118,19 @@ fn main() {
     let mut app_auth_users = w.app_auth_users
     let mut stick_table = make(map[string]string)
     let mut stick_count = 0
+    let mut peers_cfg = w.peers
+    let mut peer_listen_fd = 0 - 1
+    let mut peer_conns = make([]PeerConn, 0, 4)
+    let mut peers_next_dial_ms = 0
+    let mut oidc_cfg = w.oidc
+    if oidc_ready(oidc_cfg) == 1 {
+        oidc_cfg = oidc_discover(oidc_cfg)
+        if str_eq(oidc_cfg.authorize_url, "") or str_eq(oidc_cfg.token_url, "") {
+            log_warn_event("oidc_incomplete", "reason=missing_endpoints set authorize_url/token_url or fix issuer discovery")
+        } else {
+            log_info_event("oidc_ready", f"issuer={oidc_cfg.issuer} redirect={oidc_cfg.redirect_uri}")
+        }
+    }
     let mut config_path = path
     let config_dir = path_dir(path)
     log_info_event("server_pools_ready", f"servers={len(servers)}")
@@ -196,11 +211,17 @@ fn main() {
         let mut h_h3_handle = -1
         if str_len(hfe.tls_cert) > 0 {
             h_tls = 1
+            // SNI + optional TLS 1.3 min via Mako (tls_server_sni_add / tls_server_new_tls13)
+            h_tls_srv = frontend_tls_server_new(hfe)
             if str_len(hfe.tls_client_ca) > 0 {
-                h_tls_srv = tls_server_new_mtls(hfe.tls_cert, hfe.tls_key, hfe.tls_client_ca)
                 log_info_event("mtls_enabled", f"frontend={hfe.name} client_ca={hfe.tls_client_ca}")
             } else {
-                h_tls_srv = tls_server_new(hfe.tls_cert, hfe.tls_key)
+                if hfe.tls_min_13 == 1 {
+                    log_info_event("tls13_only", f"frontend={hfe.name}")
+                }
+            }
+            if len(hfe.tls_sni) > 0 {
+                log_info_event("tls_sni_configured", f"frontend={hfe.name} entries={len(hfe.tls_sni)}")
             }
             if frontend_protocol_wants_h3(hfe.protocols) == 1 {
                 if h3_server_available() == 1 {
@@ -224,7 +245,7 @@ fn main() {
                 }
             }
         }
-        let hfd = tcp_listen_addr(hfe.bind_host, hfe.bind_port)
+        let hfd = frontend_tcp_listen(hfe)
         http_listeners = append(http_listeners, HttpListener {
             frontend: hfe,
             fd: hfd,
@@ -242,24 +263,27 @@ fn main() {
     let mut stats_tls_srv = tls_server_new("", "")
     if str_len(stats_fe.tls_cert) > 0 {
         stats_tls = 1
+        stats_tls_srv = frontend_tls_server_new(stats_fe)
         if str_len(stats_fe.tls_client_ca) > 0 {
-            stats_tls_srv = tls_server_new_mtls(stats_fe.tls_cert, stats_fe.tls_key, stats_fe.tls_client_ca)
             log_info_event("stats_mtls_enabled", f"client_ca={stats_fe.tls_client_ca}")
         } else {
-            stats_tls_srv = tls_server_new(stats_fe.tls_cert, stats_fe.tls_key)
-            log_info_event("stats_tls_enabled", f"cert={stats_fe.tls_cert}")
+            log_info_event("stats_tls_enabled", f"cert={stats_fe.tls_cert} tls13={stats_fe.tls_min_13}")
         }
     }
+    // Stats always listens on w.stats_port (may differ from frontend bind line).
+    let mut stats_listen_fe = stats_fe
+    stats_listen_fe.bind_port = w.stats_port
     let mut stats_fd = 0
     if stats_tls == 1 {
-        stats_fd = tcp_listen_addr(stats_fe.bind_host, w.stats_port)
+        stats_fd = frontend_tcp_listen(stats_listen_fe)
     } else {
-        stats_fd = http_bind_addr(stats_fe.bind_host, w.stats_port)
+        // Cleartext stats: same dual-stack backlog path as TLS (Mako 0.2.3).
+        stats_fd = frontend_tcp_listen(stats_listen_fe)
     }
     let mut tcp_fds = make([]int, 0, len(tcp_fes))
     let mut ti_bind = 0
     while ti_bind < len(tcp_fes) {
-        tcp_fds = append(tcp_fds, tcp_listen_addr(tcp_fes[ti_bind].bind_host, tcp_fes[ti_bind].bind_port))
+        tcp_fds = append(tcp_fds, frontend_tcp_listen(tcp_fes[ti_bind]))
         ti_bind = ti_bind + 1
     }
     let mut udp_listeners = make([]UdpListener, 0, len(udp_fes))
@@ -400,6 +424,19 @@ fn main() {
         let _ = evloop_add(tcp_ev, udp_listeners[ui_add].fd, 1)
         ui_add = ui_add + 1
     }
+    // Experimental stick-table peers (accept-thread I/O only).
+    if peers_ready(peers_cfg) == 1 {
+        peer_listen_fd = tcp_listen_addr(peers_cfg.bind_host, peers_cfg.bind_port)
+        if peer_listen_fd < 0 {
+            log_warn_event("peers_bind_failed", f"bind={peers_cfg.bind_host}:{peers_cfg.bind_port}")
+            peer_listen_fd = 0 - 1
+        } else {
+            let _ = io_set_nonblocking(peer_listen_fd, 1)
+            let _ = evloop_add(tcp_ev, peer_listen_fd, 1)
+            log_info_event("peers_listen", f"node={peers_cfg.name} cluster={peers_cfg.cluster} bind={peers_cfg.bind_host}:{peers_cfg.bind_port} remotes={len(peers_cfg.peers)}")
+            peers_next_dial_ms = now_ms()
+        }
+    }
     let mut hi_log = 0
     while hi_log < len(http_listeners) {
         if http_listeners[hi_log].h3 == 1 {
@@ -449,6 +486,17 @@ fn main() {
                 servers = run_dns_resolve(servers, backends, 0)
                 servers = init_server_pools(servers, backends)
                 servers = run_health_checks(servers, backends, 0)
+                // Peers reconnect (experimental stick sync)
+                if peers_ready(peers_cfg) == 1 {
+                    if peers_next_dial_ms <= now_bg {
+                        peers_next_dial_ms = now_bg + 5000
+                        let dialed = peers_dial_missing(peers_cfg, peer_conns)
+                        for _, pc in range dialed {
+                            let _ = evloop_add(tcp_ev, pc.fd, 1)
+                            peer_conns = append(peer_conns, pc)
+                        }
+                    }
+                }
             }
             if signal_fired("TERM") == 1 {
                 fire_drain(drain_token)
@@ -481,10 +529,12 @@ fn main() {
                     servers_reload_reason = f"watch_path={changed}"
                 }
             }
-            // Full table reload + HTTP/TCP listen rebind (H3 bind changes still restart).
+            // Full table reload + HTTP/TCP/UDP/H3/stats listen rebind.
             if not str_eq(full_reload_reason, "") {
                 let fr = full_config_reload(config_path, servers)
                 if fr.ok == 1 {
+                    let old_stats_port = w.stats_port
+                    let old_stats_fe = stats_fe
                     servers = fr.servers
                     backends = fr.backends
                     frontends = fr.frontends
@@ -499,31 +549,44 @@ fn main() {
                     w.state_file = fr.state_file
                     w.state_key = fr.state_key
                     buckets = rate_init_all(frontends)
-                    // Rebuild http/tcp frontend lists and rebind listeners.
-                    let mut new_http_fes = make([]Frontend, 0, 8)
-                    let mut new_tcp_fes = make([]Frontend, 0, 8)
-                    let mut si_fe = 0
-                    while si_fe < len(frontends) {
-                        if str_eq(frontends[si_fe].mode, "http") {
-                            new_http_fes = append(new_http_fes, frontends[si_fe])
-                        }
-                        if str_eq(frontends[si_fe].mode, "tcp") {
-                            new_tcp_fes = append(new_tcp_fes, frontends[si_fe])
-                        }
-                        si_fe = si_fe + 1
-                    }
-                    http_fes = new_http_fes
+                    // Rebuild http/tcp/udp/h3 frontend lists and rebind listeners.
+                    http_fes = frontends_of_mode(frontends, "http")
+                    udp_fes = frontends_of_mode(frontends, "udp")
                     http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
                     pending_clients = reindex_pending_clients(pending_clients, http_listeners)
                     let new_tcp_fds, new_tcp_list = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
                     tcp_fds = new_tcp_fds
                     tcp_fes = new_tcp_list
-                    // Stats frontend metadata (port rebind not attempted — keep existing stats_fd).
+                    udp_listeners = rebind_udp_listeners(tcp_ev, udp_listeners, frontends)
+                    udp_flows = filter_udp_flows(udp_flows, udp_listeners)
+                    h3_listeners = rebind_h3_listeners(tcp_ev, h3_listeners, http_fes)
+                    http_listeners = sync_http_h3_handles(http_listeners, h3_listeners)
+                    // Stats/admin listener: rebind host/port/TLS when needed.
+                    let mut new_stats_fe = frontend_new("stats")
                     let sidx = frontend_mode_index(frontends, "stats", 0)
                     if sidx >= 0 {
-                        stats_fe = frontends[sidx]
+                        new_stats_fe = frontends[sidx]
                     }
-                    log_info_event("config_reloaded", f"{full_reload_reason} servers={len(servers)} routes={len(routes)} backends={len(backends)} http_listeners={len(http_listeners)} tcp={len(tcp_fds)}")
+                    let n_sfd, n_stls, n_ssrv, n_sfe = rebind_stats_listener(
+                        tcp_ev, stats_fd, stats_tls, stats_tls_srv, old_stats_fe, old_stats_port, new_stats_fe, fr.stats_port
+                    )
+                    stats_fd = n_sfd
+                    stats_tls = n_stls
+                    stats_tls_srv = n_ssrv
+                    stats_fe = n_sfe
+                    // OIDC + peers: live apply (discovery / listen rebind / session reset).
+                    oidc_cfg = oidc_apply_reload(fr.oidc)
+                    let old_peers = peers_cfg
+                    peers_cfg = fr.peers
+                    let n_pfd, n_pconns, force_dial = peers_apply_reload(
+                        tcp_ev, peer_listen_fd, old_peers, peer_conns, peers_cfg
+                    )
+                    peer_listen_fd = n_pfd
+                    peer_conns = n_pconns
+                    if force_dial == 1 {
+                        peers_next_dial_ms = now_ms()
+                    }
+                    log_info_event("config_reloaded", f"{full_reload_reason} servers={len(servers)} routes={len(routes)} backends={len(backends)} http_listeners={len(http_listeners)} tcp={len(tcp_fds)} udp={len(udp_listeners)} h3={len(h3_listeners)} stats=:{fr.stats_port} peers={peers_ready(peers_cfg)} oidc={oidc_ready(oidc_cfg)}")
                 } else {
                     log_warn_event("config_reload_failed", f"{full_reload_reason} error=\"{json_escape(fr.error)}\"")
                 }
@@ -638,7 +701,7 @@ fn main() {
                                 continue
                             }
                             if pc.kind == 1 {
-                                let srp = handle_stats_raw_conn(pc.fd, raw_pending, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir)
+                                let srp = handle_stats_raw_conn(pc.fd, raw_pending, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir, oidc_cfg, peers_cfg, stick_count)
                                 frontends = srp.frontends
                                 backends = srp.backends
                                 servers = srp.servers
@@ -647,14 +710,24 @@ fn main() {
                                 if srp.tls_reload == 1 {
                                     let mut ri = 0
                                     while ri < len(http_listeners) {
-                                        if http_listeners[ri].tls == 1 {
-                                            let fe = http_listeners[ri].frontend
-                                            let rc = tls_server_reload(http_listeners[ri].tls_srv, fe.tls_cert, fe.tls_key)
-                                            if rc == 0 {
-                                                log_info_event("tls_reloaded", f"frontend={fe.name}")
+                                        let mut hl = http_listeners[ri]
+                                        let old_fe = hl.frontend
+                                        // Prefer live frontends table (admin may have updated certs/SNI).
+                                        let mut fe = old_fe
+                                        let fi = find_frontend_idx(frontends, old_fe.name)
+                                        if fi >= 0 {
+                                            fe = frontends[fi]
+                                        }
+                                        if str_len(fe.tls_cert) > 0 {
+                                            if hl.tls == 1 {
+                                                hl.tls_srv = frontend_tls_server_refresh(hl.tls_srv, old_fe, fe)
                                             } else {
-                                                log_warn_event("tls_reload_failed", f"frontend={fe.name} code={rc}")
+                                                hl.tls_srv = frontend_tls_server_new(fe)
+                                                hl.tls = 1
                                             }
+                                            hl.frontend = fe
+                                            http_listeners[ri] = hl
+                                            log_info_event("tls_reloaded", f"frontend={fe.name} sni={len(fe.tls_sni)}")
                                         }
                                         ri = ri + 1
                                     }
@@ -662,6 +735,8 @@ fn main() {
                                 if srp.full_reload == 1 {
                                     let fr = full_config_reload(config_path, servers)
                                     if fr.ok == 1 {
+                                        let old_sp_a = w.stats_port
+                                        let old_sfe_a = stats_fe
                                         servers = fr.servers
                                         backends = fr.backends
                                         frontends = fr.frontends
@@ -672,24 +747,45 @@ fn main() {
                                         w.admin_users = fr.admin_users
                                         w.stats_user = fr.stats_user
                                         w.stats_pass = fr.stats_pass
+                                        w.stats_port = fr.stats_port
                                         w.state_file = fr.state_file
                                         w.state_key = fr.state_key
                                         buckets = rate_init_all(frontends)
-                                        let mut new_http_fes_a = make([]Frontend, 0, 8)
-                                        let mut si_a = 0
-                                        while si_a < len(frontends) {
-                                            if str_eq(frontends[si_a].mode, "http") {
-                                                new_http_fes_a = append(new_http_fes_a, frontends[si_a])
-                                            }
-                                            si_a = si_a + 1
-                                        }
-                                        http_fes = new_http_fes_a
+                                        http_fes = frontends_of_mode(frontends, "http")
+                                        udp_fes = frontends_of_mode(frontends, "udp")
                                         http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
                                         pending_clients = reindex_pending_clients(pending_clients, http_listeners)
                                         let nfd_a, ntf_a = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
                                         tcp_fds = nfd_a
                                         tcp_fes = ntf_a
-                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)}")
+                                        udp_listeners = rebind_udp_listeners(tcp_ev, udp_listeners, frontends)
+                                        udp_flows = filter_udp_flows(udp_flows, udp_listeners)
+                                        h3_listeners = rebind_h3_listeners(tcp_ev, h3_listeners, http_fes)
+                                        http_listeners = sync_http_h3_handles(http_listeners, h3_listeners)
+                                        let mut nsfe_a = frontend_new("stats")
+                                        let sidx_a = frontend_mode_index(frontends, "stats", 0)
+                                        if sidx_a >= 0 {
+                                            nsfe_a = frontends[sidx_a]
+                                        }
+                                        let nfd_s, ntls_s, nsrv_s, nfe_s = rebind_stats_listener(
+                                            tcp_ev, stats_fd, stats_tls, stats_tls_srv, old_sfe_a, old_sp_a, nsfe_a, fr.stats_port
+                                        )
+                                        stats_fd = nfd_s
+                                        stats_tls = ntls_s
+                                        stats_tls_srv = nsrv_s
+                                        stats_fe = nfe_s
+                                        oidc_cfg = oidc_apply_reload(fr.oidc)
+                                        let old_peers_a = peers_cfg
+                                        peers_cfg = fr.peers
+                                        let n_pfd_a, n_pconns_a, force_a = peers_apply_reload(
+                                            tcp_ev, peer_listen_fd, old_peers_a, peer_conns, peers_cfg
+                                        )
+                                        peer_listen_fd = n_pfd_a
+                                        peer_conns = n_pconns_a
+                                        if force_a == 1 {
+                                            peers_next_dial_ms = now_ms()
+                                        }
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)} udp={len(udp_listeners)} h3={len(h3_listeners)} stats=:{fr.stats_port} peers={peers_ready(peers_cfg)} oidc={oidc_ready(oidc_cfg)}")
                                     } else {
                                         log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
                                     }
@@ -707,6 +803,9 @@ fn main() {
                                         buckets = dp.buckets
                                         stick_table = dp.stick_table
                                         stick_count = dp.stick_count
+                                        if not str_eq(dp.stick_peer_line, "") {
+                                            peers_broadcast(peer_conns, dp.stick_peer_line)
+                                        }
                                         if dp.need_worker == 0 {
                                             let _ = tcp_close(pc.fd)
                                             if dp.bytes_in > 0 {
@@ -755,6 +854,76 @@ fn main() {
                     }
                 }
                 let rfd = evloop_event_fd(tcp_ev, ei)
+                // --- peers listen / peer connections (stick-table sync) ---
+                let mut peer_handled = 0
+                if peer_listen_fd >= 0 {
+                    if rfd == peer_listen_fd {
+                        peer_handled = 1
+                        let pfd = tcp_accept_nb(peer_listen_fd)
+                        if pfd >= 0 {
+                            let _ = io_set_nonblocking(pfd, 1)
+                            let _ = tcp_set_timeout(pfd, 5000)
+                            let mut pc = peer_conn_new(pfd, 0, 0 - 1)
+                            let _ = evloop_add(tcp_ev, pfd, 1)
+                            peer_conns = append(peer_conns, pc)
+                            log_info_event("peers_accept", f"fd={pfd}")
+                        }
+                    }
+                }
+                if peer_handled == 0 {
+                    let mut pi_peer = 0
+                    while pi_peer < len(peer_conns) {
+                        if peer_conns[pi_peer].fd == rfd {
+                            peer_handled = 1
+                            let chunk = tcp_read(rfd)
+                            if str_eq(chunk, "") {
+                                // EOF or error — drop peer
+                                let _ = evloop_del(tcp_ev, rfd)
+                                let _ = tcp_close(rfd)
+                                log_info_event("peers_closed", f"remote={peer_conns[pi_peer].name} fd={rfd}")
+                                let mut next_pc = make([]PeerConn, 0, len(peer_conns))
+                                let mut pj = 0
+                                while pj < len(peer_conns) {
+                                    if pj != pi_peer {
+                                        next_pc = append(next_pc, peer_conns[pj])
+                                    }
+                                    pj = pj + 1
+                                }
+                                peer_conns = next_pc
+                            } else {
+                                let pc2, tab2, cnt2, reply, close = peers_feed(peer_conns[pi_peer], chunk, peers_cfg, stick_table, stick_count, now_ms())
+                                stick_table = tab2
+                                stick_count = cnt2
+                                if not str_eq(reply, "") {
+                                    let _ = peers_write(pc2.fd, reply)
+                                }
+                                if close == 1 {
+                                    let _ = evloop_del(tcp_ev, rfd)
+                                    let _ = tcp_close(rfd)
+                                    log_info_event("peers_closed", f"remote={pc2.name} fd={rfd} reason=proto")
+                                    let mut next_pc2 = make([]PeerConn, 0, len(peer_conns))
+                                    let mut pj2 = 0
+                                    while pj2 < len(peer_conns) {
+                                        if pj2 != pi_peer {
+                                            next_pc2 = append(next_pc2, peer_conns[pj2])
+                                        }
+                                        pj2 = pj2 + 1
+                                    }
+                                    peer_conns = next_pc2
+                                } else {
+                                    peer_conns[pi_peer] = pc2
+                                }
+                            }
+                            pi_peer = len(peer_conns)
+                        } else {
+                            pi_peer = pi_peer + 1
+                        }
+                    }
+                }
+                if peer_handled == 1 {
+                    ei = ei + 1
+                    continue
+                }
                 if rfd == stats_fd {
                     let sc = tcp_accept_nb(stats_fd)
                     if sc >= 0 {
@@ -765,7 +934,7 @@ fn main() {
                             let sconn = tls_accept(stats_tls_srv, sc)
                             let sraw = tls_read(sconn, 65536)
                             if not str_eq(sraw, "") {
-                                let srp = handle_stats_tls_conn(sconn, sraw, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir)
+                                let srp = handle_stats_tls_conn(sconn, sraw, st, frontends, backends, servers, routes, acls, w.stats_user, w.stats_pass, w.admin_users, w.state_file, w.state_key, path, config_dir, oidc_cfg, peers_cfg, stick_count)
                                 frontends = srp.frontends
                                 backends = srp.backends
                                 servers = srp.servers
@@ -774,14 +943,23 @@ fn main() {
                                 if srp.tls_reload == 1 {
                                     let mut ri = 0
                                     while ri < len(http_listeners) {
-                                        if http_listeners[ri].tls == 1 {
-                                            let fe = http_listeners[ri].frontend
-                                            let rc = tls_server_reload(http_listeners[ri].tls_srv, fe.tls_cert, fe.tls_key)
-                                            if rc == 0 {
-                                                log_info_event("tls_reloaded", f"frontend={fe.name}")
+                                        let mut hl = http_listeners[ri]
+                                        let old_fe = hl.frontend
+                                        let mut fe = old_fe
+                                        let fi = find_frontend_idx(frontends, old_fe.name)
+                                        if fi >= 0 {
+                                            fe = frontends[fi]
+                                        }
+                                        if str_len(fe.tls_cert) > 0 {
+                                            if hl.tls == 1 {
+                                                hl.tls_srv = frontend_tls_server_refresh(hl.tls_srv, old_fe, fe)
                                             } else {
-                                                log_warn_event("tls_reload_failed", f"frontend={fe.name} code={rc}")
+                                                hl.tls_srv = frontend_tls_server_new(fe)
+                                                hl.tls = 1
                                             }
+                                            hl.frontend = fe
+                                            http_listeners[ri] = hl
+                                            log_info_event("tls_reloaded", f"frontend={fe.name} sni={len(fe.tls_sni)}")
                                         }
                                         ri = ri + 1
                                     }
@@ -795,6 +973,8 @@ fn main() {
                                 if srp.full_reload == 1 {
                                     let fr = full_config_reload(config_path, servers)
                                     if fr.ok == 1 {
+                                        let old_sp_b = w.stats_port
+                                        let old_sfe_b = stats_fe
                                         servers = fr.servers
                                         backends = fr.backends
                                         frontends = fr.frontends
@@ -805,24 +985,45 @@ fn main() {
                                         w.admin_users = fr.admin_users
                                         w.stats_user = fr.stats_user
                                         w.stats_pass = fr.stats_pass
+                                        w.stats_port = fr.stats_port
                                         w.state_file = fr.state_file
                                         w.state_key = fr.state_key
                                         buckets = rate_init_all(frontends)
-                                        let mut new_http_fes_b = make([]Frontend, 0, 8)
-                                        let mut si_b = 0
-                                        while si_b < len(frontends) {
-                                            if str_eq(frontends[si_b].mode, "http") {
-                                                new_http_fes_b = append(new_http_fes_b, frontends[si_b])
-                                            }
-                                            si_b = si_b + 1
-                                        }
-                                        http_fes = new_http_fes_b
+                                        http_fes = frontends_of_mode(frontends, "http")
+                                        udp_fes = frontends_of_mode(frontends, "udp")
                                         http_listeners = rebind_http_listeners(tcp_ev, http_listeners, http_fes)
                                         pending_clients = reindex_pending_clients(pending_clients, http_listeners)
                                         let nfd_b, ntf_b = rebind_tcp_listeners(tcp_ev, tcp_fds, tcp_fes, frontends)
                                         tcp_fds = nfd_b
                                         tcp_fes = ntf_b
-                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)}")
+                                        udp_listeners = rebind_udp_listeners(tcp_ev, udp_listeners, frontends)
+                                        udp_flows = filter_udp_flows(udp_flows, udp_listeners)
+                                        h3_listeners = rebind_h3_listeners(tcp_ev, h3_listeners, http_fes)
+                                        http_listeners = sync_http_h3_handles(http_listeners, h3_listeners)
+                                        let mut nsfe_b = frontend_new("stats")
+                                        let sidx_b = frontend_mode_index(frontends, "stats", 0)
+                                        if sidx_b >= 0 {
+                                            nsfe_b = frontends[sidx_b]
+                                        }
+                                        let nfd_sb, ntls_sb, nsrv_sb, nfe_sb = rebind_stats_listener(
+                                            tcp_ev, stats_fd, stats_tls, stats_tls_srv, old_sfe_b, old_sp_b, nsfe_b, fr.stats_port
+                                        )
+                                        stats_fd = nfd_sb
+                                        stats_tls = ntls_sb
+                                        stats_tls_srv = nsrv_sb
+                                        stats_fe = nfe_sb
+                                        oidc_cfg = oidc_apply_reload(fr.oidc)
+                                        let old_peers_b = peers_cfg
+                                        peers_cfg = fr.peers
+                                        let n_pfd_b, n_pconns_b, force_b = peers_apply_reload(
+                                            tcp_ev, peer_listen_fd, old_peers_b, peer_conns, peers_cfg
+                                        )
+                                        peer_listen_fd = n_pfd_b
+                                        peer_conns = n_pconns_b
+                                        if force_b == 1 {
+                                            peers_next_dial_ms = now_ms()
+                                        }
+                                        log_info_event("config_reloaded", f"source=admin servers={len(servers)} routes={len(routes)} http_listeners={len(http_listeners)} udp={len(udp_listeners)} h3={len(h3_listeners)} stats=:{fr.stats_port} peers={peers_ready(peers_cfg)} oidc={oidc_ready(oidc_cfg)}")
                                     } else {
                                         log_warn_event("config_reload_failed", f"source=admin error=\"{json_escape(fr.error)}\"")
                                     }
@@ -873,6 +1074,7 @@ fn main() {
                                     let _ = io_set_nonblocking(c, 0)
                                     let tconn = tls_accept(h.tls_srv, c)
                                     let proto = tls_conn_alpn(tconn)
+                                    let client_ip = tcp_peer_addr(tls_conn_fd(tconn))
                                     let mut tr = ProxyResult {
                                         err: 1,
                                         bytes_out: 0,
@@ -883,13 +1085,21 @@ fn main() {
                                         bytes_in: 0,
                                         servers: servers,
                                         backends: backends,
-                                        buckets: buckets
+                                        buckets: buckets,
+                                        stick_table: stick_table,
+                                        stick_count: stick_count,
+                                        stick_peer_line: ""
                                     }
                                     if str_eq(proto, "h2") {
-                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules)
+                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                         servers = tr.servers
                                         backends = tr.backends
                                         buckets = tr.buckets
+                                        stick_table = tr.stick_table
+                                        stick_count = tr.stick_count
+                                        if not str_eq(tr.stick_peer_line, "") {
+                                            peers_broadcast(peer_conns, tr.stick_peer_line)
+                                        }
                                         st.total_req = st.total_req + 1
                                         st.total_bytes_out = st.total_bytes_out + tr.bytes_out
                                         st.retries = st.retries + tr.retries
@@ -910,10 +1120,15 @@ fn main() {
                                         let raw_req = parse_raw_request(raw_bytes)
                                         // WSS: tunnel Upgrade: websocket off the accept thread
                                         if str_eq(raw_req.upgrade, "websocket") {
-                                            let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules)
+                                            let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                             servers = dp.servers
                                             backends = dp.backends
                                             buckets = dp.buckets
+                                            stick_table = dp.stick_table
+                                            stick_count = dp.stick_count
+                                            if not str_eq(dp.stick_peer_line, "") {
+                                                peers_broadcast(peer_conns, dp.stick_peer_line)
+                                            }
                                             if dp.need_worker == 0 {
                                                 let mut code = 503
                                                 if raw_req.ok == 0 {
@@ -963,10 +1178,15 @@ fn main() {
                                             }
                                         } else {
                                             // Dispatch TLS HTTP to worker (TlsConn ownership moves).
-                                            let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules)
+                                            let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                             servers = dp_tls.servers
                                             backends = dp_tls.backends
                                             buckets = dp_tls.buckets
+                                            stick_table = dp_tls.stick_table
+                                            stick_count = dp_tls.stick_count
+                                            if not str_eq(dp_tls.stick_peer_line, "") {
+                                                peers_broadcast(peer_conns, dp_tls.stick_peer_line)
+                                            }
                                             if dp_tls.need_worker == 0 {
                                                 let mut tls_code = 503
                                                 if dp_tls.denied == 1 {
@@ -1049,10 +1269,17 @@ fn main() {
                             } else {
                                 let raw = h3_stream_read(h3l.handle, sid)
                                 let req = parse_raw_request(raw)
-                                let tr = handle_h3_proxy_request(h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets, header_rules)
+                                let tr = handle_h3_proxy_request(
+                                    h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count
+                                )
                                 servers = tr.servers
                                 backends = tr.backends
                                 buckets = tr.buckets
+                                stick_table = tr.stick_table
+                                stick_count = tr.stick_count
+                                if not str_eq(tr.stick_peer_line, "") {
+                                    peers_broadcast(peer_conns, tr.stick_peer_line)
+                                }
                                 st.total_req = st.total_req + 1
                                 st.total_bytes_out = st.total_bytes_out + tr.bytes_out
                                 st.retries = st.retries + tr.retries
@@ -1197,6 +1424,16 @@ fn main() {
                     let _ = sleep_ms(10)
                 }
             }
+        }
+        let mut pclose = 0
+        while pclose < len(peer_conns) {
+            if peer_conns[pclose].fd >= 0 {
+                let _ = tcp_close(peer_conns[pclose].fd)
+            }
+            pclose = pclose + 1
+        }
+        if peer_listen_fd >= 0 {
+            let _ = tcp_close(peer_listen_fd)
         }
         let mut pc_close = 0
         while pc_close < len(pending_clients) {

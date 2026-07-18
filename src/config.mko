@@ -20,6 +20,8 @@
 //     tls_cert PATH
 //     tls_key PATH
 //     tls_client_ca PATH    # require client cert (mTLS); rejects unauthenticated clients
+//     tls_sni HOSTNAME CERT KEY   # extra cert by SNI (exact or *.example.com); repeatable
+//     tls_min 1.3                 # require TLS 1.3 (Mako tls_server_new_tls13)
 //     protocols http/1.1[,h2,h3]   # h2/h3 require TLS; h3 needs quiche-linked build
 //     redirect https [CODE]   # force HTTPS (301 default; 302/307/308 ok); no backend needed
 //     acme_webroot PATH       # HTTP-01 challenge tokens (defaults inherit)
@@ -191,6 +193,8 @@ struct World {
     stats_port: int
     stats_user: string
     stats_pass: string
+    peers: PeersConfig
+    oidc: OidcConfig
     ok: int
     error: string
 }
@@ -216,6 +220,8 @@ fn world_new() -> World {
         admin_users_file: "",
         state_file: "",
         state_key: "",
+        peers: peers_config_new(),
+        oidc: oidc_config_new(),
         stats_port: 0,
         stats_user: "",
         stats_pass: "",
@@ -254,6 +260,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     let mut check = 1
     let mut resolve = 0
     let mut resolve_expand = 0
+    let mut resolve_srv = 0
     let mut i = 3
     while i < len(fields) {
         if str_eq(fields[i], "weight") {
@@ -289,7 +296,15 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
                                 resolve = 1
                                 i = i + 1
                             } else {
-                                i = i + 1
+                                if str_eq(fields[i], "srv") {
+                                    // DNS SRV discovery: expand members from SRV answers.
+                                    resolve_srv = 1
+                                    resolve_expand = 1
+                                    resolve = 1
+                                    i = i + 1
+                                } else {
+                                    i = i + 1
+                                }
                             }
                         }
                     }
@@ -301,6 +316,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     s.maxconn = maxconn
     s.resolve = resolve
     s.resolve_expand = resolve_expand
+    s.resolve_srv = resolve_srv
     if resolve == 1 {
         s.resolve_name = host
     }
@@ -865,6 +881,18 @@ fn parse_config_text(raw: string) -> World {
             }
             continue
         }
+        if str_eq(head, "peers") {
+            // peers [NAME]  — experimental stick-table sync section
+            section = "peers"
+            if len(fields) >= 2 {
+                w.peers.name = fields[1]
+            }
+            continue
+        }
+        if str_eq(head, "oidc") {
+            section = "oidc"
+            continue
+        }
         if str_eq(head, "listen") {
             // listen NAME PORT  — sugar for frontend with bind
             if len(fields) < 3 {
@@ -938,6 +966,23 @@ fn parse_config_text(raw: string) -> World {
                             if str_eq(head, "tls_client_ca") {
                                 if len(fields) >= 2 {
                                     fe.tls_client_ca = fields[1]
+                                }
+                            } else {
+                            if str_eq(head, "tls_sni") {
+                                // tls_sni HOSTNAME CERT KEY
+                                if len(fields) >= 4 {
+                                    fe = frontend_upsert_tls_sni(fe, fields[1], fields[2], fields[3])
+                                }
+                            } else {
+                            if str_eq(head, "tls_min") {
+                                // tls_min 1.3  (or tls13 / TLSv1.3)
+                                if len(fields) >= 2 {
+                                    let v = str_to_lower(fields[1])
+                                    if str_eq(v, "1.3") or str_eq(v, "tls13") or str_eq(v, "tlsv1.3") {
+                                        fe.tls_min_13 = 1
+                                    } else {
+                                        fe.tls_min_13 = 0
+                                    }
                                 }
                             } else {
                             if str_eq(head, "protocols") {
@@ -1252,6 +1297,8 @@ fn parse_config_text(raw: string) -> World {
             }
             }
             }
+            }
+            }
             let mut fes = w.frontends
             fes[fi] = fe
             w.frontends = fes
@@ -1311,6 +1358,206 @@ fn parse_config_text(raw: string) -> World {
             }
             bes[bi] = be
             w.backends = bes
+            continue
+        }
+
+        if str_eq(section, "peers") {
+            if str_eq(head, "enabled") {
+                if len(fields) >= 2 {
+                    if str_eq(fields[1], "on") {
+                        w.peers.enabled = 1
+                    } else {
+                        if str_eq(fields[1], "yes") {
+                            w.peers.enabled = 1
+                        } else {
+                            if str_eq(fields[1], "1") {
+                                w.peers.enabled = 1
+                            } else {
+                                if str_eq(fields[1], "true") {
+                                    w.peers.enabled = 1
+                                } else {
+                                    w.peers.enabled = 0
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    w.peers.enabled = 1
+                }
+            } else {
+                if str_eq(head, "name") {
+                    if len(fields) >= 2 {
+                        w.peers.name = fields[1]
+                    }
+                } else {
+                    if str_eq(head, "cluster") {
+                        if len(fields) >= 2 {
+                            w.peers.cluster = fields[1]
+                        }
+                    } else {
+                        if str_eq(head, "secret") {
+                            if len(fields) >= 2 {
+                                w.peers.secret = expand_env(fields[1])
+                            }
+                        } else {
+                            if str_eq(head, "bind") {
+                                if len(fields) >= 2 {
+                                    let hp = parse_host_port(fields[1])
+                                    if str_eq(hp.host, "") {
+                                        // bind :1024 or bind 1024
+                                        if str_has_prefix(fields[1], ":") {
+                                            w.peers.bind_host = "0.0.0.0"
+                                            w.peers.bind_port = to_int(substr(fields[1], 1, str_len(fields[1])))
+                                        } else {
+                                            w.peers.bind_host = "0.0.0.0"
+                                            w.peers.bind_port = to_int(fields[1])
+                                        }
+                                    } else {
+                                        w.peers.bind_host = hp.host
+                                        w.peers.bind_port = to_int(hp.port)
+                                    }
+                                }
+                            } else {
+                                if str_eq(head, "peer") {
+                                    // peer NAME HOST:PORT
+                                    if len(fields) >= 3 {
+                                        let php = parse_host_port(fields[2])
+                                        let pport = to_int(php.port)
+                                        if pport > 0 {
+                                            w.peers.peers = append(w.peers.peers, peer_node_new(fields[1], php.host, pport))
+                                            // Presence of peer lines implies enabled unless explicitly off.
+                                            if w.peers.enabled == 0 {
+                                                w.peers.enabled = 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            continue
+        }
+
+        if str_eq(section, "oidc") {
+            if str_eq(head, "enabled") {
+                if len(fields) >= 2 {
+                    if str_eq(fields[1], "on") or str_eq(fields[1], "yes") or str_eq(fields[1], "1") or str_eq(fields[1], "true") {
+                        w.oidc.enabled = 1
+                    } else {
+                        w.oidc.enabled = 0
+                    }
+                } else {
+                    w.oidc.enabled = 1
+                }
+            } else {
+                if str_eq(head, "issuer") {
+                    if len(fields) >= 2 { w.oidc.issuer = expand_env(fields[1]) }
+                } else {
+                    if str_eq(head, "client_id") {
+                        if len(fields) >= 2 { w.oidc.client_id = expand_env(fields[1]) }
+                    } else {
+                        if str_eq(head, "client_secret") {
+                            if len(fields) >= 2 { w.oidc.client_secret = expand_env(fields[1]) }
+                        } else {
+                            if str_eq(head, "redirect_uri") {
+                                if len(fields) >= 2 { w.oidc.redirect_uri = expand_env(fields[1]) }
+                            } else {
+                                if str_eq(head, "scopes") {
+                                    if len(fields) >= 2 {
+                                        // join remaining fields
+                                        let mut sb = str_builder()
+                                        let mut fi = 1
+                                        while fi < len(fields) {
+                                            if fi > 1 { builder_write(sb, " ") }
+                                            builder_write(sb, fields[fi])
+                                            fi = fi + 1
+                                        }
+                                        w.oidc.scopes = builder_string(sb)
+                                    }
+                                } else {
+                                    if str_eq(head, "authorize_url") {
+                                        if len(fields) >= 2 { w.oidc.authorize_url = expand_env(fields[1]) }
+                                    } else {
+                                        if str_eq(head, "token_url") {
+                                            if len(fields) >= 2 { w.oidc.token_url = expand_env(fields[1]) }
+                                        } else {
+                                            if str_eq(head, "userinfo_url") {
+                                                if len(fields) >= 2 { w.oidc.userinfo_url = expand_env(fields[1]) }
+                                            } else {
+                                                if str_eq(head, "jwks_uri") {
+                                                    if len(fields) >= 2 { w.oidc.jwks_uri = expand_env(fields[1]) }
+                                                } else {
+                                                    if str_eq(head, "rsa_public_key") {
+                                                        if len(fields) >= 2 { w.oidc.rsa_public_key = expand_env(fields[1]) }
+                                                    } else {
+                                                        if str_eq(head, "verify_jwt") {
+                                                            if len(fields) >= 2 {
+                                                                if str_eq(fields[1], "off") or str_eq(fields[1], "0") or str_eq(fields[1], "false") {
+                                                                    w.oidc.verify_jwt = 0
+                                                                } else {
+                                                                    w.oidc.verify_jwt = 1
+                                                                }
+                                                            } else {
+                                                                w.oidc.verify_jwt = 1
+                                                            }
+                                                        } else {
+                                                            if str_eq(head, "default_role") {
+                                                                if len(fields) >= 2 { w.oidc.default_role = fields[1] }
+                                                            } else {
+                                                                if str_eq(head, "admin_group") {
+                                                                    if len(fields) >= 2 { w.oidc.admin_group = fields[1] }
+                                                                } else {
+                                                                    if str_eq(head, "operator_group") {
+                                                                        if len(fields) >= 2 { w.oidc.operator_group = fields[1] }
+                                                                    } else {
+                                                                        if str_eq(head, "groups_claim") {
+                                                                            if len(fields) >= 2 { w.oidc.groups_claim = fields[1] }
+                                                                        } else {
+                                                                            if str_eq(head, "email_claim") {
+                                                                                if len(fields) >= 2 { w.oidc.email_claim = fields[1] }
+                                                                            } else {
+                                                                                if str_eq(head, "ca_file") {
+                                                                                    if len(fields) >= 2 { w.oidc.ca_file = expand_env(fields[1]) }
+                                                                                } else {
+                                                                                    if str_eq(head, "insecure") {
+                                                                                        if len(fields) >= 2 {
+                                                                                            if str_eq(fields[1], "on") or str_eq(fields[1], "1") or str_eq(fields[1], "true") {
+                                                                                                w.oidc.insecure = 1
+                                                                                            }
+                                                                                        } else {
+                                                                                            w.oidc.insecure = 1
+                                                                                        }
+                                                                                    } else {
+                                                                                        if str_eq(head, "disable_password") {
+                                                                                            if len(fields) >= 2 {
+                                                                                                if str_eq(fields[1], "on") or str_eq(fields[1], "1") or str_eq(fields[1], "true") {
+                                                                                                    w.oidc.disable_password = 1
+                                                                                                }
+                                                                                            } else {
+                                                                                                w.oidc.disable_password = 1
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             continue
         }
     }

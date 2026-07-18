@@ -27,7 +27,12 @@ Mako crypto backend supports them. Otherwise it emits the portable
 the portable format.
 
 If credentials are configured, the dashboard, `/stats`, `/metrics`, and
-`/admin/*` require HTTP Basic auth. Probe endpoints remain unauthenticated.
+`/admin/*` require HTTP Basic auth **or** a valid `leba_session` cookie
+(password form or OIDC SSO). Probe endpoints remain unauthenticated.
+
+**OIDC:** when `oidc { enabled on … }` is configured, operators can use
+`GET /oidc/login` → IdP → `GET /oidc/callback` to obtain a session cookie.
+See `docs/OIDC.md`.
 
 Roles:
 
@@ -164,12 +169,18 @@ Requires `operator` or `admin`.
 Full **config reload** without process restart: re-reads the main config file,
 runs doctor, preserves server runtime state by `(backend, name)`, re-inits pools
 for address changes, swaps routes / ACLs / backends / frontends / header rules /
-app auth users, and **rebinds HTTP/TCP listen sockets** when host:port sets
-change (reuse FD when name+bind unchanged).
+app auth users, OIDC, peers, and **rebinds HTTP/TCP/UDP/H3/stats/peers listen sockets** when host:port
+sets change (reuse FD when name+bind unchanged; H3 also reuses when cert/key
+paths are unchanged).
 
-**Still restart-only:** HTTP/3 (QUIC) listener recreate, stats listen port move,
-UDP frontend rebind. TLS PEMs on disk: `/admin/tls-reload` (or cert path change
-on reused TLS listeners triggers `tls_server_reload`).
+TLS PEMs on disk: `/admin/tls-reload` (or cert path change on reused TLS
+listeners triggers `tls_server_reload` / SNI add-update-remove). H3 cert path
+changes recreate the QUIC listener. **Stats listen host/port/TLS mode** rebinds
+on full reload (SIGHUP / `POST /admin/reload`) via `rebind_stats_listener`.
+
+`GET /stats` includes non-secret **`oidc`** and **`peers`** status objects
+(`enabled`, `ready`, issuer/cluster/bind, remote_count). Secrets are never
+serialized.
 
 Also triggered by **SIGHUP**. File-watch on `servers_file` remains servers-only.
 
@@ -179,7 +190,10 @@ Requires `operator` or `admin`.
 
 Hot-reloads TLS certificates for HTTP frontends (and the stats frontend when TLS
 is enabled) from the paths already configured on each frontend (`tls_cert` /
-`tls_key`). Uses Mako `tls_server_reload` — no process restart for TCP TLS.
+`tls_key` / `tls_sni`). Default PEMs use Mako `tls_server_reload`; SNI set
+changes apply in place via `tls_server_sni_add` / `sni_update` / `sni_remove`
+(Mako 0.2.2+). Free+recreate only when mTLS or `tls_min` changes. No process
+restart for TCP TLS.
 
 HTTP/3 (QUIC) may still require a process restart depending on the linked
 quiche build. Response notes this.
@@ -225,14 +239,21 @@ Query parameters:
 | `backend` | yes | Backend to create or update. |
 | `server` | yes | Backend server name to create or update. |
 | `addr` | yes | Backend server address as `host:port`. |
-| `cert` | no | Absolute certificate path for the frontend. |
-| `key` | no | Absolute private-key path for the frontend. |
+| `cert` | no | Absolute certificate path. With `domain`, installs multi-cert SNI for that host. |
+| `key` | no | Absolute private-key path paired with `cert`. |
 
 Example:
 
 ```bash
 curl -u admin:change-this -X POST \
   'http://127.0.0.1:18404/admin/vhost-create?frontend=web&domain=app.example.com&backend=app&server=app1&addr=127.0.0.1%3A8080'
+```
+
+With a per-host certificate (live multi-cert SNI via Mako `tls_server_sni_add`):
+
+```bash
+curl -u admin:change-this -X POST \
+  'http://127.0.0.1:18404/admin/vhost-create?frontend=web&domain=app.example.com&backend=app&server=app1&addr=127.0.0.1%3A8080&cert=%2Fetc%2Fleba%2Fapp.crt&key=%2Fetc%2Fleba%2Fapp.key'
 ```
 
 Successful route/backend/server changes apply to the running process and are
@@ -243,12 +264,15 @@ does not already include that file, Leba appends:
 include leba.vhosts.conf
 ```
 
-Certificate path changes are saved, but the already-created TLS context is not
-replaced live; restart the process for a new certificate/key to take effect.
+When `cert`+`key` are provided, Leba upserts `tls_sni <domain> <cert> <key>` and
+triggers a live TLS refresh (default cert reload + SNI install). No process
+restart is required for TCP TLS.
 
 ### `POST /admin/vhost-cert`
 
-Updates saved certificate paths for an existing frontend.
+Updates certificate paths for an existing frontend. Without a hostname, updates
+the default `tls_cert`/`tls_key`. With `hostname` / `sni` / `domain`, upserts a
+multi-cert SNI entry.
 
 Query parameters:
 
@@ -257,19 +281,32 @@ Query parameters:
 | `frontend` | yes | Existing frontend name. |
 | `cert` | yes | Absolute certificate path. |
 | `key` | yes | Absolute private-key path. |
+| `hostname` | no | SNI name (exact or `*.example.com`). Aliases: `sni`, `domain`. |
 
-Requires `operator` or `admin`.
+Requires `operator` or `admin`. Live-applied via the same path as
+`POST /admin/tls-reload` (Mako multi-cert SNI).
 
 ## Stats And Metrics
 
 ### `GET /stats`
 
 Returns runtime JSON containing current counters, frontends, routes, ACLs,
-backends, and servers. The exact JSON shape is tested in `leba_web_test.mko`.
+backends, servers, and non-secret **`oidc`** / **`peers`** status. The exact
+JSON shape is tested in `leba_web_test.mko`.
 
 ### `GET /metrics`
 
-Returns text metrics for scraping or command-line inspection.
+Prometheus text metrics for scraping. In addition to request/error/byte
+counters and per-server gauges, v0.10.0 exposes:
+
+| Metric | Meaning |
+|--------|---------|
+| `leba_info{version=…}` | Build version (always 1) |
+| `leba_stick_entries` | Stick table entry count |
+| `leba_backend_stick` | Backend has `stick on src` |
+| `leba_oidc_enabled` / `leba_oidc_ready` | Admin OIDC config |
+| `leba_peers_enabled` / `leba_peers_ready` / `leba_peers_remotes` | Stick peers |
+| `leba_frontend_tls` / `leba_frontend_sni_entries` | TLS / multi-cert SNI |
 
 ## CLI
 

@@ -195,6 +195,412 @@ fn dns_split_ips(all: string) -> []string {
     return out
 }
 
+// --- DNS SRV (RFC 2782) ----------------------------------------------------
+
+fn dns_be16_at(s: string, off: int) -> int {
+    let a = str_byte_at(s, off)
+    let b = str_byte_at(s, off + 1)
+    if a < 0 {
+        return 0 - 1
+    }
+    if b < 0 {
+        return 0 - 1
+    }
+    return a * 256 + b
+}
+
+fn dns_safe_name(name: string) -> int {
+    // Config-controlled SRV name: labels, dots, underscores, hyphens only.
+    if str_eq(name, "") {
+        return 0
+    }
+    if str_len(name) > 253 {
+        return 0
+    }
+    let data = bytes(name)
+    for _, d in range data {
+        let c = int(d)
+        if c >= 48 {
+            if c <= 57 {
+                continue
+            }
+        }
+        if c >= 65 {
+            if c <= 90 {
+                continue
+            }
+        }
+        if c >= 97 {
+            if c <= 122 {
+                continue
+            }
+        }
+        if c == 46 {
+            continue
+        }
+        if c == 45 {
+            continue
+        }
+        if c == 95 {
+            continue
+        }
+        return 0
+    }
+    return 1
+}
+
+fn dns_strip_trailing_dot(name: string) -> string {
+    if str_has_suffix(name, ".") {
+        if str_len(name) > 1 {
+            return substr(name, 0, str_len(name) - 1)
+        }
+    }
+    return name
+}
+
+fn dns_encode_qname(b: StrBuilder, name: string) {
+    let n = dns_strip_trailing_dot(str_trim_space(name))
+    let labels = str_split(n, ".")
+    for _, lab in range labels {
+        if str_eq(lab, "") {
+            continue
+        }
+        let mut ln = str_len(lab)
+        if ln > 63 {
+            ln = 63
+        }
+        builder_write_byte(b, byte(ln))
+        if str_len(lab) > 63 {
+            builder_write(b, substr(lab, 0, 63))
+        } else {
+            builder_write(b, lab)
+        }
+    }
+    builder_write_byte(b, byte(0))
+}
+
+fn dns_read_nameserver() -> string {
+    let raw = read_file("/etc/resolv.conf")
+    if str_eq(raw, "") {
+        return "127.0.0.1"
+    }
+    let lines = str_split(raw, "\n")
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_has_prefix(t, "nameserver ") {
+            let rest = str_trim_space(substr(t, 11, str_len(t)))
+            if not str_eq(rest, "") {
+                return rest
+            }
+        }
+        if str_has_prefix(t, "nameserver\t") {
+            let rest2 = str_trim_space(substr(t, 11, str_len(t)))
+            if not str_eq(rest2, "") {
+                return rest2
+            }
+        }
+    }
+    return "127.0.0.1"
+}
+
+// Skip a DNS name at offset (handles compression pointers). Returns new offset.
+fn dns_skip_name(msg: string, off: int) -> int {
+    let mut o = off
+    let n = str_len(msg)
+    let mut hops = 0
+    while o < n {
+        let b = str_byte_at(msg, o)
+        if b < 0 {
+            return n
+        }
+        if b == 0 {
+            return o + 1
+        }
+        // compression pointer
+        if b >= 192 {
+            return o + 2
+        }
+        o = o + 1 + b
+        hops = hops + 1
+        if hops > 64 {
+            return n
+        }
+    }
+    return n
+}
+
+// Decode DNS name at offset into a dotted string (no trailing dot).
+// Returns name and the offset after this name field (not following pointers for offset).
+fn dns_decode_name(msg: string, off: int) -> (string, int) {
+    let mut o = off
+    let n = str_len(msg)
+    let mut parts = make([]string, 0, 8)
+    let mut jumped = 0
+    let mut end_off = off
+    let mut hops = 0
+    while o < n {
+        let b = str_byte_at(msg, o)
+        if b < 0 {
+            return ("", n)
+        }
+        if b == 0 {
+            if jumped == 0 {
+                end_off = o + 1
+            }
+            break
+        }
+        if b >= 192 {
+            let b2 = str_byte_at(msg, o + 1)
+            if b2 < 0 {
+                return ("", n)
+            }
+            let ptr = (b - 192) * 256 + b2
+            if jumped == 0 {
+                end_off = o + 2
+            }
+            o = ptr
+            jumped = 1
+            hops = hops + 1
+            if hops > 64 {
+                return ("", n)
+            }
+            continue
+        }
+        let start = o + 1
+        let end = start + b
+        if end > n {
+            return ("", n)
+        }
+        parts = append(parts, substr(msg, start, end))
+        o = end
+        if jumped == 0 {
+            end_off = o
+        }
+        hops = hops + 1
+        if hops > 128 {
+            return ("", n)
+        }
+    }
+    let mut name = ""
+    for i, p in range parts {
+        if i > 0 {
+            name = name + "."
+        }
+        name = name + p
+    }
+    return (name, end_off)
+}
+
+fn dns_build_srv_query(name: string, id: int) -> string {
+    let mut b = str_builder()
+    // header
+    builder_write(b, binary_put_u16be(id))
+    builder_write(b, binary_put_u16be(256)) // RD (0x0100)
+    builder_write(b, binary_put_u16be(1))      // qdcount
+    builder_write(b, binary_put_u16be(0))
+    builder_write(b, binary_put_u16be(0))
+    builder_write(b, binary_put_u16be(0))
+    dns_encode_qname(b, name)
+    builder_write(b, binary_put_u16be(33)) // SRV
+    builder_write(b, binary_put_u16be(1))  // IN
+    return builder_string(b)
+}
+
+// Parse dig/host +short SRV lines: "priority weight port target."
+fn dns_parse_srv_text(text: string) -> []DnsSrvRecord {
+    let mut out = make([]DnsSrvRecord, 0, 8)
+    if str_eq(text, "") {
+        return out
+    }
+    let lines = str_split(text, "\n")
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        if str_eq(t, "") {
+            continue
+        }
+        // Skip dig comments / errors
+        if str_has_prefix(t, ";") {
+            continue
+        }
+        let fields = str_split(t, " ")
+        // also handle tabs by re-splitting loosely
+        let mut toks = make([]string, 0, 8)
+        for _, f in range fields {
+            let parts2 = str_split(f, "\t")
+            for _, p in range parts2 {
+                let x = str_trim_space(p)
+                if not str_eq(x, "") {
+                    toks = append(toks, x)
+                }
+            }
+        }
+        if len(toks) < 4 {
+            continue
+        }
+        let pri = to_int(toks[0])
+        let w = to_int(toks[1])
+        let port = to_int(toks[2])
+        let target = dns_strip_trailing_dot(toks[3])
+        if port <= 0 {
+            continue
+        }
+        if str_eq(target, "") {
+            continue
+        }
+        if str_eq(target, ".") {
+            continue
+        }
+        out = append(out, dns_srv_record_new(pri, w, port, target))
+    }
+    return out
+}
+
+fn dns_parse_srv_wire(msg: string, qid: int) -> []DnsSrvRecord {
+    let mut out = make([]DnsSrvRecord, 0, 8)
+    if str_len(msg) < 12 {
+        return out
+    }
+    let rid = dns_be16_at(msg, 0)
+    if rid != qid {
+        return out
+    }
+    let flags = dns_be16_at(msg, 2)
+    // RCODE
+    if flags % 16 != 0 {
+        return out
+    }
+    let qd = dns_be16_at(msg, 4)
+    let an = dns_be16_at(msg, 6)
+    let mut off = 12
+    let mut qi = 0
+    while qi < qd {
+        off = dns_skip_name(msg, off)
+        off = off + 4 // type + class
+        qi = qi + 1
+    }
+    let mut ai = 0
+    while ai < an {
+        if off + 10 > str_len(msg) {
+            break
+        }
+        let _, noff = dns_decode_name(msg, off)
+        off = noff
+        if off + 10 > str_len(msg) {
+            break
+        }
+        let rtype = dns_be16_at(msg, off)
+        // class at off+2, ttl at off+4 (4 bytes), rdlen at off+8
+        let rdlen = dns_be16_at(msg, off + 8)
+        off = off + 10
+        if off + rdlen > str_len(msg) {
+            break
+        }
+        if rtype == 33 {
+            if rdlen >= 7 {
+                let pri = dns_be16_at(msg, off)
+                let w = dns_be16_at(msg, off + 2)
+                let port = dns_be16_at(msg, off + 4)
+                let raw_target, _ = dns_decode_name(msg, off + 6)
+                let target = dns_strip_trailing_dot(raw_target)
+                if port > 0 {
+                    if not str_eq(target, "") {
+                        if not str_eq(target, ".") {
+                            out = append(out, dns_srv_record_new(pri, w, port, target))
+                        }
+                    }
+                }
+            }
+        }
+        off = off + rdlen
+        ai = ai + 1
+    }
+    return out
+}
+
+fn dns_lookup_srv_wire(name: string) -> []DnsSrvRecord {
+    let empty = make([]DnsSrvRecord, 0, 0)
+    if dns_safe_name(name) == 0 {
+        return empty
+    }
+    let ns = dns_read_nameserver()
+    let id = (now_ms() % 65000) + 1
+    let query = dns_build_srv_query(name, id)
+    let fd = udp_bind(0)
+    if fd < 0 {
+        return empty
+    }
+    let _ = tcp_set_timeout(fd, 2000)
+    let sent = udp_send_to(fd, ns, 53, query)
+    if sent < 0 {
+        let _ = udp_close(fd)
+        return empty
+    }
+    let resp = udp_recv(fd, 4096)
+    let _ = udp_close(fd)
+    if str_eq(resp, "") {
+        return empty
+    }
+    return dns_parse_srv_wire(resp, id)
+}
+
+fn dns_lookup_srv_dig(name: string) -> []DnsSrvRecord {
+    let empty = make([]DnsSrvRecord, 0, 0)
+    if dns_safe_name(name) == 0 {
+        return empty
+    }
+    // dig is optional; used when wire path fails (no dig in minimal containers is OK).
+    let cmd = "dig +short +time=2 +tries=1 SRV " + name + " 2>/dev/null"
+    let text = exec_output(cmd)
+    return dns_parse_srv_text(text)
+}
+
+fn dns_lookup_srv(name: string) -> []DnsSrvRecord {
+    let recs = dns_lookup_srv_wire(name)
+    if len(recs) > 0 {
+        return recs
+    }
+    return dns_lookup_srv_dig(name)
+}
+
+fn dns_srv_member_name(parent: string, target: string, port: int) -> string {
+    let mut safe = target
+    safe = str_replace(safe, ".", "_")
+    safe = str_replace(safe, ":", "_")
+    safe = str_replace(safe, "[", "")
+    safe = str_replace(safe, "]", "")
+    return parent + "-" + safe + "-" + int_to_string(port)
+}
+
+// Sort SRV by priority ascending (stable enough for small N via selection).
+fn dns_srv_sort(recs: []DnsSrvRecord) -> []DnsSrvRecord {
+    let mut out = recs
+    let n = len(out)
+    let mut i = 0
+    while i < n {
+        let mut best = i
+        let mut j = i + 1
+        while j < n {
+            if out[j].priority < out[best].priority {
+                best = j
+            } else {
+                if out[j].priority == out[best].priority {
+                    if out[j].weight > out[best].weight {
+                        best = j
+                    }
+                }
+            }
+            j = j + 1
+        }
+        if best != i {
+            let tmp = out[i]
+            out[i] = out[best]
+            out[best] = tmp
+        }
+        i = i + 1
+    }
+    return out
+}
+
 fn find_server_by_name(servers: []Server, backend: string, name: string) -> int {
     for i, s in range servers {
         if str_eq(s.backend, backend) {
@@ -265,7 +671,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             ns.resolve_name = name
             out[si] = ns
         }
-        // Pass 2: expand templates → multi members
+        // Pass 2: expand A/AAAA templates → multi members (not SRV)
         let mut ti = 0
         while ti < len(out) {
             let s = out[ti]
@@ -274,6 +680,10 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                 continue
             }
             if s.resolve_expand != 1 {
+                ti = ti + 1
+                continue
+            }
+            if s.resolve_srv == 1 {
                 ti = ti + 1
                 continue
             }
@@ -332,6 +742,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                     child.resolve_name = name
                     child.resolve = 0
                     child.resolve_expand = 0
+                    child.resolve_srv = 0
                     child.last_resolve_ms = now
                     out[ei] = child
                 } else {
@@ -341,6 +752,7 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
                     child.resolve_name = name
                     child.resolve = 0
                     child.resolve_expand = 0
+                    child.resolve_srv = 0
                     child.last_resolve_ms = now
                     out = append(out, child)
                     log_info_event("dns_expanded", f"backend={be.name} member={mname} ip={ip} action=add")
@@ -370,6 +782,128 @@ fn run_dns_resolve(servers: []Server, backends: []Backend, force: int) -> []Serv
             out = rebuilt
             // indices shifted — restart expand scan from 0 for this backend carefully
             ti = ti + 1
+        }
+
+        // Pass 3: DNS SRV templates → members (target A/AAAA + SRV port/weight)
+        let mut si3 = 0
+        while si3 < len(out) {
+            let s = out[si3]
+            if not str_eq(s.backend, be.name) {
+                si3 = si3 + 1
+                continue
+            }
+            if s.resolve_srv != 1 {
+                si3 = si3 + 1
+                continue
+            }
+            if s.resolve != 1 {
+                si3 = si3 + 1
+                continue
+            }
+            let mut name = s.resolve_name
+            if str_eq(name, "") {
+                name = s.host
+            }
+            let mut due = force
+            if due == 0 {
+                if s.last_resolve_ms == 0 {
+                    due = 1
+                } else {
+                    if now - s.last_resolve_ms >= interval {
+                        due = 1
+                    }
+                }
+            }
+            if due == 0 {
+                si3 = si3 + 1
+                continue
+            }
+            let recs0 = dns_lookup_srv(name)
+            let recs = dns_srv_sort(recs0)
+            let mut ns = out[si3]
+            ns.last_resolve_ms = now
+            ns.resolve_name = name
+            out[si3] = ns
+            if len(recs) == 0 {
+                log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} name={name} mode=srv")
+                si3 = si3 + 1
+                continue
+            }
+            let mut want = make(map[string]int)
+            for _, rr in range recs {
+                let ip = dns_resolve_hostname(rr.target)
+                if str_eq(ip, "") {
+                    log_warn_event("dns_resolve_failed", f"backend={be.name} server={s.name} srv_target={rr.target}")
+                    continue
+                }
+                let mname = dns_srv_member_name(s.name, rr.target, rr.port)
+                want[mname] = 1
+                let mut w = s.weight
+                if rr.weight > 0 {
+                    w = rr.weight
+                }
+                let ei = find_server_by_name(out, be.name, mname)
+                if ei >= 0 {
+                    let mut child = out[ei]
+                    let mut changed = 0
+                    if not str_eq(child.host, ip) {
+                        child.host = ip
+                        child.pool = 0 - 1
+                        changed = 1
+                    }
+                    if child.port != rr.port {
+                        child.port = rr.port
+                        child.pool = 0 - 1
+                        changed = 1
+                    }
+                    child.weight = w
+                    child.drain = 0
+                    child.maxconn = s.maxconn
+                    child.check = s.check
+                    child.resolve_parent = s.name
+                    child.resolve_name = name
+                    child.resolve = 0
+                    child.resolve_expand = 0
+                    child.resolve_srv = 0
+                    child.last_resolve_ms = now
+                    out[ei] = child
+                    if changed == 1 {
+                        log_info_event("dns_srv", f"backend={be.name} member={mname} target={rr.target} ip={ip} port={rr.port} priority={rr.priority}")
+                    }
+                } else {
+                    let mut child = server_new(mname, ip, rr.port, w, s.check, be.name)
+                    child.maxconn = s.maxconn
+                    child.resolve_parent = s.name
+                    child.resolve_name = name
+                    child.resolve = 0
+                    child.resolve_expand = 0
+                    child.resolve_srv = 0
+                    child.last_resolve_ms = now
+                    out = append(out, child)
+                    log_info_event("dns_srv", f"backend={be.name} member={mname} target={rr.target} ip={ip} port={rr.port} priority={rr.priority} action=add")
+                }
+            }
+            let mut rebuilt = make([]Server, 0, len(out))
+            for _, cur in range out {
+                if str_eq(cur.backend, be.name) {
+                    if str_eq(cur.resolve_parent, s.name) {
+                        if want[cur.name] != 1 {
+                            if cur.conns > 0 {
+                                let mut d = cur
+                                d.drain = 1
+                                rebuilt = append(rebuilt, d)
+                                log_info_event("dns_srv", f"backend={be.name} member={cur.name} action=drain_obsolete")
+                            } else {
+                                log_info_event("dns_srv", f"backend={be.name} member={cur.name} action=remove")
+                            }
+                            continue
+                        }
+                    }
+                }
+                rebuilt = append(rebuilt, cur)
+            }
+            out = rebuilt
+            si3 = si3 + 1
         }
     }
     return out

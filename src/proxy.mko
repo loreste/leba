@@ -53,6 +53,10 @@ struct ProxyResult {
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
+    // Stick table updates (TLS accept-thread path; same as Dispatch).
+    stick_table: map[string]string
+    stick_count: int = 0
+    stick_peer_line: string = ""
 }
 
 fn raw_response_status(raw: string) -> int {
@@ -158,6 +162,8 @@ struct Dispatch {
     // Stick table snapshot for accept-thread update (map is accept-only).
     stick_table: map[string]string
     stick_count: int = 0
+    // Peers UPSERT line when this request wrote stick (broadcast on accept thread).
+    stick_peer_line: string = ""
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
@@ -2034,7 +2040,7 @@ fn prepare_raw_dispatch(
         let ck = stick_client_key(fe, client_ip, xff)
         stick_key = stick_make_key(be.name, "src", ck)
     }
-    let si, stick2, stick_n2 = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
+    let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
     stick = stick2
     stick_n = stick_n2
     be = next_rr(be)
@@ -2051,6 +2057,7 @@ fn prepare_raw_dispatch(
         d.buckets = rate_list
         d.stick_table = stick
         d.stick_count = stick_n
+        d.stick_peer_line = peer_line
         return d
     }
 
@@ -2104,6 +2111,7 @@ fn prepare_raw_dispatch(
         ka_count: ka_count,
         stick_table: stick,
         stick_count: stick_n,
+        stick_peer_line: peer_line,
         servers: srv_list,
         backends: be_list,
         buckets: rate_list,
@@ -2120,7 +2128,10 @@ fn handle_tls_proxy_request(
     servers: []Server,
     buckets: []RateBucket,
     header_rules: []HeaderRule,
-    h2_stream: int
+    h2_stream: int,
+    stick_table: map[string]string,
+    stick_count: int,
+    client_ip: string
 ) -> ProxyResult {
     let method = req.method
     let path = req.path
@@ -2133,12 +2144,18 @@ fn handle_tls_proxy_request(
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
+    let mut stick = stick_table
+    let mut stick_n = stick_count
+    let mut peer_line = ""
     let mut out = ProxyResult {
         err: 1,
         bytes_in: req.bytes_in,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: stick,
+        stick_count: stick_n,
+        stick_peer_line: ""
     }
 
     if req.ok == 0 {
@@ -2245,7 +2262,16 @@ fn handle_tls_proxy_request(
     if str_len(fe.sticky_cookie) > 0 {
         sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
     }
-    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    let mut stick_key = ""
+    if str_eq(be.stick_on, "src") {
+        let xff = raw_header(req.raw, "X-Forwarded-For")
+        let ck = stick_client_key(fe, client_ip, xff)
+        stick_key = stick_make_key(be.name, "src", ck)
+    }
+    let si, stick2, stick_n2, pline = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
+    stick = stick2
+    stick_n = stick_n2
+    peer_line = pline
     be = next_rr(be)
     be_list[bi] = be
     if si < 0 {
@@ -2257,6 +2283,9 @@ fn handle_tls_proxy_request(
         }
         out.backends = be_list
         out.buckets = rate_list
+        out.stick_table = stick
+        out.stick_count = stick_n
+        out.stick_peer_line = peer_line
         return out
     }
 
@@ -2306,6 +2335,9 @@ fn handle_tls_proxy_request(
     out.servers = srv_list
     out.backends = be_list
     out.buckets = rate_list
+    out.stick_table = stick
+    out.stick_count = stick_n
+    out.stick_peer_line = peer_line
     return out
 }
 
@@ -2352,7 +2384,10 @@ fn handle_tls_h2_once(
     backends: []Backend,
     servers: []Server,
     buckets: []RateBucket,
-    header_rules: []HeaderRule
+    header_rules: []HeaderRule,
+    stick_table: map[string]string,
+    stick_count: int,
+    client_ip: string
 ) -> ProxyResult {
     let h2c = http2_conn_new()
     let _u = http2_conn_use(h2c)
@@ -2361,11 +2396,17 @@ fn handle_tls_h2_once(
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
+    let mut stick = stick_table
+    let mut stick_n = stick_count
+    let mut peer_line_acc = ""
     let mut out = ProxyResult {
         err: 1,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: stick,
+        stick_count: stick_n,
+        stick_peer_line: ""
     }
     let mut done = 0
     let mut loops = 0
@@ -2389,10 +2430,15 @@ fn handle_tls_h2_once(
                         } else {
                             let _ = h2_wait_stream_body(conn, stream)
                             let req = h2_request_from_stream(stream)
-                            let tr = handle_tls_proxy_request(conn, req, fe, routes, acls, be_list, srv_list, rate_list, header_rules, stream)
+                            let tr = handle_tls_proxy_request(conn, req, fe, routes, acls, be_list, srv_list, rate_list, header_rules, stream, stick, stick_n, client_ip)
                             srv_list = tr.servers
                             be_list = tr.backends
                             rate_list = tr.buckets
+                            stick = tr.stick_table
+                            stick_n = tr.stick_count
+                            if not str_eq(tr.stick_peer_line, "") {
+                                peer_line_acc = peer_line_acc + tr.stick_peer_line
+                            }
                             out.bytes_out = out.bytes_out + tr.bytes_out
                             out.bytes_in = out.bytes_in + tr.bytes_in
                             out.retries = out.retries + tr.retries
@@ -2445,6 +2491,9 @@ fn handle_tls_h2_once(
     out.servers = srv_list
     out.backends = be_list
     out.buckets = rate_list
+    out.stick_table = stick
+    out.stick_count = stick_n
+    out.stick_peer_line = peer_line_acc
     if handled == 0 {
         if out.err != 0 {
             out.err = 1
@@ -2463,6 +2512,8 @@ fn h3_respond(handle: int, stream: int, status: int, body: string) -> int {
 }
 
 // HTTP/3 ingress: request is a pseudo-HTTP/1.1 buffer from h3_stream_read.
+// Shares the accept-thread stick table with HTTP/1–2 (cookie + stick on src).
+// Peer UDP address is not exposed by Mako; src stick uses XFF when present.
 fn handle_h3_proxy_request(
     h3_handle: int,
     stream: int,
@@ -2473,7 +2524,9 @@ fn handle_h3_proxy_request(
     backends: []Backend,
     servers: []Server,
     buckets: []RateBucket,
-    header_rules: []HeaderRule
+    header_rules: []HeaderRule,
+    stick_table: map[string]string,
+    stick_count: int
 ) -> ProxyResult {
     let method = req.method
     let path = req.path
@@ -2486,12 +2539,17 @@ fn handle_h3_proxy_request(
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
+    let mut stick = stick_table
+    let mut stick_n = stick_count
     let mut out = ProxyResult {
         err: 1,
         bytes_in: req.bytes_in,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list
+        buckets: rate_list,
+        stick_table: stick,
+        stick_count: stick_n,
+        stick_peer_line: ""
     }
 
     if req.ok == 0 {
@@ -2562,7 +2620,20 @@ fn handle_h3_proxy_request(
     if str_len(fe.sticky_cookie) > 0 {
         sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
     }
-    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    // H3 has no peer-addr builtin yet — empty peer IP; stick_client_key falls back to XFF.
+    let mut stick_key = ""
+    if str_eq(be.stick_on, "src") {
+        let xff = raw_header(req.raw, "X-Forwarded-For")
+        let ck = stick_client_key(fe, "", xff)
+        if not str_eq(ck, "") {
+            stick_key = stick_make_key(be.name, "src", ck)
+        }
+    }
+    let si, stick2, stick_n2, peer_line = pick_server_stick(
+        srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n
+    )
+    stick = stick2
+    stick_n = stick_n2
     be = next_rr(be)
     be_list[bi] = be
     if si < 0 {
@@ -2570,6 +2641,9 @@ fn handle_h3_proxy_request(
         let _ = h3_respond(h3_handle, stream, 502, "no server\n")
         out.backends = be_list
         out.buckets = rate_list
+        out.stick_table = stick
+        out.stick_count = stick_n
+        out.stick_peer_line = peer_line
         return out
     }
 
@@ -2606,6 +2680,9 @@ fn handle_h3_proxy_request(
     out.servers = srv_list
     out.backends = be_list
     out.buckets = rate_list
+    out.stick_table = stick
+    out.stick_count = stick_n
+    out.stick_peer_line = peer_line
     return out
 }
 
@@ -2929,7 +3006,10 @@ fn prepare_ws_dispatch(
     backends: []Backend,
     servers: []Server,
     buckets: []RateBucket,
-    header_rules: []HeaderRule
+    header_rules: []HeaderRule,
+    stick_table: map[string]string,
+    stick_count: int,
+    client_ip: string
 ) -> Dispatch {
     let method = req.method
     let path = req.path
@@ -2938,6 +3018,8 @@ fn prepare_ws_dispatch(
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
+    let mut stick = stick_table
+    let mut stick_n = stick_count
     let empty = Dispatch {
         need_worker: 0,
         c: 0 - 1,
@@ -2969,8 +3051,9 @@ fn prepare_ws_dispatch(
         servers: srv_list,
         backends: be_list,
         buckets: rate_list,
-        stick_table: make(map[string]string),
-        stick_count: 0,
+        stick_table: stick,
+        stick_count: stick_n,
+        stick_peer_line: ""
     }
 
     if req.ok == 0 {
@@ -3023,7 +3106,15 @@ fn prepare_ws_dispatch(
     if str_len(fe.sticky_cookie) > 0 {
         sticky_val = cookie_get(req.cookie, fe.sticky_cookie)
     }
-    let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
+    let mut stick_key = ""
+    if str_eq(be.stick_on, "src") {
+        let xff = raw_header(req.raw, "X-Forwarded-For")
+        let ck = stick_client_key(fe, client_ip, xff)
+        stick_key = stick_make_key(be.name, "src", ck)
+    }
+    let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
+    stick = stick2
+    stick_n = stick_n2
     be = next_rr(be)
     be_list[bi] = be
     if si < 0 {
@@ -3031,6 +3122,9 @@ fn prepare_ws_dispatch(
         let mut d = empty
         d.backends = be_list
         d.buckets = rate_list
+        d.stick_table = stick
+        d.stick_count = stick_n
+        d.stick_peer_line = peer_line
         return d
     }
     let s = srv_list[si]
@@ -3070,8 +3164,9 @@ fn prepare_ws_dispatch(
         servers: srv_list,
         backends: be_list,
         buckets: rate_list,
-        stick_table: make(map[string]string),
-        stick_count: 0,
+        stick_table: stick,
+        stick_count: stick_n,
+        stick_peer_line: peer_line
     }
 }
 
@@ -3514,7 +3609,10 @@ fn proxy_http_once(
             bytes_in: d.bytes_in,
             servers: d.servers,
             backends: d.backends,
-            buckets: d.buckets
+            buckets: d.buckets,
+            stick_table: make(map[string]string),
+            stick_count: 0,
+            stick_peer_line: ""
         }
     }
     let res = forward_http_retries(d.method, d.path, d.body, d.cookie, d.traceparent, d.up_host, d.up_port, d.timeout_ms, d.retries, d.orig_host, d.req_extra_headers, d.resp_extra_headers)
@@ -3535,7 +3633,10 @@ fn proxy_http_once(
             bytes_in: d.bytes_in,
             servers: srv_list,
             backends: d.backends,
-            buckets: d.buckets
+            buckets: d.buckets,
+            stick_table: make(map[string]string),
+            stick_count: 0,
+            stick_peer_line: ""
         }
     }
     srv_list = mark_server_req(srv_list, d.server_idx, 0, 1)
@@ -3548,7 +3649,10 @@ fn proxy_http_once(
         bytes_in: d.bytes_in,
         servers: srv_list,
         backends: d.backends,
-        buckets: d.buckets
+        buckets: d.buckets,
+        stick_table: make(map[string]string),
+        stick_count: 0,
+        stick_peer_line: ""
     }
 }
 

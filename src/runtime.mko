@@ -116,18 +116,194 @@ fn find_http_listener_idx(listeners: []HttpListener, name: string, host: string,
     return 0 - 1
 }
 
+// Register multi-cert SNI entries on a live TlsServer (Mako tls_server_sni_add).
+// Exact and left-most wildcards; duplicates / bad paths return -1 and are logged.
+fn frontend_apply_tls_sni(srv: TlsServer, fe: Frontend) -> int {
+    let mut ok = 0
+    for _, e in range fe.tls_sni {
+        if str_eq(e.hostname, "") {
+            continue
+        }
+        if str_eq(e.cert, "") {
+            continue
+        }
+        if str_eq(e.key, "") {
+            continue
+        }
+        let rc = tls_server_sni_add(srv, e.hostname, e.cert, e.key)
+        if rc == 0 {
+            ok = ok + 1
+            log_info_event("tls_sni_added", f"frontend={fe.name} host={e.hostname}")
+        } else {
+            log_warn_event("tls_sni_add_failed", f"frontend={fe.name} host={e.hostname} code={rc}")
+        }
+    }
+    return ok
+}
+
+// Diff old vs new SNI set in place via Mako tls_server_sni_{add,update,remove} (0.2.2+).
+// Returns number of successful mutations.
+fn frontend_sync_tls_sni(srv: TlsServer, old_fe: Frontend, fe: Frontend) -> int {
+    let mut n = 0
+    // Remove hostnames no longer present
+    for _, oe in range old_fe.tls_sni {
+        if str_eq(oe.hostname, "") {
+            continue
+        }
+        let mut still = 0
+        for _, ne in range fe.tls_sni {
+            if str_eq(oe.hostname, ne.hostname) {
+                still = 1
+            }
+        }
+        if still == 0 {
+            let rc = tls_server_sni_remove(srv, oe.hostname)
+            if rc == 0 {
+                n = n + 1
+                log_info_event("tls_sni_removed", f"frontend={fe.name} host={oe.hostname}")
+            } else {
+                log_warn_event("tls_sni_remove_failed", f"frontend={fe.name} host={oe.hostname} code={rc}")
+            }
+        }
+    }
+    // Add new or update changed cert/key for existing names
+    for _, ne in range fe.tls_sni {
+        if str_eq(ne.hostname, "") {
+            continue
+        }
+        if str_eq(ne.cert, "") {
+            continue
+        }
+        if str_eq(ne.key, "") {
+            continue
+        }
+        let mut found = 0
+        let mut same = 0
+        for _, oe in range old_fe.tls_sni {
+            if str_eq(oe.hostname, ne.hostname) {
+                found = 1
+                if str_eq(oe.cert, ne.cert) {
+                    if str_eq(oe.key, ne.key) {
+                        same = 1
+                    }
+                }
+            }
+        }
+        if found == 1 {
+            if same == 0 {
+                let rc = tls_server_sni_update(srv, ne.hostname, ne.cert, ne.key)
+                if rc == 0 {
+                    n = n + 1
+                    log_info_event("tls_sni_updated", f"frontend={fe.name} host={ne.hostname}")
+                } else {
+                    // Strict update failed: drop + re-add
+                    let _ = tls_server_sni_remove(srv, ne.hostname)
+                    let rc2 = tls_server_sni_add(srv, ne.hostname, ne.cert, ne.key)
+                    if rc2 == 0 {
+                        n = n + 1
+                        log_info_event("tls_sni_replaced", f"frontend={fe.name} host={ne.hostname}")
+                    } else {
+                        log_warn_event("tls_sni_update_failed", f"frontend={fe.name} host={ne.hostname} code={rc}")
+                    }
+                }
+            }
+        } else {
+            let rc = tls_server_sni_add(srv, ne.hostname, ne.cert, ne.key)
+            if rc == 0 {
+                n = n + 1
+                log_info_event("tls_sni_added", f"frontend={fe.name} host={ne.hostname}")
+            } else {
+                log_warn_event("tls_sni_add_failed", f"frontend={fe.name} host={ne.hostname} code={rc}")
+            }
+        }
+    }
+    return n
+}
+
+// Build the TLS server for a frontend: default cert/key (+ optional mTLS) then SNI extras.
+// tls_min_13 uses Mako tls_server_new_tls13 (rejects TLS < 1.3). mTLS still uses
+// tls_server_new_mtls (OpenSSL default min); pair with modern clients.
+fn frontend_tls_server_new(fe: Frontend) -> TlsServer {
+    let mut srv = tls_server_new("", "")
+    if str_len(fe.tls_cert) == 0 {
+        return srv
+    }
+    if str_len(fe.tls_client_ca) > 0 {
+        srv = tls_server_new_mtls(fe.tls_cert, fe.tls_key, fe.tls_client_ca)
+    } else {
+        if fe.tls_min_13 == 1 {
+            srv = tls_server_new_tls13(fe.tls_cert, fe.tls_key)
+        } else {
+            srv = tls_server_new(fe.tls_cert, fe.tls_key)
+        }
+    }
+    let _ = frontend_apply_tls_sni(srv, fe)
+    return srv
+}
+
+// Hot path for /admin/tls-reload and cert path changes: reload default PEM, then
+// sync SNI in place via sni_add/update/remove. Free+recreate only for mTLS or
+// tls_min changes (those cannot be applied without a new SSL_CTX).
+fn frontend_tls_server_refresh(old_srv: TlsServer, old_fe: Frontend, fe: Frontend) -> TlsServer {
+    if str_len(fe.tls_cert) == 0 {
+        let _ = tls_server_free(old_srv)
+        return tls_server_new("", "")
+    }
+    let mut mtls_changed = 0
+    if not str_eq(old_fe.tls_client_ca, fe.tls_client_ca) {
+        mtls_changed = 1
+    }
+    let mut min_changed = 0
+    if old_fe.tls_min_13 != fe.tls_min_13 {
+        min_changed = 1
+    }
+    if mtls_changed == 1 or min_changed == 1 {
+        let _ = tls_server_free(old_srv)
+        return frontend_tls_server_new(fe)
+    }
+    // Default cert/key path change: atomic reload preserves existing SNI entries.
+    if not str_eq(fe.tls_cert, old_fe.tls_cert) or not str_eq(fe.tls_key, old_fe.tls_key) {
+        let rc = tls_server_reload(old_srv, fe.tls_cert, fe.tls_key)
+        if rc != 0 {
+            log_warn_event("tls_reload_failed", f"frontend={fe.name} code={rc}")
+            let _ = tls_server_free(old_srv)
+            return frontend_tls_server_new(fe)
+        }
+    }
+    // SNI set may have changed independently of default cert paths.
+    let old_fp = frontend_tls_sni_fingerprint(old_fe)
+    let new_fp = frontend_tls_sni_fingerprint(fe)
+    if not str_eq(old_fp, new_fp) {
+        let _ = frontend_sync_tls_sni(old_srv, old_fe, fe)
+    }
+    return old_srv
+}
+
+// Listen with explicit backlog (Mako dual-stack: empty/"*" host → :: + V6ONLY=0).
+// Backlog defaults to 4096; when frontend maxconn is set, size the accept queue
+// to at least that many half-open slots (clamped).
+fn frontend_tcp_listen(fe: Frontend) -> int {
+    let mut bl = 4096
+    if fe.maxconn > 0 {
+        bl = fe.maxconn
+        if bl < 128 {
+            bl = 128
+        }
+        if bl > 65535 {
+            bl = 65535
+        }
+    }
+    return tcp_listen_backlog(fe.bind_host, fe.bind_port, bl)
+}
+
 fn http_listener_open(fe: Frontend) -> HttpListener {
     let mut h_tls = 0
     let mut h_tls_srv = tls_server_new("", "")
     if str_len(fe.tls_cert) > 0 {
         h_tls = 1
-        if str_len(fe.tls_client_ca) > 0 {
-            h_tls_srv = tls_server_new_mtls(fe.tls_cert, fe.tls_key, fe.tls_client_ca)
-        } else {
-            h_tls_srv = tls_server_new(fe.tls_cert, fe.tls_key)
-        }
+        h_tls_srv = frontend_tls_server_new(fe)
     }
-    let hfd = tcp_listen_addr(fe.bind_host, fe.bind_port)
+    let hfd = frontend_tcp_listen(fe)
     return HttpListener {
         frontend: fe,
         fd: hfd,
@@ -166,28 +342,23 @@ fn rebind_http_listeners(el: EvLoop, old: []HttpListener, new_fes: []Frontend) -
         let match_idx = find_http_listener_idx(old, fe.name, fe.bind_host, fe.bind_port)
         if match_idx >= 0 {
             let mut hl = old[match_idx]
-            // Update frontend config; reload TLS if paths present.
-            let old_cert = hl.frontend.tls_cert
-            let old_key = hl.frontend.tls_key
+            // Update frontend config; reload/recreate TLS (default + multi-cert SNI).
+            let old_fe = hl.frontend
             hl.frontend = fe
             if hl.tls == 1 {
                 if not str_eq(fe.tls_cert, "") {
-                    if not str_eq(fe.tls_cert, old_cert) {
-                        let _ = tls_server_reload(hl.tls_srv, fe.tls_cert, fe.tls_key)
-                    } else {
-                        if not str_eq(fe.tls_key, old_key) {
-                            let _ = tls_server_reload(hl.tls_srv, fe.tls_cert, fe.tls_key)
-                        }
-                    }
+                    hl.tls_srv = frontend_tls_server_refresh(hl.tls_srv, old_fe, fe)
+                } else {
+                    // TLS disabled on this frontend.
+                    let _ = tls_server_free(hl.tls_srv)
+                    hl.tls_srv = tls_server_new("", "")
+                    hl.tls = 0
+                    log_info_event("listener_tls_disabled", f"frontend={fe.name}")
                 }
             } else {
                 // TLS newly enabled: need new tls server object (keep same listen fd).
                 if str_len(fe.tls_cert) > 0 {
-                    if str_len(fe.tls_client_ca) > 0 {
-                        hl.tls_srv = tls_server_new_mtls(fe.tls_cert, fe.tls_key, fe.tls_client_ca)
-                    } else {
-                        hl.tls_srv = tls_server_new(fe.tls_cert, fe.tls_key)
-                    }
+                    hl.tls_srv = frontend_tls_server_new(fe)
                     hl.tls = 1
                     log_info_event("listener_tls_enabled", f"frontend={fe.name}")
                 }
@@ -252,6 +423,85 @@ fn reindex_pending_clients(pending: []PendingClient, listeners: []HttpListener) 
     return out
 }
 
+// Rebind the stats/admin listener when host, port, or TLS mode changes.
+// new_port is the effective stats port (may differ from fe.bind_port in config).
+// Returns (fd, tls_flag, tls_srv, fe) with fe.bind_port forced to new_port.
+fn rebind_stats_listener(
+    el: EvLoop,
+    old_fd: int,
+    old_tls: int,
+    old_tls_srv: TlsServer,
+    old_fe: Frontend,
+    old_port: int,
+    new_fe: Frontend,
+    new_port: int
+) -> (int, int, TlsServer, Frontend) {
+    let mut fe = new_fe
+    fe.bind_port = new_port
+    let mut new_tls = 0
+    if str_len(fe.tls_cert) > 0 {
+        new_tls = 1
+    }
+    // Tear down when stats port disappears.
+    if new_port <= 0 {
+        if old_fd >= 0 {
+            let _ = evloop_del(el, old_fd)
+            let _ = tcp_close(old_fd)
+            log_info_event("listener_closed", f"frontend=stats bind={old_fe.bind_host}:{old_port} source=reload")
+        }
+        if old_tls == 1 {
+            let _ = tls_server_free(old_tls_srv)
+        }
+        return (0 - 1, 0, tls_server_new("", ""), fe)
+    }
+    let mut need_rebind = 0
+    if old_fd < 0 {
+        need_rebind = 1
+    }
+    if old_port != new_port {
+        need_rebind = 1
+    }
+    if not str_eq(old_fe.bind_host, fe.bind_host) {
+        need_rebind = 1
+    }
+    if old_tls != new_tls {
+        need_rebind = 1
+    }
+    if need_rebind == 1 {
+        if old_fd >= 0 {
+            let _ = evloop_del(el, old_fd)
+            let _ = tcp_close(old_fd)
+        }
+        if old_tls == 1 {
+            let _ = tls_server_free(old_tls_srv)
+        }
+        let fd = frontend_tcp_listen(fe)
+        let mut tls_srv = tls_server_new("", "")
+        if new_tls == 1 {
+            tls_srv = frontend_tls_server_new(fe)
+        }
+        if fd >= 0 {
+            let _ = evloop_add(el, fd, 1)
+            log_info_event(
+                "listener_bound",
+                f"frontend=stats bind={fe.bind_host}:{new_port} tls={new_tls} source=reload"
+            )
+        } else {
+            log_error_event(
+                "listener_rebind_failed",
+                f"frontend=stats bind={fe.bind_host}:{new_port}"
+            )
+        }
+        return (fd, new_tls, tls_srv, fe)
+    }
+    // Same bind: refresh TLS PEMs/SNI in place when cert paths change.
+    let mut tls_srv2 = old_tls_srv
+    if new_tls == 1 {
+        tls_srv2 = frontend_tls_server_refresh(old_tls_srv, old_fe, fe)
+    }
+    return (old_fd, new_tls, tls_srv2, fe)
+}
+
 // Rebuild TCP listen FDs for tcp frontends (order matches tcp_fes).
 fn rebind_tcp_listeners(el: EvLoop, old_fds: []int, old_fes: []Frontend, new_fes: []Frontend) -> ([]int, []Frontend) {
     // Close all old TCP listeners then open new set (simple, low connection count path).
@@ -269,7 +519,7 @@ fn rebind_tcp_listeners(el: EvLoop, old_fds: []int, old_fes: []Frontend, new_fes
         if not str_eq(fe.mode, "tcp") {
             continue
         }
-        let fd = tcp_listen_addr(fe.bind_host, fe.bind_port)
+        let fd = frontend_tcp_listen(fe)
         if fd < 0 {
             log_error_event("tcp_rebind_failed", f"frontend={fe.name} port={fe.bind_port}")
         } else {
@@ -281,4 +531,267 @@ fn rebind_tcp_listeners(el: EvLoop, old_fds: []int, old_fes: []Frontend, new_fes
     }
     let _ = old_fes
     return (fds, fes)
+}
+
+// Protocol list wants HTTP/3 / QUIC (same rules as doctor).
+fn runtime_frontend_wants_h3(protocols: string) -> int {
+    let p = str_to_lower(protocols)
+    if str_contains(p, "h3") {
+        return 1
+    }
+    if str_contains(p, "http/3") {
+        return 1
+    }
+    if str_contains(p, "quic") {
+        return 1
+    }
+    return 0
+}
+
+fn find_udp_listener_idx(listeners: []UdpListener, name: string, host: string, port: int) -> int {
+    for i, ul in range listeners {
+        if str_eq(ul.frontend.name, name) {
+            if str_eq(ul.frontend.bind_host, host) {
+                if ul.frontend.bind_port == port {
+                    return i
+                }
+            }
+        }
+    }
+    return 0 - 1
+}
+
+fn udp_listener_open(fe: Frontend) -> UdpListener {
+    let usock = game_udp_bind_addr(fe.bind_host, fe.bind_port)
+    return UdpListener {
+        frontend: fe,
+        sock: usock,
+        fd: game_udp_fd(usock)
+    }
+}
+
+fn udp_listener_close(el: EvLoop, ul: UdpListener) {
+    if ul.fd >= 0 {
+        let _ = evloop_del(el, ul.fd)
+    }
+    game_udp_close(ul.sock)
+}
+
+// Rebuild UDP listeners; reuse sock when name+bind match.
+fn rebind_udp_listeners(el: EvLoop, old: []UdpListener, new_fes: []Frontend) -> []UdpListener {
+    let mut out = make([]UdpListener, 0, len(new_fes))
+    let mut used = make([]int, 0, len(old))
+    let mut ui = 0
+    while ui < len(old) {
+        used = append(used, 0)
+        ui = ui + 1
+    }
+    for _, fe in range new_fes {
+        if not str_eq(fe.mode, "udp") {
+            continue
+        }
+        let match_idx = find_udp_listener_idx(old, fe.name, fe.bind_host, fe.bind_port)
+        if match_idx >= 0 {
+            let mut ul = old[match_idx]
+            ul.frontend = fe
+            used[match_idx] = 1
+            out = append(out, ul)
+            log_info_event("listener_reused", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=udp")
+        } else {
+            let ul2 = udp_listener_open(fe)
+            if ul2.fd < 0 {
+                log_error_event("listener_rebind_failed", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=udp")
+            } else {
+                let _ = evloop_add(el, ul2.fd, 1)
+                log_info_event("listener_bound", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=udp source=reload")
+            }
+            out = append(out, ul2)
+        }
+    }
+    let mut oi = 0
+    while oi < len(old) {
+        if used[oi] == 0 {
+            log_info_event("listener_closed", f"frontend={old[oi].frontend.name} bind={old[oi].frontend.bind_host}:{old[oi].frontend.bind_port} mode=udp source=reload")
+            udp_listener_close(el, old[oi])
+        }
+        oi = oi + 1
+    }
+    return out
+}
+
+// Drop UDP flows whose frontend no longer exists.
+fn filter_udp_flows(flows: []UdpFlow, listeners: []UdpListener) -> []UdpFlow {
+    let mut out = make([]UdpFlow, 0, len(flows))
+    for _, f in range flows {
+        let mut keep = 0
+        for _, ul in range listeners {
+            if str_eq(ul.frontend.name, f.frontend) {
+                keep = 1
+            }
+        }
+        if keep == 1 {
+            out = append(out, f)
+        }
+    }
+    return out
+}
+
+fn find_h3_listener_idx(listeners: []H3Listener, name: string, host: string, port: int) -> int {
+    for i, hl in range listeners {
+        if str_eq(hl.frontend.name, name) {
+            if str_eq(hl.frontend.bind_host, host) {
+                if hl.frontend.bind_port == port {
+                    return i
+                }
+            }
+        }
+    }
+    return 0 - 1
+}
+
+fn h3_listener_open(fe: Frontend, frontend_idx: int) -> H3Listener {
+    let empty = H3Listener {
+        frontend: fe,
+        handle: 0 - 1,
+        fd: 0 - 1,
+        frontend_idx: frontend_idx
+    }
+    if str_len(fe.tls_cert) == 0 {
+        return empty
+    }
+    if runtime_frontend_wants_h3(fe.protocols) == 0 {
+        return empty
+    }
+    if h3_server_available() == 0 {
+        log_warn_event("h3_unavailable", f"frontend={fe.name}")
+        return empty
+    }
+    let hh = h3_server_new(fe.tls_cert, fe.tls_key)
+    if hh < 0 {
+        log_error_event("h3_open_failed", f"frontend={fe.name}")
+        return empty
+    }
+    let bound = h3_server_bind(hh, fe.bind_host, fe.bind_port)
+    if bound != 1 {
+        let _ = h3_server_close(hh)
+        log_error_event("h3_bind_failed", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port}")
+        return empty
+    }
+    return H3Listener {
+        frontend: fe,
+        handle: hh,
+        fd: h3_server_fd(hh),
+        frontend_idx: frontend_idx
+    }
+}
+
+fn h3_listener_close(el: EvLoop, hl: H3Listener) {
+    if hl.fd >= 0 {
+        let _ = evloop_del(el, hl.fd)
+    }
+    if hl.handle >= 0 {
+        let _ = h3_server_close(hl.handle)
+    }
+}
+
+// Rebuild H3/QUIC listeners for HTTP frontends that request h3 + TLS.
+// Reuses when name+bind match and cert/key paths unchanged; otherwise recreate.
+fn rebind_h3_listeners(el: EvLoop, old: []H3Listener, new_http_fes: []Frontend) -> []H3Listener {
+    let mut out = make([]H3Listener, 0, len(new_http_fes))
+    let mut used = make([]int, 0, len(old))
+    let mut ui = 0
+    while ui < len(old) {
+        used = append(used, 0)
+        ui = ui + 1
+    }
+    let mut fi = 0
+    while fi < len(new_http_fes) {
+        let fe = new_http_fes[fi]
+        let mut wants = 0
+        if str_eq(fe.mode, "http") {
+            if str_len(fe.tls_cert) > 0 {
+                if runtime_frontend_wants_h3(fe.protocols) == 1 {
+                    wants = 1
+                }
+            }
+        }
+        if wants == 0 {
+            fi = fi + 1
+            continue
+        }
+        let match_idx = find_h3_listener_idx(old, fe.name, fe.bind_host, fe.bind_port)
+        if match_idx >= 0 {
+            let old_hl = old[match_idx]
+            let mut cert_same = 0
+            if str_eq(old_hl.frontend.tls_cert, fe.tls_cert) {
+                if str_eq(old_hl.frontend.tls_key, fe.tls_key) {
+                    cert_same = 1
+                }
+            }
+            if cert_same == 1 {
+                if old_hl.fd >= 0 {
+                    let mut hl = old_hl
+                    hl.frontend = fe
+                    hl.frontend_idx = fi
+                    used[match_idx] = 1
+                    out = append(out, hl)
+                    log_info_event("listener_reused", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=http3")
+                    fi = fi + 1
+                    continue
+                }
+            }
+        }
+        // Open new (or replace when cert paths changed).
+        let hl2 = h3_listener_open(fe, fi)
+        if hl2.fd >= 0 {
+            let _ = evloop_add(el, hl2.fd, 1)
+            log_info_event("listener_bound", f"frontend={fe.name} bind={fe.bind_host}:{fe.bind_port} mode=http3 source=reload")
+            out = append(out, hl2)
+        }
+        fi = fi + 1
+    }
+    let mut oi = 0
+    while oi < len(old) {
+        if used[oi] == 0 {
+            log_info_event("listener_closed", f"frontend={old[oi].frontend.name} bind={old[oi].frontend.bind_host}:{old[oi].frontend.bind_port} mode=http3 source=reload")
+            h3_listener_close(el, old[oi])
+        }
+        oi = oi + 1
+    }
+    return out
+}
+
+// Sync HttpListener.h3 / h3_handle fields from the H3 listener list (by frontend name).
+fn sync_http_h3_handles(http_listeners: []HttpListener, h3_listeners: []H3Listener) -> []HttpListener {
+    let mut out = http_listeners
+    let mut i = 0
+    while i < len(out) {
+        let mut hl = out[i]
+        let mut found = 0
+        let mut h3h = 0 - 1
+        for _, h3l in range h3_listeners {
+            if str_eq(h3l.frontend.name, hl.frontend.name) {
+                if h3l.fd >= 0 {
+                    found = 1
+                    h3h = h3l.handle
+                }
+            }
+        }
+        hl.h3 = found
+        hl.h3_handle = h3h
+        out[i] = hl
+        i = i + 1
+    }
+    return out
+}
+
+// Collect frontends by mode.
+fn frontends_of_mode(frontends: []Frontend, mode: string) -> []Frontend {
+    let mut out = make([]Frontend, 0, 8)
+    for _, fe in range frontends {
+        if str_eq(fe.mode, mode) {
+            out = append(out, fe)
+        }
+    }
+    return out
 }

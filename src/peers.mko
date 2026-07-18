@@ -1,0 +1,501 @@
+// Experimental stick-table peers (HA active/standby sync).
+// Line protocol over TCP, serviced on the accept-thread event loop.
+//
+// Messages (space-separated, one line each):
+//   HELLO <node> <cluster> <token>
+//   OK <node>
+//   UPSERT <key> <server> <expires_ms>
+//   DELETE <key>
+//   SYNC
+//   SYNC_END
+//
+// token = hex(hmac_sha256(secret, node + "|" + cluster))
+pack peers
+
+fn peers_auth_token(secret: string, node: string, cluster: string) -> string {
+    if str_eq(secret, "") {
+        return ""
+    }
+    return hmac_sha256(secret, node + "|" + cluster)
+}
+
+fn peers_encode_upsert(key: string, server: string, expires_ms: int) -> string {
+    return "UPSERT " + key + " " + server + " " + int_to_string(expires_ms) + "\n"
+}
+
+fn peers_encode_delete(key: string) -> string {
+    return "DELETE " + key + "\n"
+}
+
+fn peers_encode_hello(cfg: PeersConfig) -> string {
+    let tok = peers_auth_token(cfg.secret, cfg.name, cfg.cluster)
+    return "HELLO " + cfg.name + " " + cfg.cluster + " " + tok + "\n"
+}
+
+fn peers_encode_ok(cfg: PeersConfig) -> string {
+    return "OK " + cfg.name + "\n"
+}
+
+// Absolute-expiry upsert for peer receive path.
+fn stick_table_set_abs(
+    table: map[string]string,
+    key: string,
+    server_name: string,
+    expires_ms: int,
+    max_size: int,
+    now_ms: int,
+    entry_count: int
+) -> (map[string]string, int) {
+    if str_eq(key, "") {
+        return (table, entry_count)
+    }
+    if str_eq(server_name, "") {
+        return (table, entry_count)
+    }
+    if expires_ms > 0 {
+        if now_ms > expires_ms {
+            return (table, entry_count)
+        }
+    }
+    let mut out = table
+    let mut count = entry_count
+    let mut max = max_size
+    if max <= 0 {
+        max = 100000
+    }
+    let existing = out[key]
+    if str_eq(existing, "") {
+        if count >= max {
+            return (out, count)
+        }
+        count = count + 1
+    } else {
+        // Prefer newer expiry when both present.
+        let old_exp = stick_decode_expires(existing)
+        if old_exp > expires_ms {
+            return (out, count)
+        }
+    }
+    out[key] = stick_encode(server_name, expires_ms)
+    return (out, count)
+}
+
+fn stick_table_delete(table: map[string]string, key: string, entry_count: int) -> (map[string]string, int) {
+    if str_eq(key, "") {
+        return (table, entry_count)
+    }
+    let mut out = table
+    let existing = out[key]
+    if str_eq(existing, "") {
+        return (out, entry_count)
+    }
+    out[key] = ""
+    let mut count = entry_count - 1
+    if count < 0 {
+        count = 0
+    }
+    return (out, count)
+}
+
+// Dump stick table as UPSERT lines for full sync (keys with empty values skipped).
+fn peers_sync_payload(table: map[string]string, now_ms: int) -> string {
+    let mut b = str_builder()
+    let keys = maps_keys(table)
+    for _, k in range keys {
+        if str_eq(k, "") {
+            continue
+        }
+        let enc = table[k]
+        if str_eq(enc, "") {
+            continue
+        }
+        let exp = stick_decode_expires(enc)
+        if exp > 0 {
+            if now_ms > exp {
+                continue
+            }
+        }
+        let srv = stick_decode_server(enc)
+        if str_eq(srv, "") {
+            continue
+        }
+        builder_write(b, peers_encode_upsert(k, srv, exp))
+    }
+    builder_write(b, "SYNC_END\n")
+    return builder_string(b)
+}
+
+struct PeersApplyResult {
+    table: map[string]string
+    count: int
+    // 1 = close connection
+    close: int
+    // Lines to write back to peer (HELLO OK, SYNC payload)
+    reply: string
+    // Remote node name learned from HELLO
+    remote_name: string
+    hello_ok: int
+}
+
+fn peers_apply_line(
+    line: string,
+    cfg: PeersConfig,
+    table: map[string]string,
+    entry_count: int,
+    now_ms: int,
+    remote_name: string,
+    hello_ok: int
+) -> PeersApplyResult {
+    let mut out = PeersApplyResult {
+        table: table,
+        count: entry_count,
+        close: 0,
+        reply: "",
+        remote_name: remote_name,
+        hello_ok: hello_ok
+    }
+    let t = str_trim_space(line)
+    if str_eq(t, "") {
+        return out
+    }
+    let fields = str_fields(t)
+    if len(fields) == 0 {
+        return out
+    }
+    let cmd = fields[0]
+
+    if str_eq(cmd, "HELLO") {
+        if len(fields) < 4 {
+            out.close = 1
+            return out
+        }
+        let node = fields[1]
+        let cluster = fields[2]
+        let token = fields[3]
+        if not str_eq(cluster, cfg.cluster) {
+            log_warn_event("peers_auth_failed", f"reason=cluster remote={node}")
+            out.close = 1
+            return out
+        }
+        if str_eq(node, cfg.name) {
+            log_warn_event("peers_auth_failed", f"reason=self_connect remote={node}")
+            out.close = 1
+            return out
+        }
+        let expect = peers_auth_token(cfg.secret, node, cluster)
+        if str_eq(expect, "") {
+            out.close = 1
+            return out
+        }
+        if not str_eq(token, expect) {
+            log_warn_event("peers_auth_failed", f"reason=token remote={node}")
+            out.close = 1
+            return out
+        }
+        out.remote_name = node
+        out.hello_ok = 1
+        out.reply = peers_encode_ok(cfg)
+        log_info_event("peers_hello", f"remote={node} cluster={cluster}")
+        return out
+    }
+
+    if str_eq(cmd, "OK") {
+        if len(fields) >= 2 {
+            out.remote_name = fields[1]
+        }
+        out.hello_ok = 1
+        return out
+    }
+
+    if out.hello_ok == 0 {
+        // Require HELLO before data commands.
+        if not str_eq(cmd, "SYNC_END") {
+            log_warn_event("peers_proto", "reason=hello_required")
+            out.close = 1
+        }
+        return out
+    }
+
+    if str_eq(cmd, "UPSERT") {
+        if len(fields) >= 4 {
+            let key = fields[1]
+            let server = fields[2]
+            let exp = to_int(fields[3])
+            let t2, c2 = stick_table_set_abs(out.table, key, server, exp, 100000, now_ms, out.count)
+            out.table = t2
+            out.count = c2
+        }
+        return out
+    }
+
+    if str_eq(cmd, "DELETE") {
+        if len(fields) >= 2 {
+            let t3, c3 = stick_table_delete(out.table, fields[1], out.count)
+            out.table = t3
+            out.count = c3
+        }
+        return out
+    }
+
+    if str_eq(cmd, "SYNC") {
+        out.reply = peers_sync_payload(out.table, now_ms)
+        return out
+    }
+
+    if str_eq(cmd, "SYNC_END") {
+        return out
+    }
+
+    log_warn_event("peers_proto", f"reason=unknown_cmd cmd={cmd}")
+    return out
+}
+
+// Feed bytes into a peer connection buffer; apply complete lines.
+fn peers_feed(
+    pc: PeerConn,
+    data: string,
+    cfg: PeersConfig,
+    table: map[string]string,
+    entry_count: int,
+    now_ms: int
+) -> (PeerConn, map[string]string, int, string, int) {
+    let mut conn = pc
+    conn.buf = conn.buf + data
+    let mut reply_all = ""
+    let mut close = 0
+    let mut tab = table
+    let mut count = entry_count
+    // Process lines
+    let mut guard = 0
+    while guard < 10000 {
+        guard = guard + 1
+        let nl = str_index(conn.buf, "\n")
+        if nl < 0 {
+            break
+        }
+        let line = substr(conn.buf, 0, nl)
+        conn.buf = substr(conn.buf, nl + 1, str_len(conn.buf))
+        let ar = peers_apply_line(line, cfg, tab, count, now_ms, conn.name, conn.hello_ok)
+        tab = ar.table
+        count = ar.count
+        if not str_eq(ar.remote_name, "") {
+            conn.name = ar.remote_name
+        }
+        conn.hello_ok = ar.hello_ok
+        if not str_eq(ar.reply, "") {
+            reply_all = reply_all + ar.reply
+        }
+        if ar.close == 1 {
+            close = 1
+            break
+        }
+    }
+    // Cap buffer
+    if str_len(conn.buf) > 65536 {
+        close = 1
+    }
+    return (conn, tab, count, reply_all, close)
+}
+
+fn peers_broadcast(conns: []PeerConn, line: string) {
+    if str_eq(line, "") {
+        return
+    }
+    for _, c in range conns {
+        if c.fd < 0 {
+            continue
+        }
+        if c.hello_ok != 1 {
+            continue
+        }
+        let _ = tcp_write(c.fd, line)
+    }
+}
+
+fn peers_write(fd: int, data: string) -> int {
+    if fd < 0 {
+        return 0 - 1
+    }
+    if str_eq(data, "") {
+        return 0
+    }
+    return tcp_write(fd, data)
+}
+
+// Whether peers config is usable.
+fn peers_ready(cfg: PeersConfig) -> int {
+    if cfg.enabled != 1 {
+        return 0
+    }
+    if str_eq(cfg.name, "") {
+        return 0
+    }
+    if str_eq(cfg.secret, "") {
+        return 0
+    }
+    if cfg.bind_port <= 0 {
+        return 0
+    }
+    return 1
+}
+
+// Find if we already have an outbound conn for peer index.
+fn peers_has_outbound(conns: []PeerConn, peer_idx: int) -> int {
+    for _, c in range conns {
+        if c.is_outbound == 1 {
+            if c.peer_idx == peer_idx {
+                if c.fd >= 0 {
+                    return 1
+                }
+            }
+        }
+    }
+    return 0
+}
+
+// Dial missing outbound peers; returns new conns to append and fds to add to evloop.
+fn peers_dial_missing(cfg: PeersConfig, conns: []PeerConn) -> []PeerConn {
+    let mut out = make([]PeerConn, 0, 0)
+    if peers_ready(cfg) == 0 {
+        return out
+    }
+    let mut i = 0
+    while i < len(cfg.peers) {
+        if peers_has_outbound(conns, i) == 0 {
+            // Also check newly dialed in this call
+            if peers_has_outbound(out, i) == 0 {
+                let p = cfg.peers[i]
+                if not str_eq(p.name, cfg.name) {
+                    let fd = tcp_connect_timeout(p.host, p.port, 1000)
+                    if fd >= 0 {
+                        let _ = tcp_set_timeout(fd, 5000)
+                        let _ = io_set_nonblocking(fd, 1)
+                        let mut pc = peer_conn_new(fd, 1, i)
+                        // Send HELLO + request SYNC
+                        let msg = peers_encode_hello(cfg) + "SYNC\n"
+                        let _ = tcp_write(fd, msg)
+                        out = append(out, pc)
+                        log_info_event("peers_connected", f"remote={p.name} addr={p.host}:{p.port}")
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Stable fingerprint for peer identity + remote list (reload reconnect decisions).
+fn peers_config_fingerprint(cfg: PeersConfig) -> string {
+    let mut b = str_builder()
+    builder_write(b, int_to_string(cfg.enabled))
+    builder_write(b, "|")
+    builder_write(b, cfg.name)
+    builder_write(b, "|")
+    builder_write(b, cfg.cluster)
+    builder_write(b, "|")
+    builder_write(b, cfg.secret)
+    builder_write(b, "|")
+    builder_write(b, cfg.bind_host)
+    builder_write(b, ":")
+    builder_write(b, int_to_string(cfg.bind_port))
+    builder_write(b, "|")
+    for _, p in range cfg.peers {
+        builder_write(b, p.name)
+        builder_write(b, "@")
+        builder_write(b, p.host)
+        builder_write(b, ":")
+        builder_write(b, int_to_string(p.port))
+        builder_write(b, ";")
+    }
+    return builder_string(b)
+}
+
+// Close all peer connections and remove from the event loop.
+fn peers_close_all(el: EvLoop, conns: []PeerConn) -> []PeerConn {
+    for _, c in range conns {
+        if c.fd >= 0 {
+            let _ = evloop_del(el, c.fd)
+            let _ = tcp_close(c.fd)
+        }
+    }
+    return make([]PeerConn, 0, 0)
+}
+
+// Rebind peers listen socket when bind host/port or enabled state changes.
+fn rebind_peers_listener(el: EvLoop, old_fd: int, old_cfg: PeersConfig, new_cfg: PeersConfig) -> int {
+    let new_ready = peers_ready(new_cfg)
+    if new_ready == 0 {
+        if old_fd >= 0 {
+            let _ = evloop_del(el, old_fd)
+            let _ = tcp_close(old_fd)
+            log_info_event("peers_listen_closed", "source=reload")
+        }
+        return 0 - 1
+    }
+    let mut need = 0
+    if old_fd < 0 {
+        need = 1
+    }
+    if peers_ready(old_cfg) == 0 {
+        need = 1
+    }
+    if not str_eq(old_cfg.bind_host, new_cfg.bind_host) {
+        need = 1
+    }
+    if old_cfg.bind_port != new_cfg.bind_port {
+        need = 1
+    }
+    if need == 0 {
+        return old_fd
+    }
+    if old_fd >= 0 {
+        let _ = evloop_del(el, old_fd)
+        let _ = tcp_close(old_fd)
+    }
+    let fd = tcp_listen_addr(new_cfg.bind_host, new_cfg.bind_port)
+    if fd < 0 {
+        log_warn_event("peers_bind_failed", f"bind={new_cfg.bind_host}:{new_cfg.bind_port} source=reload")
+        return 0 - 1
+    }
+    let _ = io_set_nonblocking(fd, 1)
+    let _ = evloop_add(el, fd, 1)
+    log_info_event(
+        "peers_listen",
+        f"node={new_cfg.name} cluster={new_cfg.cluster} bind={new_cfg.bind_host}:{new_cfg.bind_port} remotes={len(new_cfg.peers)} source=reload"
+    )
+    return fd
+}
+
+// Apply peers config on full reload: rebind listen, drop conns if identity/list changed.
+// Returns (listen_fd, conns, force_redial) where force_redial=1 means dial ASAP.
+fn peers_apply_reload(
+    el: EvLoop,
+    old_fd: int,
+    old_cfg: PeersConfig,
+    old_conns: []PeerConn,
+    new_cfg: PeersConfig
+) -> (int, []PeerConn, int) {
+    let old_fp = peers_config_fingerprint(old_cfg)
+    let new_fp = peers_config_fingerprint(new_cfg)
+    let mut conns = old_conns
+    let mut force = 0
+    // Any identity / remote / bind change: drop existing sessions (HELLO tokens may differ).
+    if not str_eq(old_fp, new_fp) {
+        conns = peers_close_all(el, conns)
+        force = 1
+        log_info_event("peers_sessions_reset", "reason=config_changed source=reload")
+    }
+    let fd = rebind_peers_listener(el, old_fd, old_cfg, new_cfg)
+    if peers_ready(new_cfg) == 1 {
+        if force == 1 {
+            force = 1
+        } else {
+            // Even if fingerprint matched, ensure we can dial missing remotes.
+            force = 0
+        }
+    } else {
+        force = 0
+    }
+    return (fd, conns, force)
+}

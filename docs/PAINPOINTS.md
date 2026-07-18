@@ -70,8 +70,8 @@ configured runtime state has eligible upstream capacity.
 ## Honest Boundaries
 
 - Leba covers a focused subset of load-balancing behavior.
-- Config **table** reload is implemented (`SIGHUP` / `POST /admin/reload`);
-  listen bind rebind still needs restart.
+- Config **table** reload is implemented (`SIGHUP` / `POST /admin/reload`)
+  with HTTP/TCP/UDP/H3/**stats** listen rebind.
 - Runtime server state is persisted across restart when `state_file` is
   configured; otherwise it is in-memory only.
 - TLS, HTTP/2 (multiplexed request/response), and HTTP/3/QUIC ingress (when
@@ -86,7 +86,7 @@ configured runtime state has eligible upstream capacity.
 
 ## Roadmap
 
-- [x] Config reload with HTTP/TCP listen rebind (H3/UDP/stats port still restart).
+- [x] Config reload with HTTP/TCP/UDP/H3/stats/peers rebind + OIDC/peers live apply.
 - [x] Protected manual `servers_file` reload.
 - [x] Watched `servers_file` reload.
 - [x] TLS termination for simple HTTP proxying.
@@ -108,9 +108,11 @@ configured runtime state has eligible upstream capacity.
 - [x] Proxy host create/delete API + admin UI.
 - [x] App HTTP Basic (`auth_basic` / `auth_user`).
 - [ ] Built-in ACME client (external lego/acme.sh + hook for now).
-- [x] Config reload + HTTP/TCP rebind (`SIGHUP` / `POST /admin/reload`).
+- [x] Config reload + HTTP/TCP/UDP/H3/stats/peers rebind + OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
-- [x] Local stick tables (`stick on src`).
+- [x] Local stick tables (`stick on src`) including HTTP/3 (XFF or cookie).
+- [x] Live OIDC/peers status on `GET /stats` + admin UI (v0.10.0).
+- [x] Prometheus gauges for stick entries, OIDC/peers ready, TLS/SNI (v0.10.0).
 - [x] HA active/standby docs (`docs/HA.md`).
 - [x] WAF adapter (local + remote inspect).
 - [x] DNS service discovery (`resolve` / `resolve_interval` / `expand`).

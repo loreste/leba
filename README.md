@@ -13,8 +13,9 @@ gh repo clone loreste/leba
 - Round-robin, least-connection, IP-hash, weighted, random, SIP Call-ID,
   and consistent-hash algorithms
 - Sticky cookie session persistence
-- Source-IP stick tables (`stick on src`, capacity/TTL)
-- DNS service discovery (`resolve` on servers + `resolve_interval`)
+- Source-IP stick tables (`stick on src`, capacity/TTL) for HTTP/1–3 (H3 via XFF/cookie)
+- Experimental stick-table peers (HA sync over private TCP; see `docs/HA.md`)
+- DNS service discovery (`resolve` / `expand` / `srv` + `resolve_interval`)
 - Per-server weight and maxconn limits
 - Per-backend maxconn limits
 - Connection draining (graceful removal from pool)
@@ -33,6 +34,7 @@ gh repo clone loreste/leba
 ### TLS & Security
 - TLS termination for HTTP frontends
 - mTLS with client certificate validation (`tls_client_ca`)
+- Multi-certificate TLS SNI (`tls_sni HOSTNAME CERT KEY`; exact or `*.example.com`)
 - TLS on the admin/stats frontend
 - Encrypted state file at rest (AES-128-GCM via `state_key`)
 - ACL engine: deny/allow by path, host, method, header, source IP
@@ -44,6 +46,7 @@ gh repo clone loreste/leba
 - Request body size limits
 - Directory traversal prevention for static file serving
 - RBAC for admin API (viewer, operator, admin roles)
+- Admin OIDC SSO (authorization code → session cookie; see `docs/OIDC.md`)
 - Password hashing (argon2id, SHA-256, PBKDF2)
 - No auto-login: unconfigured auth denies access
 - WWW-Authenticate header on 401 responses (browser login dialog)
@@ -139,6 +142,8 @@ frontend secure
   mode http
   tls_cert /etc/leba/certs/server.crt
   tls_key /etc/leba/certs/server.key
+  tls_sni api.example.com /etc/leba/certs/api.crt /etc/leba/certs/api.key
+  tls_sni *.example.com /etc/leba/certs/wild.crt /etc/leba/certs/wild.key
   protocols http/1.1,h2
   route default -> app
 
@@ -177,7 +182,7 @@ The `mode stats` frontend serves:
 | `/admin/reload-servers` | POST | operator | Reload servers_file |
 | `/admin/vhosts` | GET | viewer | List vhosts |
 | `/admin/vhost-create` | POST | operator | Create vhost |
-| `/admin/vhost-cert` | POST | operator | Update certificate paths |
+| `/admin/vhost-cert` | POST | operator | Update default or SNI certificate paths (`hostname` optional) |
 | `/admin/tls-reload` | POST | operator | Live-reload TLS certs from disk |
 | `/admin/proxy-hosts` | GET | viewer | List proxy hosts (alias of vhosts) |
 | `/admin/proxy-host` | POST | operator | Create/update proxy host |
@@ -214,7 +219,7 @@ Typical paths:
 
 ## Status
 
-Leba is working software with 80+ automated tests (v0.9.0). It handles
+Leba is working software with 80+ automated tests (v0.10.0). It handles
 HTTP/1-3, TCP, UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind
 real traffic.
 
@@ -228,8 +233,7 @@ Known limits:
 - HTTP/3 requires a quiche-linked build. Upstream prefers keep-alive pools when
   `init_server_pools` is active; otherwise falls back to per-request connect.
 - SIP support is signaling-focused; media relay is not implemented.
-- Full config reload with HTTP/TCP listen rebind (`SIGHUP` / `POST /admin/reload`);
-  H3/UDP/stats-port rebind still may require restart.
+- Full config reload with HTTP/TCP/UDP/H3/stats/peers rebind and live OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
 - No built-in Let's Encrypt client; use external ACME + `acme_webroot` +
   `POST /admin/tls-reload` (see [`docs/ACME.md`](docs/ACME.md)).
 - No response compression (gzip/brotli) or response caching yet.

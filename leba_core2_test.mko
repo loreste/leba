@@ -12,6 +12,8 @@ pull . "./src/admin.mko"
 pull . "./src/proxy.mko"
 pull . "./src/waf.mko"
 pull . "./src/runtime.mko"
+pull . "./src/peers.mko"
+pull . "./src/oidc.mko"
 pull . "./src/cli.mko"
 
 fn TestIpHashStable() {
@@ -817,6 +819,59 @@ fn TestDnsExpandCreatesMembers() {
     assert(members >= 1)
 }
 
+fn TestDnsSrvParseAndConfig() {
+    assert_eq(dns_safe_name("_sip._udp.example.com"), 1)
+    assert_eq(dns_safe_name("bad;name"), 0)
+    assert_eq(dns_safe_name("a b"), 0)
+    let text = "20 1 5060 sip-b.example.com.\n10 5 5061 sip-a.example.com.\n"
+    let recs = dns_parse_srv_text(text)
+    assert_eq(len(recs), 2)
+    assert_eq(recs[0].priority, 20)
+    assert_eq(recs[0].port, 5060)
+    assert_eq_str(recs[0].target, "sip-b.example.com")
+    assert_eq_str(recs[1].target, "sip-a.example.com")
+    let sorted = dns_srv_sort(recs)
+    assert_eq(sorted[0].priority, 10)
+    assert_eq_str(sorted[0].target, "sip-a.example.com")
+    assert_eq_str(dns_srv_member_name("sip", "sip-a.example.com", 5061), "sip-sip-a_example_com-5061")
+
+    // Wire-format: build a query and ensure non-empty packet.
+    let q = dns_build_srv_query("_sip._udp.example.com", 4660)
+    assert(str_len(q) > 20)
+    assert_eq(dns_be16_at(q, 0), 4660)
+    assert_eq(dns_be16_at(q, 2), 256)
+
+    let raw = "backend sip\n  resolve_interval 5s\n  server sip _sip._udp.example.com:5060 weight 100 check resolve srv\nfrontend web\n  bind 1\n  mode http\n  default_backend sip\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.servers[0].resolve_srv, 1)
+    assert_eq(w.servers[0].resolve_expand, 1)
+    assert_eq(w.servers[0].resolve, 1)
+    assert_eq_str(w.servers[0].resolve_name, "_sip._udp.example.com")
+    assert_eq(server_eligible(w.servers[0]), 0)
+
+    // Live SRV against a public name when network allows (skip if empty).
+    let live = dns_lookup_srv("_sip._udp.sip.voice.google.com")
+    if len(live) > 0 {
+        assert(live[0].port > 0)
+        assert(str_len(live[0].target) > 0)
+        let mut servers = make([]Server, 0, 1)
+        let mut tmpl = w.servers[0]
+        tmpl.resolve_name = "_sip._udp.sip.voice.google.com"
+        tmpl.host = "_sip._udp.sip.voice.google.com"
+        servers = append(servers, tmpl)
+        let expanded2 = run_dns_resolve(servers, w.backends, 1)
+        let mut members = 0
+        for _, s in range expanded2 {
+            if str_eq(s.resolve_parent, "sip") {
+                members = members + 1
+                assert(s.port > 0)
+            }
+        }
+        assert(members >= 1)
+    }
+}
+
 fn TestWafLocalBlocksTraversalAndSqli() {
     let a = waf_local_scan("GET", "/ok", "")
     assert_eq_str(a.action, "allow")
@@ -844,6 +899,116 @@ fn TestWafParseAndUrl() {
     assert_eq_str(host, "10.0.0.5")
     assert_eq(port, 9000)
     assert_eq_str(path, "/inspect")
+}
+
+fn TestTlsMin13Config() {
+    let raw = "frontend secure\n  bind :443\n  mode http\n  tls_cert /tmp/c.crt\n  tls_key /tmp/c.key\n  tls_min 1.3\n  default_backend app\nbackend app\n  server a 127.0.0.1:9 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.frontends[0].tls_min_13, 1)
+    let raw2 = "frontend secure\n  bind :443\n  mode http\n  tls_cert /tmp/c.crt\n  tls_key /tmp/c.key\n  tls_min 1.2\n  default_backend app\nbackend app\n  server a 127.0.0.1:9 weight 1 check\n"
+    let w2 = parse_config_text(raw2)
+    assert_eq(w2.frontends[0].tls_min_13, 0)
+}
+
+fn TestStatsListenerRebind() {
+    let el = evloop_new()
+    let mut fe1 = frontend_new("stats")
+    fe1.mode = "stats"
+    fe1.bind_host = "127.0.0.1"
+    // Pick free-ish ports in high range
+    let base = 29000 + (now_ms() % 1000)
+    fe1.bind_port = base
+    let fd1 = frontend_tcp_listen(fe1)
+    assert(fd1 >= 0)
+    let _ = evloop_add(el, fd1, 1)
+    // Same host/port: keep listening (FD number may match)
+    let fd2, tls2, srv2, fe2 = rebind_stats_listener(el, fd1, 0, tls_server_new("", ""), fe1, base, fe1, base)
+    assert(fd2 >= 0)
+    assert_eq(tls2, 0)
+    assert_eq(fe2.bind_port, base)
+    assert_eq(fd2, fd1)
+    // Port change: new listen succeeds; old port is freed (fd numbers may recycle)
+    let fe3 = fe1
+    let port2 = base + 17
+    let fd3, tls3, srv3, fe_out = rebind_stats_listener(el, fd2, 0, srv2, fe2, base, fe3, port2)
+    assert(fd3 >= 0)
+    assert_eq(fe_out.bind_port, port2)
+    assert_eq(tls3, 0)
+    // New port accepts connections
+    let c = tcp_connect("127.0.0.1", port2)
+    assert(c >= 0)
+    let _ = tcp_close(c)
+    // Old port should be free enough to re-bind
+    let mut fe_old = fe1
+    fe_old.bind_port = base
+    let fd_old = frontend_tcp_listen(fe_old)
+    assert(fd_old >= 0)
+    let _ = tcp_close(fd_old)
+    // Port 0: tear down
+    let fd4, tls4, srv4, fe4 = rebind_stats_listener(el, fd3, 0, srv3, fe_out, port2, fe_out, 0)
+    assert_eq(fd4, 0 - 1)
+    assert_eq(tls4, 0)
+    let _ = srv4
+    let _ = fe4
+    let _ = evloop_close(el)
+}
+
+fn TestUdpH3RebindHelpers() {
+    assert_eq(runtime_frontend_wants_h3("http/1.1,h2,h3"), 1)
+    assert_eq(runtime_frontend_wants_h3("http/1.1,h2"), 0)
+    assert_eq(runtime_frontend_wants_h3("quic"), 1)
+    let mut fes = make([]Frontend, 0, 3)
+    let mut a = frontend_new("web")
+    a.mode = "http"
+    a.bind_port = 80
+    let mut b = frontend_new("sip")
+    b.mode = "udp"
+    b.bind_port = 5060
+    let mut c = frontend_new("db")
+    c.mode = "tcp"
+    c.bind_port = 3306
+    fes = append(fes, a)
+    fes = append(fes, b)
+    fes = append(fes, c)
+    let http = frontends_of_mode(fes, "http")
+    let udp = frontends_of_mode(fes, "udp")
+    assert_eq(len(http), 1)
+    assert_eq(len(udp), 1)
+    assert_eq_str(udp[0].name, "sip")
+
+    let mut uls = make([]UdpListener, 0, 1)
+    // empty sock placeholder — only frontend name used by filter
+    uls = append(uls, UdpListener { frontend: b, sock: game_udp_bind(0), fd: -1 })
+    let mut flows = make([]UdpFlow, 0, 2)
+    flows = append(flows, UdpFlow { frontend: "sip", backend: "x", call_id: "1", client_peer: 0, server_peer: 0, server_idx: 0, last_seen_ms: 0 })
+    flows = append(flows, UdpFlow { frontend: "gone", backend: "x", call_id: "2", client_peer: 0, server_peer: 0, server_idx: 0, last_seen_ms: 0 })
+    let kept = filter_udp_flows(flows, uls)
+    assert_eq(len(kept), 1)
+    assert_eq_str(kept[0].frontend, "sip")
+    // cleanup ephemeral bind
+    if len(uls) > 0 {
+        game_udp_close(uls[0].sock)
+    }
+
+    let mut hls = make([]HttpListener, 0, 1)
+    hls = append(hls, HttpListener {
+        frontend: a,
+        fd: -1,
+        tls: 0,
+        tls_srv: tls_server_new("", ""),
+        h3: 0,
+        h3_handle: -1
+    })
+    let mut h3s = make([]H3Listener, 0, 1)
+    h3s = append(h3s, H3Listener { frontend: a, handle: 42, fd: 7, frontend_idx: 0 })
+    let synced = sync_http_h3_handles(hls, h3s)
+    assert_eq(synced[0].h3, 1)
+    assert_eq(synced[0].h3_handle, 42)
+    let empty_h3 = make([]H3Listener, 0, 0)
+    let synced2 = sync_http_h3_handles(synced, empty_h3)
+    assert_eq(synced2[0].h3, 0)
+    assert_eq(synced2[0].h3_handle, 0 - 1)
 }
 
 fn TestFindHttpListenerByNameAndBind() {
@@ -890,19 +1055,45 @@ fn TestStickTableGetSetAndPick() {
     let mut table = make(map[string]string)
     let key = stick_make_key("app", "src", "10.0.0.9")
     let now = 1000000
-    let t1, c1 = stick_table_set(table, key, "b", be.stick_expire_ms, be.stick_size, now, 0)
+    let t1, c1, exp1 = stick_table_set(table, key, "b", be.stick_expire_ms, be.stick_size, now, 0)
     assert_eq(c1, 1)
+    assert(exp1 > now)
     assert_eq_str(stick_table_get(t1, key, now + 10), "b")
     assert_eq_str(stick_table_get(t1, key, now + 999999), "")
-    let si, t2, c2 = pick_server_stick(servers, be, "client", "", "", t1, key, now + 10, c1)
+    let si, t2, c2, pline = pick_server_stick(servers, be, "client", "", "", t1, key, now + 10, c1)
+    let _ = pline
     assert_eq(si, 1)
     assert_eq(c2, 1)
     let _ = t2
     // Cookie sticky wins over table
-    let si2, t3, c3 = pick_server_stick(servers, be, "client", "SID", "a", t1, key, now + 10, c1)
+    let si2, t3, c3, pline2 = pick_server_stick(servers, be, "client", "SID", "a", t1, key, now + 10, c1)
     assert_eq(si2, 0)
     let _ = t3
     let _ = c3
+    let _ = pline2
+
+    // stick_peer_host strips :port so cleartext + TLS keys match by client IP
+    assert_eq_str(stick_peer_host("10.0.0.9:54321"), "10.0.0.9")
+    assert_eq_str(stick_peer_host("[2001:db8::1]:443"), "2001:db8::1")
+    assert_eq_str(stick_peer_host("10.0.0.9"), "10.0.0.9")
+    let mut fe = frontend_new("web")
+    fe.xff = 0
+    assert_eq_str(stick_client_key(fe, "10.0.0.9:9999", ""), "10.0.0.9")
+    fe.xff = 1
+    assert_eq_str(stick_client_key(fe, "10.0.0.9:9999", "1.2.3.4, 10.0.0.1"), "1.2.3.4")
+    // H3 path: no peer IP — fall back to XFF even when xff directive is off
+    fe.xff = 0
+    assert_eq_str(stick_client_key(fe, "", "9.8.7.6, 10.0.0.1"), "9.8.7.6")
+    assert_eq_str(stick_client_key(fe, "", ""), "")
+    // H3 stick pick with XFF-derived key
+    let h3_key = stick_make_key("app", "src", "9.8.7.6")
+    let t_h3, c_h3, exp_h3 = stick_table_set(table, h3_key, "a", be.stick_expire_ms, be.stick_size, now, 0)
+    assert(exp_h3 > now)
+    let si_h3, t_h3b, c_h3b, pl_h3 = pick_server_stick(servers, be, "client", "", "", t_h3, h3_key, now + 10, c_h3)
+    assert_eq(si_h3, 0)
+    assert(str_has_prefix(pl_h3, "UPSERT ") or str_eq(pl_h3, ""))
+    let _ = t_h3b
+    let _ = c_h3b
 }
 
 fn TestStickOnSrcParse() {
@@ -912,6 +1103,96 @@ fn TestStickOnSrcParse() {
     assert_eq_str(w.backends[0].stick_on, "src")
     assert_eq(w.backends[0].stick_size, 5000)
     assert_eq(w.backends[0].stick_expire_ms, 600000)
+}
+
+fn TestPeersConfigAndProtocol() {
+    let raw = "peers\n  enabled on\n  name leba-a\n  cluster edge\n  bind 127.0.0.1:19024\n  secret s3cret\n  peer leba-b 127.0.0.1:19025\nfrontend web\n  bind 1\n  mode http\n  default_backend app\nbackend app\n  stick on src\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.peers.enabled, 1)
+    assert_eq_str(w.peers.name, "leba-a")
+    assert_eq_str(w.peers.cluster, "edge")
+    assert_eq(w.peers.bind_port, 19024)
+    assert_eq_str(w.peers.bind_host, "127.0.0.1")
+    assert_eq_str(w.peers.secret, "s3cret")
+    assert_eq(len(w.peers.peers), 1)
+    assert_eq_str(w.peers.peers[0].name, "leba-b")
+    assert_eq(w.peers.peers[0].port, 19025)
+    assert_eq(peers_ready(w.peers), 1)
+
+    let fp1 = peers_config_fingerprint(w.peers)
+    let fp2 = peers_config_fingerprint(w.peers)
+    assert_eq_str(fp1, fp2)
+    let mut peers_b = w.peers
+    peers_b.secret = "other"
+    assert(not str_eq(fp1, peers_config_fingerprint(peers_b)))
+
+    // Peers listen rebind: open, keep, move port, disable.
+    let el = evloop_new()
+    let fd1 = rebind_peers_listener(el, 0 - 1, peers_config_new(), w.peers)
+    assert(fd1 >= 0)
+    let fd2 = rebind_peers_listener(el, fd1, w.peers, w.peers)
+    assert_eq(fd2, fd1)
+    let mut peers_port = w.peers
+    peers_port.bind_port = w.peers.bind_port + 11
+    let fd3 = rebind_peers_listener(el, fd2, w.peers, peers_port)
+    assert(fd3 >= 0)
+    let fd4 = rebind_peers_listener(el, fd3, peers_port, peers_config_new())
+    assert_eq(fd4, 0 - 1)
+    let _ = evloop_close(el)
+
+    // Apply reload: identity change forces session reset.
+    let el2 = evloop_new()
+    let listen0 = rebind_peers_listener(el2, 0 - 1, peers_config_new(), w.peers)
+    let mut fake = make([]PeerConn, 0, 1)
+    fake = append(fake, peer_conn_new(0 - 1, 1, 0))
+    let nfd, nconns, force = peers_apply_reload(el2, listen0, w.peers, fake, peers_b)
+    assert_eq(force, 1)
+    assert_eq(len(nconns), 0)
+    assert(nfd >= 0)
+    let _ = rebind_peers_listener(el2, nfd, peers_b, peers_config_new())
+    let _ = evloop_close(el2)
+
+    let tok = peers_auth_token("s3cret", "leba-b", "edge")
+    assert(str_len(tok) == 64)
+    let hello = "HELLO leba-b edge " + tok
+    let mut table = make(map[string]string)
+    let ar = peers_apply_line(hello, w.peers, table, 0, 1000000, "", 0)
+    assert_eq(ar.hello_ok, 1)
+    assert_eq_str(ar.remote_name, "leba-b")
+    assert(str_has_prefix(ar.reply, "OK "))
+    assert_eq(ar.close, 0)
+
+    // Bad token closes.
+    let bad = peers_apply_line("HELLO leba-b edge deadbeef", w.peers, table, 0, 1000000, "", 0)
+    assert_eq(bad.close, 1)
+
+    // Upsert after hello.
+    let ar2 = peers_apply_line("UPSERT app|src|1.2.3.4 srv1 2000000", w.peers, table, 0, 1000000, "leba-b", 1)
+    assert_eq_str(stick_table_get(ar2.table, "app|src|1.2.3.4", 1500000), "srv1")
+    assert_eq(ar2.count, 1)
+
+    // Expired upsert ignored.
+    let ar3 = peers_apply_line("UPSERT app|src|9.9.9.9 old 500", w.peers, ar2.table, ar2.count, 1000000, "leba-b", 1)
+    assert_eq_str(stick_table_get(ar3.table, "app|src|9.9.9.9", 1000000), "")
+
+    let line = peers_encode_upsert("app|src|1.2.3.4", "srv1", 2000000)
+    assert(str_has_prefix(line, "UPSERT "))
+    assert(str_contains(line, "srv1"))
+
+    // pick_server_stick emits peer line on local write
+    let mut servers = make([]Server, 0, 1)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "app"))
+    let mut be = backend_new("app")
+    be.stick_on = "src"
+    be.stick_expire_ms = 60000
+    let key = stick_make_key("app", "src", "10.0.0.1")
+    let empty = make(map[string]string)
+    let si, t2, c2, pl = pick_server_stick(servers, be, "c", "", "", empty, key, 1000000, 0)
+    assert_eq(si, 0)
+    assert_eq(c2, 1)
+    assert(str_has_prefix(pl, "UPSERT "))
+    let _ = t2
 }
 
 fn TestRedirectAndDeadRouteParse() {
@@ -943,7 +1224,7 @@ fn TestRedirectAndDeadRouteParse() {
 }
 
 fn TestFullConfigReloadPreservesServerState() {
-    let raw = "frontend web\n  bind 18080\n  mode http\n  route default -> app\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let raw = "peers\n  enabled on\n  name leba-a\n  cluster edge\n  bind 127.0.0.1:19024\n  secret s3cret\n  peer leba-b 127.0.0.1:19025\noidc\n  enabled on\n  issuer https://idp.example.com\n  client_id cid\n  client_secret csec\n  redirect_uri https://admin.example.com/oidc/callback\nfrontend web\n  bind 18080\n  mode http\n  route default -> app\nfrontend stats\n  bind 127.0.0.1:18404\n  mode stats\n  auth admin:pass:admin\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
     let w = parse_config_text(raw)
     assert_eq(w.ok, 1)
     let mut servers = w.servers
@@ -963,6 +1244,14 @@ fn TestFullConfigReloadPreservesServerState() {
     assert_eq(fr.servers[0].drain, 1)
     assert_eq(fr.servers[0].total_req, 99)
     assert_eq(fr.servers[0].conns, 3)
+    // OIDC + peers travel with FullReload for live apply
+    assert_eq(fr.peers.enabled, 1)
+    assert_eq_str(fr.peers.name, "leba-a")
+    assert_eq(peers_ready(fr.peers), 1)
+    assert_eq(fr.oidc.enabled, 1)
+    assert_eq_str(fr.oidc.client_id, "cid")
+    assert_eq(oidc_ready(fr.oidc), 1)
+    assert_eq(fr.stats_port, 18404)
 }
 
 fn TestAppBasicAuthParseAndCheck() {

@@ -38,9 +38,9 @@ All recommendations are grounded in the current code layout (`main.mko`, `src/pr
 | HTTP quality | Structured logs, XFF flag, header rules **parsed** into `World.header_rules` | **Header rules never applied** — `apply_*_headers` exist but no dispatch/worker call site; production upstream is almost always **`http_forward_full` → HTTP/1.1 + Connection: close** because **`init_server_pools` is never called** (pool stays `-1`) |
 | Upstream pool code | Workers already branch on `pool >= 0` → `http_forward_fd` (Mako builds **HTTP/1.1 + keep-alive**); `tcp_pool_release(pool, fd, ok)` gates reuse on success + fd probe | Pool path dead until wired; release uses `ok` only — no parse of upstream `Connection` header; test helper `upstream_http_request_text` (HTTP/1.0 close) is **not used in production** |
 | Client responses | — | Always `Connection: close` in `raw_http_respond_full` / `tls_http_respond_full`; workers always close client fd |
-| Admin UX | Dashboard, Proxy Hosts tab, vhost-create/cert, RBAC | Not NPM-complete: no ACME product path, no multi-cert SNI, no access lists product surface |
+| Admin UX | Dashboard, Proxy Hosts tab, vhost-create/cert, multi-cert SNI, RBAC | Not NPM-complete: no ACME product path, no access lists product surface |
 | Packaging | systemd unit under `deploy/linux/` | **No LICENSE**, **no Dockerfile**, version drift, CONFIG_REFERENCE watcher drift |
-| Enterprise | Single process, encrypted state_file | No HA pair, peers, WAF, OIDC/SAML SSO, service discovery beyond servers_file |
+| Enterprise | Single process, encrypted state_file, WAF, DNS resolve/expand/SRV, experimental stick peers, admin OIDC SSO | SAML; peers not production-hardened; OIDC without JWKS RS256 re-verify |
 
 ### Pain points operators feel today
 
@@ -567,7 +567,11 @@ Mako implementation (`mako_tls_server_reload`): updates `SSL_CTX` in place via `
 
 ### 1.2c Multi-cert SNI vs NPM beat criteria (D18)
 
-**Today:** one `tls_cert`/`tls_key`/`TlsServer` per `HttpListener` / bind. Mako `tls_server_new` has **no** multi-cert SNI callback API.
+**Shipped (Mako 0.2.1 + Leba):** default `tls_cert`/`tls_key` per frontend plus
+repeatable `tls_sni HOSTNAME CERT KEY` (exact or `*.example.com`). Runtime calls
+Mako `tls_server_sni_add` on listener open / rebind / `/admin/tls-reload`.
+Admin `vhost-create`/`vhost-cert` with hostname install SNI live.
+**Historical note:** earlier designs assumed no multi-cert API; that is closed.
 
 **Phase 1 honest beat criteria (chosen):**
 

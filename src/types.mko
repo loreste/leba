@@ -27,8 +27,54 @@ struct Server {
     last_resolve_ms: int
     // 1 = expand A/AAAA into multiple members (template itself is not pickable).
     resolve_expand: int
+    // 1 = expand via DNS SRV (implies resolve+expand; ports/targets from SRV answers).
+    resolve_srv: int
     // If non-empty, this row is a synthetic child of that template server name.
     resolve_parent: string
+}
+
+// One DNS SRV RR (priority, weight, port, target hostname).
+struct DnsSrvRecord {
+    priority: int
+    weight: int
+    port: int
+    target: string
+}
+
+// --- stick-table peers (experimental HA sync) ------------------------------
+
+struct PeerNode {
+    name: string
+    host: string
+    port: int
+}
+
+struct PeersConfig {
+    // 1 = experimental peers enabled
+    enabled: int
+    // Local node name (required when enabled)
+    name: string
+    // Cluster id — HELLO must match
+    cluster: string
+    bind_host: string
+    bind_port: int
+    // Shared secret for HELLO HMAC (required when enabled)
+    secret: string
+    peers: []PeerNode
+}
+
+struct PeerConn {
+    fd: int
+    // Remote node name after successful HELLO
+    name: string
+    // Accumulated read buffer (line protocol)
+    buf: string
+    // 1 after mutual HELLO OK
+    hello_ok: int
+    // 1 if we dialed this peer (vs accepted)
+    is_outbound: int
+    // Index into PeersConfig.peers for outbound reconnect (-1 for inbound)
+    peer_idx: int
 }
 
 struct Backend {
@@ -107,6 +153,14 @@ struct UdpFlow {
 
 // --- frontends -------------------------------------------------------------
 
+// Extra certificate selected by TLS SNI (Mako tls_server_sni_add).
+// hostname: exact name or left-most wildcard (e.g. api.example.com, *.example.com).
+struct TlsSniEntry {
+    hostname: string
+    cert: string
+    key: string
+}
+
 struct Frontend {
     name: string
     bind_host: string
@@ -116,6 +170,10 @@ struct Frontend {
     tls_cert: string
     tls_key: string
     tls_client_ca: string
+    // Additional certs by SNI; default remains tls_cert/tls_key.
+    tls_sni: []TlsSniEntry
+    // 1 = require TLS 1.3 only (Mako tls_server_new_tls13). 0 = default OpenSSL.
+    tls_min_13: int
     protocols: string
     sticky_cookie: string
     rate_limit: int
@@ -264,7 +322,107 @@ fn server_new(name: string, host: string, port: int, weight: int, check: int, ba
         resolve_name: "",
         last_resolve_ms: 0,
         resolve_expand: 0,
+        resolve_srv: 0,
         resolve_parent: ""
+    }
+}
+
+fn dns_srv_record_new(priority: int, weight: int, port: int, target: string) -> DnsSrvRecord {
+    return DnsSrvRecord {
+        priority: priority,
+        weight: weight,
+        port: port,
+        target: target
+    }
+}
+
+fn peer_node_new(name: string, host: string, port: int) -> PeerNode {
+    return PeerNode {
+        name: name,
+        host: host,
+        port: port
+    }
+}
+
+fn peers_config_new() -> PeersConfig {
+    return PeersConfig {
+        enabled: 0,
+        name: "",
+        cluster: "default",
+        bind_host: "0.0.0.0",
+        bind_port: 0,
+        secret: "",
+        peers: make([]PeerNode, 0, 0)
+    }
+}
+
+fn peer_conn_new(fd: int, is_outbound: int, peer_idx: int) -> PeerConn {
+    return PeerConn {
+        fd: fd,
+        name: "",
+        buf: "",
+        hello_ok: 0,
+        is_outbound: is_outbound,
+        peer_idx: peer_idx
+    }
+}
+
+// --- Admin OIDC (authorization code + session cookie) ----------------------
+
+struct OidcConfig {
+    enabled: int
+    issuer: string
+    client_id: string
+    client_secret: string
+    redirect_uri: string
+    scopes: string
+    // Optional endpoint overrides (else discovered from issuer).
+    authorize_url: string
+    token_url: string
+    userinfo_url: string
+    // JWKS URI for RS256 id_token verify (Mako jwt_verify_jwks). Discovered if empty.
+    jwks_uri: string
+    // Optional RSA public key PEM or path for jwt_verify_rs256 (overrides JWKS when set).
+    rsa_public_key: string
+    // 1 = verify id_token with JWKS/PEM when material is available (default).
+    // 0 = decode-only (not recommended; soft-trust token endpoint TLS).
+    verify_jwt: int
+    default_role: string
+    // If groups claim contains these values, map to role (admin wins).
+    admin_group: string
+    operator_group: string
+    groups_claim: string
+    email_claim: string
+    // PEM CA file for HTTPS to IdP (empty = Mako platform trust / system paths).
+    ca_file: string
+    // 1 = skip TLS verify to IdP (dev only; uses legacy client, not https_*).
+    insecure: int
+    // 1 = hide password form; OIDC only.
+    disable_password: int
+}
+
+fn oidc_config_new() -> OidcConfig {
+    return OidcConfig {
+        enabled: 0,
+        issuer: "",
+        client_id: "",
+        client_secret: "",
+        redirect_uri: "",
+        scopes: "openid email profile",
+        authorize_url: "",
+        token_url: "",
+        userinfo_url: "",
+        jwks_uri: "",
+        rsa_public_key: "",
+        verify_jwt: 1,
+        default_role: "viewer",
+        admin_group: "",
+        operator_group: "",
+        groups_claim: "groups",
+        email_claim: "email",
+        ca_file: "",
+        insecure: 0,
+        disable_password: 0
     }
 }
 
@@ -289,6 +447,14 @@ fn backend_new(name: string) -> Backend {
     }
 }
 
+fn tls_sni_entry_new(hostname: string, cert: string, key: string) -> TlsSniEntry {
+    return TlsSniEntry {
+        hostname: hostname,
+        cert: cert,
+        key: key
+    }
+}
+
 fn frontend_new(name: string) -> Frontend {
     return Frontend {
         name: name,
@@ -299,6 +465,8 @@ fn frontend_new(name: string) -> Frontend {
         tls_cert: "",
         tls_key: "",
         tls_client_ca: "",
+        tls_sni: make([]TlsSniEntry, 0, 0),
+        tls_min_13: 0,
         protocols: "http/1.1",
         sticky_cookie: "",
         rate_limit: 0,
@@ -317,6 +485,42 @@ fn frontend_new(name: string) -> Frontend {
         redirect_https: 0,
         redirect_code: 301
     }
+}
+
+// Upsert an SNI cert by hostname (case-sensitive config key; Mako matches case-insensitively).
+fn frontend_upsert_tls_sni(fe: Frontend, hostname: string, cert: string, key: string) -> Frontend {
+    let mut out = fe
+    let mut next = make([]TlsSniEntry, 0, len(out.tls_sni) + 1)
+    let mut found = 0
+    for _, e in range out.tls_sni {
+        if str_eq(e.hostname, hostname) {
+            next = append(next, tls_sni_entry_new(hostname, cert, key))
+            found = 1
+        } else {
+            next = append(next, e)
+        }
+    }
+    if found == 0 {
+        next = append(next, tls_sni_entry_new(hostname, cert, key))
+    }
+    out.tls_sni = next
+    return out
+}
+
+// Stable fingerprint for SNI list changes (recreate TLS server when this differs).
+fn frontend_tls_sni_fingerprint(fe: Frontend) -> string {
+    let mut b = str_builder()
+    for i, e in range fe.tls_sni {
+        if i > 0 {
+            builder_write(b, ";")
+        }
+        builder_write(b, e.hostname)
+        builder_write(b, "|")
+        builder_write(b, e.cert)
+        builder_write(b, "|")
+        builder_write(b, e.key)
+    }
+    return builder_string(b)
 }
 
 fn app_auth_user_new(frontend: string, user: string, pass: string) -> AppAuthUser {

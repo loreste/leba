@@ -78,9 +78,12 @@ fn frontend_at_maxconn(servers: []Server, fe: Frontend) -> int {
 }
 
 fn server_eligible(s: Server) -> int {
-    // Expand templates are placeholders only — children carry traffic.
+    // Expand / SRV templates are placeholders only — children carry traffic.
     if s.resolve == 1 {
         if s.resolve_expand == 1 {
+            return 0
+        }
+        if s.resolve_srv == 1 {
             return 0
         }
     }
@@ -311,7 +314,7 @@ fn stick_table_get(table: map[string]string, key: string, now_ms: int) -> string
     return stick_decode_server(enc)
 }
 
-// Returns updated table and new entry count (approx: +1 only when key was empty).
+// Returns updated table, new entry count, absolute expiry (0 if no write).
 fn stick_table_set(
     table: map[string]string,
     key: string,
@@ -320,12 +323,12 @@ fn stick_table_set(
     max_size: int,
     now_ms: int,
     entry_count: int
-) -> (map[string]string, int) {
+) -> (map[string]string, int, int) {
     if str_eq(key, "") {
-        return (table, entry_count)
+        return (table, entry_count, 0)
     }
     if str_eq(server_name, "") {
-        return (table, entry_count)
+        return (table, entry_count, 0)
     }
     let mut out = table
     let mut count = entry_count
@@ -337,7 +340,7 @@ fn stick_table_set(
     if str_eq(existing, "") {
         if count >= max {
             // At capacity — refuse new keys (existing keys still refresh).
-            return (out, count)
+            return (out, count, 0)
         }
         count = count + 1
     }
@@ -345,8 +348,9 @@ fn stick_table_set(
     if ttl <= 0 {
         ttl = 1800000
     }
-    out[key] = stick_encode(server_name, now_ms + ttl)
-    return (out, count)
+    let exp = now_ms + ttl
+    out[key] = stick_encode(server_name, exp)
+    return (out, count, exp)
 }
 
 fn find_server_idx_by_name(servers: []Server, backend: string, name: string) -> int {
@@ -361,7 +365,8 @@ fn find_server_idx_by_name(servers: []Server, backend: string, name: string) -> 
 }
 
 // Pick with sticky cookie (first), then stick table, then balance; may update stick table.
-// Returns (server_idx, table, entry_count).
+// Returns (server_idx, table, entry_count, peer_line).
+// peer_line is a peers UPSERT line when a local stick write happened (else "").
 fn pick_server_stick(
     servers: []Server,
     be: Backend,
@@ -372,9 +377,10 @@ fn pick_server_stick(
     stick_key: string,
     now_ms: int,
     entry_count: int
-) -> (int, map[string]string, int) {
+) -> (int, map[string]string, int, string) {
     let mut table = stick_table
     let mut count = entry_count
+    let mut peer_line = ""
     // Cookie sticky first (inside pick_server). Table only when no usable cookie pin.
     let mut cookie_pinned = 0
     if not str_eq(sticky_name, "") {
@@ -383,7 +389,7 @@ fn pick_server_stick(
             if pi >= 0 {
                 if server_eligible(servers[pi]) == 1 {
                     cookie_pinned = 1
-                    return (pi, table, count)
+                    return (pi, table, count, peer_line)
                 }
             }
         }
@@ -395,7 +401,7 @@ fn pick_server_stick(
                 let hi = find_server_idx_by_name(servers, be.name, hit)
                 if hi >= 0 {
                     if server_eligible(servers[hi]) == 1 {
-                        return (hi, table, count)
+                        return (hi, table, count, peer_line)
                     }
                 }
             }
@@ -406,30 +412,66 @@ fn pick_server_stick(
         if not str_eq(be.stick_on, "") {
             if not str_eq(stick_key, "") {
                 if cookie_pinned == 0 {
-                    let t2, c2 = stick_table_set(table, stick_key, servers[si].name, be.stick_expire_ms, be.stick_size, now_ms, count)
+                    let t2, c2, exp = stick_table_set(table, stick_key, servers[si].name, be.stick_expire_ms, be.stick_size, now_ms, count)
                     table = t2
                     count = c2
+                    if exp > 0 {
+                        peer_line = "UPSERT " + stick_key + " " + servers[si].name + " " + int_to_string(exp) + "\n"
+                    }
                 }
             }
         }
     }
-    return (si, table, count)
+    return (si, table, count, peer_line)
+}
+
+// Strip port from tcp_peer_addr result ("ip:port" or "[v6]:port") → bare host.
+fn stick_peer_host(peer_addr: string) -> string {
+    let t = str_trim_space(peer_addr)
+    if str_eq(t, "") {
+        return ""
+    }
+    if str_has_prefix(t, "[") {
+        let end = str_index(t, "]")
+        if end > 1 {
+            return substr(t, 1, end)
+        }
+    }
+    let colon = str_last_index(t, ":")
+    if colon > 0 {
+        return substr(t, 0, colon)
+    }
+    return t
+}
+
+// First hop of a comma-separated X-Forwarded-For value (or "").
+fn stick_xff_first(xff_header: string) -> string {
+    if str_eq(xff_header, "") {
+        return ""
+    }
+    let parts = str_split(xff_header, ",")
+    if len(parts) > 0 {
+        return str_trim_space(parts[0])
+    }
+    return ""
 }
 
 // Client identity for stick-on-src (optional first X-Forwarded-For hop).
+// peer_ip may be bare IP or tcp_peer_addr "ip:port" form.
+// When peer is unavailable (HTTP/3 has no peer-addr API), fall back to XFF.
 fn stick_client_key(fe: Frontend, peer_ip: string, xff_header: string) -> string {
     if fe.xff == 1 {
-        if not str_eq(xff_header, "") {
-            let parts = str_split(xff_header, ",")
-            if len(parts) > 0 {
-                let first = str_trim_space(parts[0])
-                if not str_eq(first, "") {
-                    return first
-                }
-            }
+        let first = stick_xff_first(xff_header)
+        if not str_eq(first, "") {
+            return first
         }
     }
-    return peer_ip
+    let peer = stick_peer_host(peer_ip)
+    if str_eq(peer, "") {
+        // H3 / unknown peer: use XFF when present so stick on src still works.
+        return stick_xff_first(xff_header)
+    }
+    return peer
 }
 
 fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {

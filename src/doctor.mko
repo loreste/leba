@@ -8,7 +8,7 @@ struct DoctorReport {
     text: string
 }
 
-// Full config reload result (table swap; bind rebind not included in v1).
+// Full config reload result (table swap; accept thread rebinds HTTP/TCP/UDP/H3/stats/peers).
 struct FullReload {
     ok: int
     error: string
@@ -26,6 +26,8 @@ struct FullReload {
     stats_pass: string
     state_file: string
     state_key: string
+    oidc: OidcConfig
+    peers: PeersConfig
 }
 
 fn full_config_reload(path: string, old_servers: []Server) -> FullReload {
@@ -45,7 +47,9 @@ fn full_config_reload(path: string, old_servers: []Server) -> FullReload {
         stats_user: "",
         stats_pass: "",
         state_file: "",
-        state_key: ""
+        state_key: "",
+        oidc: oidc_config_new(),
+        peers: peers_config_new()
     }
     let w = parse_config_file(path)
     if w.ok == 0 {
@@ -80,7 +84,9 @@ fn full_config_reload(path: string, old_servers: []Server) -> FullReload {
         stats_user: w.stats_user,
         stats_pass: w.stats_pass,
         state_file: w.state_file,
-        state_key: w.state_key
+        state_key: w.state_key,
+        oidc: w.oidc,
+        peers: w.peers
     }
 }
 
@@ -438,6 +444,41 @@ fn doctor_world(w: World) -> DoctorReport {
                 errors = errors + 1
             }
         }
+        if len(fe.tls_sni) > 0 {
+            if str_len(fe.tls_cert) == 0 {
+                builder_write(b, f"ERROR  frontend {fe.name} has tls_sni but no default tls_cert (required fallback)\n")
+                errors = errors + 1
+            }
+            for _, se in range fe.tls_sni {
+                if str_eq(se.hostname, "") {
+                    builder_write(b, f"ERROR  frontend {fe.name} tls_sni entry missing hostname\n")
+                    errors = errors + 1
+                }
+                if str_eq(se.cert, "") or str_eq(se.key, "") {
+                    builder_write(b, f"ERROR  frontend {fe.name} tls_sni {se.hostname} missing cert or key\n")
+                    errors = errors + 1
+                } else {
+                    let sc = read_file(se.cert)
+                    let sk = read_file(se.key)
+                    if str_eq(sc, "") {
+                        builder_write(b, f"ERROR  tls_sni cert not readable: {se.cert} (host={se.hostname})\n")
+                        errors = errors + 1
+                    }
+                    if str_eq(sk, "") {
+                        builder_write(b, f"ERROR  tls_sni key not readable: {se.key} (host={se.hostname})\n")
+                        errors = errors + 1
+                    }
+                }
+            }
+            if len(fe.tls_sni) > 0 {
+                builder_write(b, f"INFO   frontend {fe.name} multi-cert SNI: {len(fe.tls_sni)} entr")
+                if len(fe.tls_sni) == 1 {
+                    builder_write(b, "y\n")
+                } else {
+                    builder_write(b, "ies\n")
+                }
+            }
+        }
     }
 
     if has_stats_frontend == 1 {
@@ -481,6 +522,49 @@ fn doctor_world(w: World) -> DoctorReport {
                 builder_write(b, "  fix:  set defaults state_key or export LEBA_SESSION_SECRET\n")
                 warnings = warnings + 1
             }
+        }
+        if w.oidc.enabled == 1 {
+            if str_eq(w.oidc.client_id, "") {
+                builder_write(b, "ERROR  oidc enabled but client_id is empty\n")
+                errors = errors + 1
+            }
+            if str_eq(w.oidc.client_secret, "") {
+                builder_write(b, "ERROR  oidc enabled but client_secret is empty\n")
+                errors = errors + 1
+            }
+            if str_eq(w.oidc.redirect_uri, "") {
+                builder_write(b, "ERROR  oidc enabled but redirect_uri is empty\n")
+                errors = errors + 1
+            }
+            if str_eq(w.oidc.issuer, "") {
+                if str_eq(w.oidc.authorize_url, "") {
+                    builder_write(b, "ERROR  oidc needs issuer (discovery) or authorize_url+token_url\n")
+                    errors = errors + 1
+                } else {
+                    if str_eq(w.oidc.token_url, "") {
+                        builder_write(b, "ERROR  oidc needs issuer (discovery) or authorize_url+token_url\n")
+                        errors = errors + 1
+                    }
+                }
+            }
+            if w.oidc.insecure == 1 {
+                builder_write(b, "WARN   oidc insecure on — IdP TLS verification disabled (dev only)\n")
+                warnings = warnings + 1
+            }
+            if w.oidc.verify_jwt == 0 {
+                builder_write(b, "WARN   oidc verify_jwt off — id_token signature not checked\n")
+                warnings = warnings + 1
+            } else {
+                if str_eq(w.oidc.jwks_uri, "") {
+                    if str_eq(w.oidc.rsa_public_key, "") {
+                        builder_write(b, "INFO   oidc JWT verify: JWKS from discovery when available\n")
+                    }
+                }
+            }
+            if not str_eq(w.oidc.jwks_uri, "") {
+                builder_write(b, f"INFO   oidc jwks_uri={w.oidc.jwks_uri}\n")
+            }
+            builder_write(b, f"INFO   oidc SSO enabled default_role={w.oidc.default_role}\n")
         }
     }
 

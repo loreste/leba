@@ -30,7 +30,17 @@ fn server_json(s: Server) -> string {
     builder_write(b, int_to_string(s.total_err))
     builder_write(b, ",\"total_bytes\":")
     builder_write(b, int_to_string(s.total_bytes))
-    builder_write(b, "}")
+    builder_write(b, ",\"resolve\":")
+    builder_write(b, int_to_string(s.resolve))
+    builder_write(b, ",\"resolve_expand\":")
+    builder_write(b, int_to_string(s.resolve_expand))
+    builder_write(b, ",\"resolve_srv\":")
+    builder_write(b, int_to_string(s.resolve_srv))
+    builder_write(b, ",\"resolve_name\":\"")
+    builder_write(b, json_escape(s.resolve_name))
+    builder_write(b, "\",\"resolve_parent\":\"")
+    builder_write(b, json_escape(s.resolve_parent))
+    builder_write(b, "\"}")
     return builder_string(b)
 }
 
@@ -64,6 +74,14 @@ fn backend_json(be: Backend, servers: []Server) -> string {
     builder_write(b, int_to_string(be.connect_timeout_ms))
     builder_write(b, ",\"maxconn\":")
     builder_write(b, int_to_string(be.maxconn))
+    builder_write(b, ",\"stick_on\":\"")
+    builder_write(b, json_escape(be.stick_on))
+    builder_write(b, "\",\"stick_size\":")
+    builder_write(b, int_to_string(be.stick_size))
+    builder_write(b, ",\"stick_expire_ms\":")
+    builder_write(b, int_to_string(be.stick_expire_ms))
+    builder_write(b, ",\"resolve_interval_ms\":")
+    builder_write(b, int_to_string(be.resolve_interval_ms))
     builder_write(b, "}")
     return builder_string(b)
 }
@@ -278,13 +296,19 @@ fn metrics_text(
     st: LiveStats,
     frontends: []Frontend,
     backends: []Backend,
-    servers: []Server
+    servers: []Server,
+    oidc: OidcConfig,
+    peers: PeersConfig,
+    stick_count: int
 ) -> string {
     let uptime = now_ms() - st.started_ms
     let mut b = str_builder()
     builder_write(b, "# HELP leba_uptime_ms Process uptime in milliseconds.\n")
     builder_write(b, "# TYPE leba_uptime_ms gauge\n")
     prom_line0(b, "leba_uptime_ms", uptime)
+    builder_write(b, "# HELP leba_info Build/version info (always 1).\n")
+    builder_write(b, "# TYPE leba_info gauge\n")
+    builder_write(b, "leba_info{version=\"0.10.0\"} 1\n")
     builder_write(b, "# HELP leba_requests_total Total proxied requests.\n")
     builder_write(b, "# TYPE leba_requests_total counter\n")
     prom_line0(b, "leba_requests_total", st.total_req)
@@ -368,6 +392,53 @@ fn metrics_text(
         builder_write(b, f"leba_server_errors_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_err}\n")
         builder_write(b, f"leba_server_bytes_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_bytes}\n")
     }
+
+    // Stick tables (process-local entry count + which backends use stick on src)
+    builder_write(b, "# HELP leba_stick_entries Stick table entries currently tracked.\n")
+    builder_write(b, "# TYPE leba_stick_entries gauge\n")
+    prom_line0(b, "leba_stick_entries", stick_count)
+    builder_write(b, "# HELP leba_backend_stick Backend uses stick-on-src (1) or not (0).\n")
+    builder_write(b, "# TYPE leba_backend_stick gauge\n")
+    for _, be2 in range backends {
+        let mut stick_on = 0
+        if str_eq(be2.stick_on, "src") {
+            stick_on = 1
+        }
+        builder_write(b, f"leba_backend_stick{{backend=\"{prom_escape(be2.name)}\",stick_on=\"{prom_escape(be2.stick_on)}\"}} {stick_on}\n")
+    }
+
+    // OIDC / peers (config readiness; secrets never exposed)
+    builder_write(b, "# HELP leba_oidc_enabled OIDC section enabled.\n")
+    builder_write(b, "# TYPE leba_oidc_enabled gauge\n")
+    prom_line0(b, "leba_oidc_enabled", oidc.enabled)
+    builder_write(b, "# HELP leba_oidc_ready OIDC client is ready (credentials + endpoints).\n")
+    builder_write(b, "# TYPE leba_oidc_ready gauge\n")
+    prom_line0(b, "leba_oidc_ready", oidc_ready(oidc))
+    builder_write(b, "# HELP leba_peers_enabled Stick-table peers enabled.\n")
+    builder_write(b, "# TYPE leba_peers_enabled gauge\n")
+    prom_line0(b, "leba_peers_enabled", peers.enabled)
+    builder_write(b, "# HELP leba_peers_ready Peers config is ready (name, secret, bind).\n")
+    builder_write(b, "# TYPE leba_peers_ready gauge\n")
+    prom_line0(b, "leba_peers_ready", peers_ready(peers))
+    builder_write(b, "# HELP leba_peers_remotes Configured remote peer count.\n")
+    builder_write(b, "# TYPE leba_peers_remotes gauge\n")
+    prom_line0(b, "leba_peers_remotes", len(peers.peers))
+
+    // TLS / H3 surface per frontend
+    builder_write(b, "# HELP leba_frontend_tls Frontend has TLS cert configured.\n")
+    builder_write(b, "# TYPE leba_frontend_tls gauge\n")
+    builder_write(b, "# HELP leba_frontend_sni_entries Multi-cert SNI entries on a frontend.\n")
+    builder_write(b, "# TYPE leba_frontend_sni_entries gauge\n")
+    for _, fe2 in range frontends {
+        let mut tls_on = 0
+        if str_len(fe2.tls_cert) > 0 {
+            tls_on = 1
+        }
+        let fname = prom_escape(fe2.name)
+        builder_write(b, f"leba_frontend_tls{{frontend=\"{fname}\"}} {tls_on}\n")
+        builder_write(b, f"leba_frontend_sni_entries{{frontend=\"{fname}\"}} {len(fe2.tls_sni)}\n")
+    }
+
     return builder_string(b)
 }
 
@@ -377,13 +448,15 @@ fn stats_json(
     backends: []Backend,
     servers: []Server,
     routes: []Route,
-    acls: []AclRule
+    acls: []AclRule,
+    oidc: OidcConfig,
+    peers: PeersConfig
 ) -> string {
     let uptime = now_ms() - st.started_ms
     let mut b = str_builder()
     builder_write(b, "{")
     builder_write(b, "\"name\":\"leba\",")
-    builder_write(b, "\"version\":\"0.7.1\",")
+    builder_write(b, "\"version\":\"0.10.0\",")
     builder_write(b, "\"uptime_ms\":")
     builder_write(b, int_to_string(uptime))
     builder_write(b, ",\"total_req\":")
@@ -431,7 +504,20 @@ fn stats_json(
         builder_write(b, json_escape(fe.backend))
         builder_write(b, "\",\"tls_cert\":\"")
         builder_write(b, json_escape(fe.tls_cert))
-        builder_write(b, "\",\"access_log\":")
+        builder_write(b, "\",\"protocols\":\"")
+        builder_write(b, json_escape(fe.protocols))
+        builder_write(b, "\",\"tls_sni\":[")
+        for si, se in range fe.tls_sni {
+            if si > 0 {
+                builder_write(b, ",")
+            }
+            builder_write(b, "{\"hostname\":\"")
+            builder_write(b, json_escape(se.hostname))
+            builder_write(b, "\",\"cert\":\"")
+            builder_write(b, json_escape(se.cert))
+            builder_write(b, "\"}")
+        }
+        builder_write(b, "],\"access_log\":")
         builder_write(b, int_to_string(fe.access_log))
         builder_write(b, ",\"acme_webroot\":\"")
         builder_write(b, json_escape(fe.acme_webroot))
@@ -441,8 +527,12 @@ fn stats_json(
         builder_write(b, json_escape(fe.waf_mode))
         builder_write(b, "\",\"waf_url\":\"")
         builder_write(b, json_escape(fe.waf_url))
+        builder_write(b, "\",\"waf_fail\":\"")
+        builder_write(b, json_escape(fe.waf_fail))
         builder_write(b, "\",\"redirect_https\":")
         builder_write(b, int_to_string(fe.redirect_https))
+        builder_write(b, ",\"xff\":")
+        builder_write(b, int_to_string(fe.xff))
         builder_write(b, "}")
     }
     builder_write(b, "],\"backends\":[")
@@ -473,7 +563,43 @@ fn stats_json(
         }
         builder_write(b, acl_json(ac))
     }
-    builder_write(b, "]}\n")
+    // OIDC status (no client_secret)
+    builder_write(b, "],\"oidc\":{")
+    builder_write(b, "\"enabled\":")
+    builder_write(b, int_to_string(oidc.enabled))
+    builder_write(b, ",\"ready\":")
+    builder_write(b, int_to_string(oidc_ready(oidc)))
+    builder_write(b, ",\"issuer\":\"")
+    builder_write(b, json_escape(oidc.issuer))
+    builder_write(b, "\",\"client_id\":\"")
+    builder_write(b, json_escape(oidc.client_id))
+    builder_write(b, "\",\"redirect_uri\":\"")
+    builder_write(b, json_escape(oidc.redirect_uri))
+    builder_write(b, "\",\"jwks_uri\":\"")
+    builder_write(b, json_escape(oidc.jwks_uri))
+    builder_write(b, "\",\"verify_jwt\":")
+    builder_write(b, int_to_string(oidc.verify_jwt))
+    builder_write(b, ",\"disable_password\":")
+    builder_write(b, int_to_string(oidc.disable_password))
+    builder_write(b, ",\"insecure\":")
+    builder_write(b, int_to_string(oidc.insecure))
+    // Peers status (no shared secret)
+    builder_write(b, "},\"peers\":{")
+    builder_write(b, "\"enabled\":")
+    builder_write(b, int_to_string(peers.enabled))
+    builder_write(b, ",\"ready\":")
+    builder_write(b, int_to_string(peers_ready(peers)))
+    builder_write(b, ",\"name\":\"")
+    builder_write(b, json_escape(peers.name))
+    builder_write(b, "\",\"cluster\":\"")
+    builder_write(b, json_escape(peers.cluster))
+    builder_write(b, "\",\"bind_host\":\"")
+    builder_write(b, json_escape(peers.bind_host))
+    builder_write(b, "\",\"bind_port\":")
+    builder_write(b, int_to_string(peers.bind_port))
+    builder_write(b, ",\"remote_count\":")
+    builder_write(b, int_to_string(len(peers.peers)))
+    builder_write(b, "}}\n")
     return builder_string(b)
 }
 
@@ -879,7 +1005,7 @@ fn http_header_from_raw(raw: string, name: string) -> string {
     return substr(rest, 0, end)
 }
 
-fn login_page_html() -> string {
+fn login_page_html(oidc_on: int, disable_password: int) -> string {
     let mut b = str_builder()
     builder_write(b, "<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">")
     builder_write(b, "<title>Leba Admin — Login</title>")
@@ -891,20 +1017,35 @@ fn login_page_html() -> string {
     builder_write(b, "label{display:block;color:var(--muted);font-size:.82rem;margin-bottom:.3rem}")
     builder_write(b, "input{width:100%;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:.7rem .85rem;margin-bottom:1rem;font:inherit}")
     builder_write(b, "input:focus{outline:none;border-color:var(--accent)}")
-    builder_write(b, "button{width:100%;padding:.75rem;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-weight:600;font-size:1rem;cursor:pointer}")
-    builder_write(b, "button:hover{opacity:.9}")
+    builder_write(b, "button,.sso{display:block;width:100%;padding:.75rem;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-weight:600;font-size:1rem;cursor:pointer;text-align:center;text-decoration:none}")
+    builder_write(b, "button:hover,.sso:hover{opacity:.9}")
+    builder_write(b, ".sso{background:linear-gradient(135deg,#0ea5e9,#0284c7);margin-bottom:1rem}")
+    builder_write(b, ".sep{text-align:center;color:var(--muted);font-size:.8rem;margin:1rem 0}")
     builder_write(b, ".err{color:#ff6b6b;font-size:.85rem;text-align:center;margin-top:.5rem;min-height:1.2rem}")
     builder_write(b, "</style></head><body>")
     builder_write(b, "<div class=card><div class=logo>L</div><h2>Leba Admin</h2>")
-    builder_write(b, "<form id=loginForm onsubmit=\"return doLogin(event)\">")
-    builder_write(b, "<label>Username</label><input id=user type=text autocomplete=username autofocus>")
-    builder_write(b, "<label>Password</label><input id=pass type=password autocomplete=current-password>")
-    builder_write(b, "<button type=submit>Sign in</button>")
-    builder_write(b, "<div class=err id=err></div></form>")
-    builder_write(b, "<script>async function doLogin(e){e.preventDefault();const u=document.getElementById('user').value;const p=document.getElementById('pass').value;")
-    builder_write(b, "const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p})});")
-    builder_write(b, "const d=await r.json();if(r.ok){window.location.href='/'}else{document.getElementById('err').textContent=d.error||'Login failed'}return false}")
-    builder_write(b, "</script></body></html>")
+    if oidc_on == 1 {
+        builder_write(b, "<a class=sso href=\"/oidc/login\">Sign in with SSO</a>")
+        if disable_password == 0 {
+            builder_write(b, "<div class=sep>or use a local account</div>")
+        }
+    }
+    if disable_password == 0 {
+        builder_write(b, "<form id=loginForm onsubmit=\"return doLogin(event)\">")
+        builder_write(b, "<label>Username</label><input id=user type=text autocomplete=username autofocus>")
+        builder_write(b, "<label>Password</label><input id=pass type=password autocomplete=current-password>")
+        builder_write(b, "<button type=submit>Sign in</button>")
+        builder_write(b, "<div class=err id=err></div></form>")
+        builder_write(b, "<script>async function doLogin(e){e.preventDefault();const u=document.getElementById('user').value;const p=document.getElementById('pass').value;")
+        builder_write(b, "const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p})});")
+        builder_write(b, "const d=await r.json();if(r.ok){window.location.href='/'}else{document.getElementById('err').textContent=d.error||'Login failed'}return false}")
+        builder_write(b, "</script>")
+    } else {
+        if oidc_on == 0 {
+            builder_write(b, "<p style=color:var(--muted);text-align:center>No login method configured.</p>")
+        }
+    }
+    builder_write(b, "</div></body></html>")
     return builder_string(b)
 }
 
@@ -937,7 +1078,10 @@ fn handle_stats_tls_conn(
     state_file: string,
     state_key: string,
     config_path: string,
-    config_dir: string
+    config_dir: string,
+    oidc: OidcConfig,
+    peers: PeersConfig,
+    stick_count: int
 ) -> StatsConnResult {
     let parsed = http_parse(raw)
     let method = http_parsed_method(parsed)
@@ -968,9 +1112,96 @@ fn handle_stats_tls_conn(
         return stats_conn_result(frontends, backends, ar.servers, routes, acls)
     }
 
+    let oidc_on = oidc_ready(oidc)
+
+    // ---- OIDC SSO ----
+    if str_eq(ponly, "/oidc/login") {
+        if oidc_on == 0 {
+            let _ = stats_tls_respond_json(conn, method, 404, "{\"error\":\"oidc disabled\"}\n")
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        let mut oc = oidc
+        if str_eq(oc.authorize_url, "") {
+            oc = oidc_discover(oc)
+        }
+        if str_eq(oc.authorize_url, "") {
+            let _ = stats_tls_respond_json(conn, method, 503, "{\"error\":\"oidc authorize_url unavailable\"}\n")
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        let state = oidc_make_state(state_key)
+        let loc = oidc_authorize_redirect_url(oc, state)
+        let mut rb = str_builder()
+        builder_write(rb, "HTTP/1.1 302 Found\r\nLocation: ")
+        builder_write(rb, loc)
+        builder_write(rb, "\r\nSet-Cookie: leba_oidc_state=")
+        builder_write(rb, state)
+        builder_write(rb, "; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600\r\n")
+        builder_write(rb, "Content-Length: 0\r\nConnection: close\r\n\r\n")
+        log_admin_audit(req_id, "", "", method, ponly, 302, "oidc_redirect")
+        let _ = tls_write(conn, builder_string(rb))
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
+    if str_eq(ponly, "/oidc/callback") {
+        if oidc_on == 0 {
+            let _ = stats_tls_respond_json(conn, method, 404, "{\"error\":\"oidc disabled\"}\n")
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        let code = query_value(path, "code")
+        let state = query_value(path, "state")
+        let ch = http_header_from_raw(raw, "Cookie")
+        let parts = str_split(ch, ";")
+        let mut st_cookie = ""
+        for _, part in range parts {
+            let trimmed = str_trim_space(part)
+            if str_has_prefix(trimmed, "leba_oidc_state=") {
+                st_cookie = substr(trimmed, 16, str_len(trimmed))
+            }
+        }
+        if str_eq(state, "") or not str_eq(state, st_cookie) {
+            log_admin_audit(req_id, "", "", method, ponly, 400, "oidc_state_mismatch")
+            let _ = stats_tls_respond_ct(conn, method, 400, "text/plain; charset=utf-8", "oidc state mismatch\n")
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        if oidc_check_state(state, state_key) == 0 {
+            log_admin_audit(req_id, "", "", method, ponly, 400, "oidc_state_invalid")
+            let _ = stats_tls_respond_ct(conn, method, 400, "text/plain; charset=utf-8", "oidc state invalid\n")
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        let mut oc2 = oidc
+        if str_eq(oc2.token_url, "") {
+            oc2 = oidc_discover(oc2)
+        }
+        let lr = oidc_exchange_code(oc2, code)
+        if lr.ok == 0 {
+            log_admin_audit(req_id, "", "", method, ponly, 401, "oidc_exchange_failed")
+            let mut eb = str_builder()
+            builder_write(eb, "{\"error\":\"oidc_exchange_failed\",\"detail\":\"")
+            builder_write(eb, json_escape(lr.error))
+            builder_write(eb, "\"}\n")
+            let _ = stats_tls_respond_json(conn, method, 401, builder_string(eb))
+            return stats_conn_result(frontends, backends, servers, routes, acls)
+        }
+        let token = session_sign(lr.user, lr.role, state_key)
+        let mut rb2 = str_builder()
+        builder_write(rb2, "HTTP/1.1 302 Found\r\nLocation: /\r\n")
+        builder_write(rb2, f"Set-Cookie: leba_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax\r\n")
+        builder_write(rb2, "Set-Cookie: leba_oidc_state=; Path=/; HttpOnly; Secure; Max-Age=0\r\n")
+        builder_write(rb2, "Content-Length: 0\r\nConnection: close\r\n\r\n")
+        log_admin_audit(req_id, lr.user, lr.role, method, ponly, 302, "oidc_login_ok")
+        let _ = tls_write(conn, builder_string(rb2))
+        return stats_conn_result(frontends, backends, servers, routes, acls)
+    }
+
     // ---- Session-based login/logout ----
     if str_eq(ponly, "/api/login") {
         if str_eq(method, "POST") {
+            if oidc.disable_password == 1 {
+                if oidc_on == 1 {
+                    let _ = stats_tls_respond_json(conn, method, 403, "{\"error\":\"password login disabled; use OIDC\"}\n")
+                    return stats_conn_result(frontends, backends, servers, routes, acls)
+                }
+            }
             // Try Basic Auth header first, then fall back to JSON body
             let mut login_role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
             let mut login_user = auth_user
@@ -1002,13 +1233,13 @@ fn handle_stats_tls_conn(
             return stats_conn_result(frontends, backends, servers, routes, acls)
         }
         // GET /api/login → serve login page
-        let body = login_page_html()
+        let body = login_page_html(oidc_on, oidc.disable_password)
         let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
 
     if str_eq(ponly, "/login") {
-        let body = login_page_html()
+        let body = login_page_html(oidc_on, oidc.disable_password)
         let _ = stats_tls_respond_ct(conn, method, 200, "text/html; charset=utf-8", body)
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
@@ -1076,6 +1307,25 @@ fn handle_stats_tls_conn(
                 scr.tls_reload = 1
             }
         }
+        if str_eq(ponly, "/admin/vhost-cert") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/vhost-create") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
+        if str_eq(ponly, "/admin/proxy-host") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
                 scr.full_reload = 1
@@ -1097,13 +1347,13 @@ fn handle_stats_tls_conn(
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/stats") {
-        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let body = stats_json(st, frontends, backends, servers, routes, acls, oidc, peers)
         let _ = stats_tls_respond_json(conn, method, 200, body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/metrics") {
-        let body = metrics_text(st, frontends, backends, servers)
+        let body = metrics_text(st, frontends, backends, servers, oidc, peers, stick_count)
         let _ = stats_tls_respond_ct(conn, method, 200, "text/plain; version=0.0.4; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
@@ -1128,7 +1378,10 @@ fn handle_stats_raw_conn(
     state_file: string,
     state_key: string,
     config_path: string,
-    config_dir: string
+    config_dir: string,
+    oidc: OidcConfig,
+    peers: PeersConfig,
+    stick_count: int
 ) -> StatsConnResult {
     let parsed = http_parse(raw)
     let method = http_parsed_method(parsed)
@@ -1200,6 +1453,25 @@ fn handle_stats_raw_conn(
                 scr.tls_reload = 1
             }
         }
+        if str_eq(ponly, "/admin/vhost-cert") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/vhost-create") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
+        if str_eq(ponly, "/admin/proxy-host") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
                 scr.full_reload = 1
@@ -1221,13 +1493,13 @@ fn handle_stats_raw_conn(
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/stats") {
-        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let body = stats_json(st, frontends, backends, servers, routes, acls, oidc, peers)
         let _ = stats_raw_respond_json(fd, method, 200, body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/metrics") {
-        let body = metrics_text(st, frontends, backends, servers)
+        let body = metrics_text(st, frontends, backends, servers, oidc, peers, stick_count)
         let _ = stats_raw_respond_ct(fd, method, 200, "text/plain; version=0.0.4; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
@@ -1271,6 +1543,10 @@ fn handle_stats_conn(
     config_path: string,
     config_dir: string
 ) -> StatsConnResult {
+    // Legacy stdlib-http path: no live OIDC/peers/stick config wired.
+    let oidc = oidc_config_new()
+    let peers = peers_config_new()
+    let stick_count = 0
     let path = http_path(c)
     let method = http_method(c)
     let ponly = path_only(path)
@@ -1335,6 +1611,25 @@ fn handle_stats_conn(
                 scr.tls_reload = 1
             }
         }
+        if str_eq(ponly, "/admin/vhost-cert") {
+            if ar.status == 200 {
+                scr.tls_reload = 1
+            }
+        }
+        if str_eq(ponly, "/admin/vhost-create") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
+        if str_eq(ponly, "/admin/proxy-host") {
+            if ar.status == 200 {
+                if str_contains(ar.body, "\"tls_reload\":true") {
+                    scr.tls_reload = 1
+                }
+            }
+        }
         if str_eq(ponly, "/admin/reload") {
             if ar.status == 200 {
                 scr.full_reload = 1
@@ -1356,13 +1651,13 @@ fn handle_stats_conn(
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/stats") {
-        let body = stats_json(st, frontends, backends, servers, routes, acls)
+        let body = stats_json(st, frontends, backends, servers, routes, acls, oidc, peers)
         let _ = http_respond_json(c, 200, body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
     if str_eq(ponly, "/metrics") {
-        let body = metrics_text(st, frontends, backends, servers)
+        let body = metrics_text(st, frontends, backends, servers, oidc, peers, stick_count)
         let _ = http_respond_ct(c, 200, "text/plain; version=0.0.4; charset=utf-8", body)
         log_admin_audit(req_id, auth_user, role, method, ponly, 200, "ok")
         return stats_conn_result(frontends, backends, servers, routes, acls)

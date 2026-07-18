@@ -79,17 +79,19 @@ Supported keys:
 
 | Key | Value | Notes |
 |-----|-------|-------|
-| `bind` | `PORT`, `:PORT`, or `HOST:PORT` | Current runtime binds by port. |
+| `bind` | `PORT`, `:PORT`, or `HOST:PORT` | Empty/`*` host (or port-only) uses Mako dual-stack listen (`::` + `V6ONLY=0`, IPv4 fallback). `0.0.0.0` is IPv4-only; `127.0.0.1` is loopback. |
 | `mode` | `http`, `tcp`, `udp`, `stats` | Listener mode. UDP is currently SIP signaling only. |
-| `maxconn` | integer | Frontend pressure limit. |
+| `maxconn` | integer | Frontend pressure limit; also sizes the TCP accept backlog (min 128, max 65535; default backlog 4096 when unset). |
 | `rate_limit` | rate | Example: `5000/s`. |
 | `request_body_limit` | size | Raw HTTP request limit for this frontend. |
 | `request_body_limit_bytes` | integer | Same value in bytes. |
 | `sticky cookie` | name | Enables HTTP sticky cookie selection. |
 | `xff` | `on` or `off` | Enables/disables forwarded-for handling where supported. |
 | `access_log` | `on` or `off` | Controls access log lines for this frontend. |
-| `tls_cert` | path | Enables TLS termination for this HTTP frontend. |
+| `tls_cert` | path | Enables TLS termination for this HTTP frontend (default certificate). |
 | `tls_key` | path | Private key for `tls_cert`. |
+| `tls_sni` | `HOSTNAME CERT KEY` | Additional certificate selected by TLS SNI. Hostname is exact or left-most wildcard (`*.example.com`). Repeatable. Requires a default `tls_cert`/`tls_key` as fallback. Live changes use Mako `tls_server_sni_add` / `sni_update` / `sni_remove`. |
+| `tls_min` | `1.3` | Require TLS 1.3 only (Mako `tls_server_new_tls13`). Aliases: `tls13`, `TLSv1.3`. Not combined with mTLS in the same listener yet. |
 | `protocols` / `alpn` | list | `http/1.1`, `h2`, and `h3` (aliases `http/2`, `http/3`, `quic`). `h2`/`h3` require TLS certs. `h3` also requires a quiche-linked build (`h3_server_available`). |
 | `redirect https` | optional code | Force HTTP→HTTPS with `301` (default) or `302`/`307`/`308`. No backend required. Example: `redirect https` or `redirect https 308`. |
 | `acme_webroot` | path | Directory of ACME HTTP-01 challenge tokens. Serves `GET /.well-known/acme-challenge/<token>` as plain text from `<path>/<token>` (no traversal). Bypasses redirect, rate limit, ACL, and app Basic auth. Inherited from `defaults` when unset. |
@@ -226,7 +228,7 @@ Supported keys:
 | Key | Value | Notes |
 |-----|-------|-------|
 | `balance` | policy | `round_robin`, `least_conn`, `ip_hash`, `sip_call_id`, `weighted`, `random`, `consistent_hash`. |
-| `stick on` | `src` | Source-IP stick table (accept-thread). Cookie sticky on the frontend still wins when present. With `xff on`, first `X-Forwarded-For` hop is used. |
+| `stick on` | `src` | Source-IP stick table (accept-thread). Applies to cleartext, TLS HTTP/1–2, and **HTTP/3**. Cookie sticky still wins when present. With `xff on`, first `X-Forwarded-For` hop is used; otherwise the client TCP IP (port stripped). On H3, Mako does not expose the QUIC peer address yet — stick uses XFF when present (even if `xff` is off), else falls through to normal balancing. |
 | `stick_table` | `size N expire DUR` | Table capacity (default 100000) and entry TTL (default 30m). Example: `stick_table size 100000 expire 30m`. |
 | `resolve_interval` | duration | How often to re-resolve servers marked `resolve` (default `10s`). |
 | `servers_file` | path | Loads server lines at startup and via protected admin reload. |
@@ -276,6 +278,58 @@ backend sip
 `i`, and hashes that value for stable server selection. This is for SIP
 signaling. RTP/media relay is not implemented.
 
+## peers (experimental)
+
+Stick-table sync between Leba nodes. Off by default. See `docs/HA.md`.
+
+```text
+peers
+  enabled on
+  name leba-a
+  cluster edge
+  bind 0.0.0.0:1024
+  secret change-me
+  peer leba-b 10.0.0.2:1024
+```
+
+| Key | Value | Notes |
+|-----|-------|-------|
+| `enabled` | `on`/`off` | Implied `on` when any `peer` line is present. |
+| `name` | string | Local node name (required). |
+| `cluster` | string | Must match remote peers (default `default`). |
+| `bind` | `HOST:PORT` / `:PORT` / `PORT` | Peer listen address. |
+| `secret` | string | Shared HMAC secret (env expansion supported). |
+| `peer` | `NAME HOST:PORT` | Remote peer (repeatable). |
+
+## oidc (admin SSO)
+
+OpenID Connect for the **stats/admin** UI. See `docs/OIDC.md`.
+
+```text
+oidc
+  enabled on
+  issuer https://login.example.com/realms/leba
+  client_id leba-admin
+  client_secret $LEBA_OIDC_CLIENT_SECRET
+  redirect_uri https://admin.example.com:9443/oidc/callback
+  jwks_uri https://login.example.com/realms/leba/protocol/openid-connect/certs
+  verify_jwt on
+  default_role viewer
+  admin_group leba-admins
+  operator_group leba-operators
+```
+
+| Key | Meaning |
+|-----|---------|
+| `issuer` | Discovery + `iss` check |
+| `client_id` / `client_secret` | Confidential client |
+| `redirect_uri` | Must match IdP (`/oidc/callback` on stats) |
+| `jwks_uri` | Optional; else from discovery. Mako `jwt_verify_jwks` |
+| `rsa_public_key` | Optional PEM/path for `jwt_verify_rs256` |
+| `verify_jwt` | `on` (default) / `off` |
+| `ca_file` | CA PEM for IdP HTTPS; empty = platform trust |
+| `insecure` | Dev only — skip TLS verify |
+
 ## Servers
 
 Server lines:
@@ -285,13 +339,16 @@ server NAME HOST:PORT [weight N] [maxconn N] [check|no_check] [resolve]
 ```
 
 Optional `resolve` re-resolves `HOST` on `resolve_interval`. Add `expand` to
-create one pool member per A/AAAA answer (see `docs/DNS.md`).
+create one pool member per A/AAAA answer. Add `srv` for DNS **SRV** discovery
+(implies resolve+expand; ports/targets from SRV answers — see `docs/DNS.md`).
 
 Examples:
 
 ```text
 server api1 127.0.0.1:19001 weight 100 maxconn 500 check
 server api2 127.0.0.1:19002 weight 50 no_check
+server pods my-headless.default.svc:8080 weight 100 check resolve expand
+server sip _sip._udp.sip.example.com:5060 weight 100 check resolve srv
 ```
 
 Defaults:

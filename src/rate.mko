@@ -16,7 +16,7 @@ fn rate_new(frontend: string, rate_per_sec: int) -> RateBucket {
         capacity = 1
     }
     return RateBucket {
-        frontend: frontend,
+        frontend: own_string(frontend),
         tokens: capacity,
         capacity: capacity,
         last_ms: now_ms(),
@@ -24,8 +24,18 @@ fn rate_new(frontend: string, rate_per_sec: int) -> RateBucket {
     }
 }
 
+fn rate_clone(b: RateBucket) -> RateBucket {
+    return RateBucket {
+        frontend: own_string(b.frontend),
+        tokens: b.tokens,
+        capacity: b.capacity,
+        last_ms: b.last_ms,
+        rate_per_sec: b.rate_per_sec
+    }
+}
+
 fn rate_refill(b: RateBucket) -> RateBucket {
-    let mut out = b
+    let mut out = rate_clone(b)
     if out.rate_per_sec <= 0 {
         return out
     }

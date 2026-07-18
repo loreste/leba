@@ -34,9 +34,9 @@ fn TestRoundRobinAdvances() {
     be.balance = "round_robin"
     be.rr_idx = 0
     let i0 = pick_server(servers, be, "c", "", "")
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
     let i1 = pick_server(servers, be, "c", "", "")
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
     let i2 = pick_server(servers, be, "c", "", "")
     assert_eq(i0, 0)
     assert_eq(i1, 1)
@@ -1282,7 +1282,7 @@ fn TestAcmeWebrootParseAndInherit() {
 }
 
 fn TestRemoveHostRoute() {
-    let mut routes = make([]Route, 0, 2)
+    let mut routes = make([]Route, 0, 4)
     routes = append(routes, route_new("web", "host", "a.example", "app"))
     routes = append(routes, route_new("web", "host", "b.example", "app"))
     routes = append(routes, route_new("web", "default", "", "app"))

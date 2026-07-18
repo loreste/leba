@@ -4,7 +4,7 @@ pack balance
 fn server_indices_for(servers: []Server, backend: string) -> []int {
     let mut out = make([]int, 0, 8)
     for i, s in range servers {
-        if str_eq(s.backend, backend) {
+        if str_eq(own_string(s.backend), own_string(backend)) {
             out = append(out, i)
         }
     }
@@ -110,16 +110,16 @@ fn pick_server(
     sticky_name: string,
     sticky_val: string
 ) -> int {
-    let idxs = server_indices_for(servers, be.name)
+    let idxs = server_indices_for(servers, own_string(be.name))
     if len(idxs) == 0 {
         return -1
     }
 
     // Sticky cookie: value is server name (must be eligible — never stick to DRAIN/DOWN)
-    if not str_eq(sticky_name, "") {
-        if not str_eq(sticky_val, "") {
+    if str_len(sticky_name) > 0 {
+        if str_len(sticky_val) > 0 {
             for _, si in range idxs {
-                if str_eq(servers[si].name, sticky_val) {
+                if str_eq(own_string(servers[si].name), own_string(sticky_val)) {
                     if server_eligible(servers[si]) == 1 {
                         return si
                     }
@@ -132,7 +132,6 @@ fn pick_server(
     // Eligible only (UP and not DRAIN). Drained servers never receive new traffic.
     // Last-resort for all-DOWN (not drain): pick any alive so total outage is rare;
     // pure DRAIN of all members fails closed (502) so deploys can empty a pool.
-    let alive_n = count_alive(servers, idxs)
     let mut pool = make([]int, 0, len(idxs))
     for _, si in range idxs {
         if server_eligible(servers[si]) == 1 {
@@ -142,11 +141,10 @@ fn pick_server(
     if len(pool) == 0 {
         // Fail closed when only DRAIN members remain (deploy empty pool).
         // If everything is hard-DOWN, also fail closed (no silent blackhole to dead hosts).
-        let _ = alive_n
         return -1
     }
 
-    let algo = be.balance
+    let algo = own_string(be.balance)
     match algo {
         "random" => {
             let r = rand_intn(len(pool))
@@ -260,8 +258,8 @@ fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Serve
     if idx >= len(servers) {
         return servers
     }
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     s.total_req = s.total_req + 1
     s.total_bytes = s.total_bytes + bytes
     if err != 0 {
@@ -330,7 +328,7 @@ fn stick_table_set(
     if str_eq(server_name, "") {
         return (table, entry_count, 0)
     }
-    let mut out = table
+    let mut out = maps_clone(table)
     let mut count = entry_count
     let mut max = max_size
     if max <= 0 {
@@ -378,9 +376,8 @@ fn pick_server_stick(
     now_ms: int,
     entry_count: int
 ) -> (int, map[string]string, int, string) {
-    let mut table = stick_table
+    let mut table = maps_clone(stick_table)
     let mut count = entry_count
-    let mut peer_line = ""
     // Cookie sticky first (inside pick_server). Table only when no usable cookie pin.
     let mut cookie_pinned = 0
     if not str_eq(sticky_name, "") {
@@ -389,7 +386,7 @@ fn pick_server_stick(
             if pi >= 0 {
                 if server_eligible(servers[pi]) == 1 {
                     cookie_pinned = 1
-                    return (pi, table, count, peer_line)
+                    return (pi, table, count, "")
                 }
             }
         }
@@ -401,7 +398,7 @@ fn pick_server_stick(
                 let hi = find_server_idx_by_name(servers, be.name, hit)
                 if hi >= 0 {
                     if server_eligible(servers[hi]) == 1 {
-                        return (hi, table, count, peer_line)
+                        return (hi, table, count, "")
                     }
                 }
             }
@@ -416,13 +413,14 @@ fn pick_server_stick(
                     table = t2
                     count = c2
                     if exp > 0 {
-                        peer_line = "UPSERT " + stick_key + " " + servers[si].name + " " + int_to_string(exp) + "\n"
+                        let line = "UPSERT " + stick_key + " " + own_string(servers[si].name) + " " + int_to_string(exp) + "\n"
+                        return (si, table, count, line)
                     }
                 }
             }
         }
     }
-    return (si, table, count, peer_line)
+    return (si, table, count, "")
 }
 
 // Strip port from tcp_peer_addr result ("ip:port" or "[v6]:port") → bare host.
@@ -481,13 +479,13 @@ fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
     if idx >= len(servers) {
         return servers
     }
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     s.conns = s.conns + delta
     if s.conns < 0 {
         s.conns = 0
     }
-    out[idx] = s
+    out[idx] = server_clone(s)
     return out
 }
 
@@ -620,12 +618,18 @@ fn build_retry_plan(
         }
         if retry_plan_contains(plan, plan.n, si) == 1 {
             // Advance RR so we don't spin forever on the same pick.
-            be = next_rr(be)
+            be.rr_idx = be.rr_idx + 1
+            if be.rr_idx > 1000000000 {
+                be.rr_idx = 0
+            }
             continue
         }
         plan = retry_plan_set_hop(plan, plan.n, retry_hop_from_server(servers[si], si))
         plan.n = plan.n + 1
-        be = next_rr(be)
+        be.rr_idx = be.rr_idx + 1
+        if be.rr_idx > 1000000000 {
+            be.rr_idx = 0
+        }
     }
     let _ = sticky_name
     let _ = sticky_val

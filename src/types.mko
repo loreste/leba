@@ -41,6 +41,12 @@ struct DnsSrvRecord {
     target: string
 }
 
+// Accumulator wrapper keeps Mako's array ownership explicit while building
+// SRV results; the returned array is copied out before the wrapper is dropped.
+struct DnsSrvRecordList {
+    rows: []DnsSrvRecord
+}
+
 // --- stick-table peers (experimental HA sync) ------------------------------
 
 struct PeerNode {
@@ -316,8 +322,8 @@ fn stats_new() -> LiveStats {
 
 fn server_new(name: string, host: string, port: int, weight: int, check: int, backend: string) -> Server {
     return Server {
-        name: name,
-        host: host,
+        name: own_string(name),
+        host: own_string(host),
         port: port,
         weight: weight,
         maxconn: 0,
@@ -332,7 +338,7 @@ fn server_new(name: string, host: string, port: int, weight: int, check: int, ba
         total_bytes: 0,
         last_check_ms: 0,
         pool: -1,
-        backend: backend,
+        backend: own_string(backend),
         resolve: 0,
         resolve_name: "",
         last_resolve_ms: 0,
@@ -342,19 +348,83 @@ fn server_new(name: string, host: string, port: int, weight: int, check: int, ba
     }
 }
 
+fn server_clone(src: Server) -> Server {
+    return Server {
+        name: own_string(src.name),
+        host: own_string(src.host),
+        port: src.port,
+        weight: src.weight,
+        maxconn: src.maxconn,
+        check: src.check,
+        alive: src.alive,
+        drain: src.drain,
+        fails: src.fails,
+        rises: src.rises,
+        conns: src.conns,
+        total_req: src.total_req,
+        total_err: src.total_err,
+        total_bytes: src.total_bytes,
+        last_check_ms: src.last_check_ms,
+        pool: src.pool,
+        backend: own_string(src.backend),
+        resolve: src.resolve,
+        resolve_name: own_string(src.resolve_name),
+        last_resolve_ms: src.last_resolve_ms,
+        resolve_expand: src.resolve_expand,
+        resolve_srv: src.resolve_srv,
+        resolve_parent: own_string(src.resolve_parent)
+    }
+}
+
+fn server_array_clone(src: []Server) -> []Server {
+    // Keep headroom for DNS expansion and admin mutations. Mako's generated
+    // append uses realloc; avoiding growth here also avoids freeing the old
+    // array header after realloc has already released its backing pointer.
+    let mut out = make([]Server, 0, len(src) + 64)
+    let mut i = 0
+    while i < len(src) {
+        out = append(out, server_clone(src[i]))
+        i = i + 1
+    }
+    return out
+}
+
 fn dns_srv_record_new(priority: int, weight: int, port: int, target: string) -> DnsSrvRecord {
     return DnsSrvRecord {
         priority: priority,
         weight: weight,
         port: port,
-        target: target
+        target: own_string(target)
     }
+}
+
+fn dns_srv_record_clone(src: DnsSrvRecord) -> DnsSrvRecord {
+    return DnsSrvRecord {
+        priority: src.priority,
+        weight: src.weight,
+        port: src.port,
+        target: own_string(src.target)
+    }
+}
+
+fn dns_srv_record_list_add(acc: DnsSrvRecordList, rec: DnsSrvRecord) -> DnsSrvRecordList {
+    let mut out = acc
+    out.rows = append(out.rows, dns_srv_record_clone(rec))
+    return out
+}
+
+fn dns_srv_records_copy(src: []DnsSrvRecord) -> []DnsSrvRecord {
+    let mut out = make([]DnsSrvRecord, 0, len(src))
+    for i in range len(src) {
+        out = append(out, dns_srv_record_clone(src[i]))
+    }
+    return out
 }
 
 fn peer_node_new(name: string, host: string, port: int) -> PeerNode {
     return PeerNode {
-        name: name,
-        host: host,
+        name: own_string(name),
+        host: own_string(host),
         port: port
     }
 }
@@ -443,7 +513,7 @@ fn oidc_config_new() -> OidcConfig {
 
 fn backend_new(name: string) -> Backend {
     return Backend {
-        name: name,
+        name: own_string(name),
         balance: "round_robin",
         servers_file: "",
         health_path: "/health",
@@ -462,17 +532,46 @@ fn backend_new(name: string) -> Backend {
     }
 }
 
+fn backend_clone(src: Backend) -> Backend {
+    return Backend {
+        name: own_string(src.name),
+        balance: own_string(src.balance),
+        servers_file: own_string(src.servers_file),
+        health_path: own_string(src.health_path),
+        health_interval_ms: src.health_interval_ms,
+        health_timeout_ms: src.health_timeout_ms,
+        health_rise: src.health_rise,
+        health_fall: src.health_fall,
+        connect_timeout_ms: src.connect_timeout_ms,
+        maxconn: src.maxconn,
+        retries: src.retries,
+        rr_idx: src.rr_idx,
+        stick_on: own_string(src.stick_on),
+        stick_size: src.stick_size,
+        stick_expire_ms: src.stick_expire_ms,
+        resolve_interval_ms: src.resolve_interval_ms
+    }
+}
+
+fn backend_array_clone(src: []Backend) -> []Backend {
+    let mut out = make([]Backend, 0, len(src) + 16)
+    for _, b in range src {
+        out = append(out, backend_clone(b))
+    }
+    return out
+}
+
 fn tls_sni_entry_new(hostname: string, cert: string, key: string) -> TlsSniEntry {
     return TlsSniEntry {
-        hostname: hostname,
-        cert: cert,
-        key: key
+        hostname: own_string(hostname),
+        cert: own_string(cert),
+        key: own_string(key)
     }
 }
 
 fn frontend_new(name: string) -> Frontend {
     return Frontend {
-        name: name,
+        name: own_string(name),
         bind_host: "",
         bind_port: 0,
         mode: "http",
@@ -500,6 +599,50 @@ fn frontend_new(name: string) -> Frontend {
         redirect_https: 0,
         redirect_code: 301
     }
+}
+
+fn frontend_clone(src: Frontend) -> Frontend {
+    let mut sni = make([]TlsSniEntry, 0, len(src.tls_sni) + 4)
+    for _, e in range src.tls_sni {
+        sni = append(sni, tls_sni_entry_new(e.hostname, e.cert, e.key))
+    }
+    return Frontend {
+        name: own_string(src.name),
+        bind_host: own_string(src.bind_host),
+        bind_port: src.bind_port,
+        mode: own_string(src.mode),
+        maxconn: src.maxconn,
+        tls_cert: own_string(src.tls_cert),
+        tls_key: own_string(src.tls_key),
+        tls_client_ca: own_string(src.tls_client_ca),
+        tls_sni: sni,
+        tls_min_13: src.tls_min_13,
+        protocols: own_string(src.protocols),
+        sticky_cookie: own_string(src.sticky_cookie),
+        rate_limit: src.rate_limit,
+        request_body_limit_bytes: src.request_body_limit_bytes,
+        backend: own_string(src.backend),
+        xff: src.xff,
+        access_log: src.access_log,
+        access_log_file: own_string(src.access_log_file),
+        root: own_string(src.root),
+        acme_webroot: own_string(src.acme_webroot),
+        auth_basic_realm: own_string(src.auth_basic_realm),
+        waf_mode: own_string(src.waf_mode),
+        waf_url: own_string(src.waf_url),
+        waf_fail: own_string(src.waf_fail),
+        waf_timeout_ms: src.waf_timeout_ms,
+        redirect_https: src.redirect_https,
+        redirect_code: src.redirect_code
+    }
+}
+
+fn frontend_array_clone(src: []Frontend) -> []Frontend {
+    let mut out = make([]Frontend, 0, len(src) + 16)
+    for _, fe in range src {
+        out = append(out, frontend_clone(fe))
+    }
+    return out
 }
 
 // Upsert an SNI cert by hostname (case-sensitive config key; Mako matches case-insensitively).
@@ -540,28 +683,28 @@ fn frontend_tls_sni_fingerprint(fe: Frontend) -> string {
 
 fn app_auth_user_new(frontend: string, user: string, pass: string) -> AppAuthUser {
     return AppAuthUser {
-        frontend: frontend,
-        user: user,
-        pass: pass,
+        frontend: own_string(frontend),
+        user: own_string(user),
+        pass: own_string(pass),
         host: ""
     }
 }
 
 fn app_auth_user_host_new(frontend: string, host: string, user: string, pass: string) -> AppAuthUser {
     return AppAuthUser {
-        frontend: frontend,
-        user: user,
-        pass: pass,
-        host: host
+        frontend: own_string(frontend),
+        user: own_string(user),
+        pass: own_string(pass),
+        host: own_string(host)
     }
 }
 
 fn route_new(frontend: string, kind: string, value: string, backend: string) -> Route {
     return Route {
-        frontend: frontend,
-        kind: kind,
-        value: value,
-        backend: backend,
+        frontend: own_string(frontend),
+        kind: own_string(kind),
+        value: own_string(value),
+        backend: own_string(backend),
         action: "",
         target: "",
         code: 0,
@@ -572,14 +715,14 @@ fn route_new(frontend: string, kind: string, value: string, backend: string) -> 
 
 fn route_location_new(frontend: string, host: string, path_prefix: string, backend: string) -> Route {
     return Route {
-        frontend: frontend,
+        frontend: own_string(frontend),
         kind: "path_prefix",
-        value: path_prefix,
-        backend: backend,
+        value: own_string(path_prefix),
+        backend: own_string(backend),
         action: "",
         target: "",
         code: 0,
-        host_match: host,
+        host_match: own_string(host),
         websocket: 1
     }
 }
@@ -590,12 +733,12 @@ fn route_redirect_new(frontend: string, kind: string, value: string, target: str
         c = 301
     }
     return Route {
-        frontend: frontend,
-        kind: kind,
-        value: value,
+        frontend: own_string(frontend),
+        kind: own_string(kind),
+        value: own_string(value),
         backend: "",
         action: "redirect",
-        target: target,
+        target: own_string(target),
         code: c,
         host_match: "",
         websocket: 1
@@ -608,9 +751,9 @@ fn route_dead_new(frontend: string, kind: string, value: string, code: int) -> R
         c = 404
     }
     return Route {
-        frontend: frontend,
-        kind: kind,
-        value: value,
+        frontend: own_string(frontend),
+        kind: own_string(kind),
+        value: own_string(value),
         backend: "",
         action: "dead",
         target: "",
@@ -620,30 +763,69 @@ fn route_dead_new(frontend: string, kind: string, value: string, code: int) -> R
     }
 }
 
+fn route_clone(src: Route) -> Route {
+    return Route {
+        frontend: own_string(src.frontend),
+        kind: own_string(src.kind),
+        value: own_string(src.value),
+        backend: own_string(src.backend),
+        action: own_string(src.action),
+        target: own_string(src.target),
+        code: src.code,
+        host_match: own_string(src.host_match),
+        websocket: src.websocket
+    }
+}
+
+fn route_array_clone(src: []Route) -> []Route {
+    let mut out = make([]Route, 0, len(src) + 16)
+    for _, rt in range src {
+        out = append(out, route_clone(rt))
+    }
+    return out
+}
+
 fn acl_new(frontend: string, action: string, kind: string, value: string) -> AclRule {
     return AclRule {
-        frontend: frontend,
-        action: action,
-        kind: kind,
-        value: value
+        frontend: own_string(frontend),
+        action: own_string(action),
+        kind: own_string(kind),
+        value: own_string(value)
     }
+}
+
+fn acl_clone(src: AclRule) -> AclRule {
+    return AclRule {
+        frontend: own_string(src.frontend),
+        action: own_string(src.action),
+        kind: own_string(src.kind),
+        value: own_string(src.value)
+    }
+}
+
+fn acl_array_clone(src: []AclRule) -> []AclRule {
+    let mut out = make([]AclRule, 0, len(src) + 16)
+    for _, acl in range src {
+        out = append(out, acl_clone(acl))
+    }
+    return out
 }
 
 fn admin_user_new(user: string, pass: string, role: string) -> AdminUser {
     return AdminUser {
-        user: user,
-        pass: pass,
+        user: own_string(user),
+        pass: own_string(pass),
         pass_hash: "",
-        role: role
+        role: own_string(role)
     }
 }
 
 fn admin_user_hash_new(user: string, pass_hash: string, role: string) -> AdminUser {
     return AdminUser {
-        user: user,
+        user: own_string(user),
         pass: "",
-        pass_hash: pass_hash,
-        role: role
+        pass_hash: own_string(pass_hash),
+        role: own_string(role)
     }
 }
 

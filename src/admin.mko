@@ -47,10 +47,10 @@ fn admin_state_from_result(ar: AdminResult, frontends: []Frontend, backends: []B
         status: ar.status,
         body: ar.body,
         servers: ar.servers,
-        frontends: frontends,
-        backends: backends,
-        routes: routes,
-        acls: acls
+        frontends: frontend_array_clone(frontends),
+        backends: backend_array_clone(backends),
+        routes: route_array_clone(routes),
+        acls: acl_array_clone(acls)
     }
 }
 
@@ -104,7 +104,7 @@ fn url_decode(s: string) -> string {
 
 fn query_value(path: string, key: string) -> string {
     let q = query_of(path)
-    if str_eq(q, "") {
+    if str_len(q) == 0 {
         return ""
     }
     let raw = substr(q, 1, str_len(q))
@@ -113,7 +113,7 @@ fn query_value(path: string, key: string) -> string {
         let cut = str_cut(part, "=")
         if len(cut) >= 2 {
             if str_eq(url_decode(cut[0]), key) {
-                return url_decode(cut[1])
+                return own_string(url_decode(cut[1]))
             }
         }
     }
@@ -320,7 +320,7 @@ fn upsert_host_route_full(
         }
     }
     nr.websocket = websocket
-    return append(out, nr)
+    return append(out, route_clone(nr))
 }
 
 fn remove_host_locations(routes: []Route, frontend: string, domain: string) -> []Route {
@@ -331,7 +331,7 @@ fn remove_host_locations(routes: []Route, frontend: string, domain: string) -> [
                 continue
             }
         }
-        out = append(out, rt)
+        out = append(out, route_clone(rt))
     }
     return out
 }
@@ -355,7 +355,7 @@ fn upsert_location_route(routes: []Route, frontend: string, domain: string, path
     }
     let mut nr = route_location_new(frontend, domain, path_prefix, backend)
     nr.websocket = websocket
-    return append(out, nr)
+    return append(out, route_clone(nr))
 }
 
 fn remove_location_route(routes: []Route, frontend: string, domain: string, path_prefix: string) -> []Route {
@@ -368,7 +368,7 @@ fn remove_location_route(routes: []Route, frontend: string, domain: string, path
                 }
             }
         }
-        out = append(out, rt)
+        out = append(out, route_clone(rt))
     }
     return out
 }
@@ -385,9 +385,9 @@ fn upsert_backend_server(servers: []Server, backend: string, name: string, addr:
     let port = to_int(hp.port)
     let idx = find_server_idx(servers, backend, name)
     if idx >= 0 {
-        let mut out = servers
-        let mut s = out[idx]
-        s.host = hp.host
+        let mut out = server_array_clone(servers)
+        let mut s = server_clone(out[idx])
+        s.host = own_string(hp.host)
         s.port = port
         s.alive = 1
         s.drain = 0
@@ -395,6 +395,23 @@ fn upsert_backend_server(servers: []Server, backend: string, name: string, addr:
         return out
     }
     return append(servers, server_new(name, hp.host, port, 1, 1, backend))
+}
+
+fn admin_vhost_backends(need_upstream: int, backends: []Backend, name: string) -> []Backend {
+    let mut out = backend_array_clone(backends)
+    if need_upstream == 1 {
+        if find_backend_idx_admin(out, name) < 0 {
+            out = append(out, backend_new(name))
+        }
+    }
+    return out
+}
+
+fn admin_vhost_servers(need_upstream: int, servers: []Server, backend: string, name: string, addr: string) -> []Server {
+    if need_upstream == 1 {
+        return upsert_backend_server(server_array_clone(servers), backend, name, addr)
+    }
+    return server_array_clone(servers)
 }
 
 fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route) -> string {
@@ -1159,7 +1176,7 @@ fn remove_host_route(routes: []Route, frontend: string, domain: string) -> []Rou
                 continue
             }
         }
-        out = append(out, rt)
+        out = append(out, route_clone(rt))
     }
     return out
 }
@@ -1179,8 +1196,8 @@ fn set_server_drain(servers: []Server, idx: int, drain: int) -> []Server {
     if idx < 0 {
         return servers
     }
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     s.drain = drain
     out[idx] = s
     return out
@@ -1190,8 +1207,8 @@ fn set_server_alive(servers: []Server, idx: int, alive: int) -> []Server {
     if idx < 0 {
         return servers
     }
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     s.alive = alive
     if alive == 1 {
         s.fails = 0
@@ -1214,7 +1231,7 @@ fn handle_admin(
             handled: 1,
             status: 200,
             body: "{\"live\":true}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     // /readyz
@@ -1224,14 +1241,14 @@ fn handle_admin(
                 handled: 1,
                 status: 200,
                 body: "{\"ready\":true}\n",
-                servers: servers
+                servers: server_array_clone(servers)
             }
         }
         return AdminResult {
             handled: 1,
             status: 503,
             body: "{\"ready\":false}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
 
@@ -1240,7 +1257,7 @@ fn handle_admin(
             handled: 1,
             status: 200,
             body: admin_help_json(),
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     if str_eq(path, "/admin/") {
@@ -1248,7 +1265,7 @@ fn handle_admin(
             handled: 1,
             status: 200,
             body: admin_help_json(),
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     if str_eq(path, "/admin/servers") {
@@ -1256,7 +1273,7 @@ fn handle_admin(
             handled: 1,
             status: 200,
             body: servers_json(servers),
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     if str_eq(path, "/admin/reload-servers") {
@@ -1266,7 +1283,7 @@ fn handle_admin(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers
+                servers: server_array_clone(servers)
             }
         }
         let rr = reload_servers_files(backends, servers, config_dir)
@@ -1276,7 +1293,7 @@ fn handle_admin(
                 handled: 1,
                 status: 400,
                 body: f"{{\"error\":\"{json_escape(rr.error)}\"}}\n",
-                servers: servers
+                servers: server_array_clone(servers)
             }
         }
         log_info_event("admin_action", f"action=reload-servers status=200 loaded={rr.loaded} servers={len(rr.servers)}")
@@ -1298,7 +1315,7 @@ fn handle_admin(
             handled: 0,
             status: 0,
             body: "",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     if str_eq(p2, "") {
@@ -1306,7 +1323,7 @@ fn handle_admin(
             handled: 1,
             status: 200,
             body: admin_help_json(),
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
 
@@ -1316,7 +1333,7 @@ fn handle_admin(
             handled: 1,
             status: 405,
             body: "{\"error\":\"method not allowed\"}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
 
@@ -1327,7 +1344,7 @@ fn handle_admin(
             handled: 1,
             status: 400,
             body: "{\"error\":\"need /admin/{action}/{backend}/{server}\"}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
     if str_eq(p4, "") {
@@ -1336,7 +1353,7 @@ fn handle_admin(
             handled: 1,
             status: 400,
             body: "{\"error\":\"need /admin/{action}/{backend}/{server}\"}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
 
@@ -1347,15 +1364,15 @@ fn handle_admin(
             handled: 1,
             status: 404,
             body: "{\"error\":\"server not found\"}\n",
-            servers: servers
+            servers: server_array_clone(servers)
         }
     }
 
     // Mutate the shared server table in place. Do not reassign the []Server
     // local from a call result inside match arms — Mako SAFE free of the
     // reassigned value at arm scope exit frees the live table (use-after-free).
-    let mut out = servers
-    let mut s = out[idx]
+    let mut out = server_array_clone(servers)
+    let mut s = server_clone(out[idx])
     match p2 {
         "drain" => {
             s.drain = 1
@@ -1379,7 +1396,7 @@ fn handle_admin(
                 handled: 1,
                 status: 404,
                 body: "{\"error\":\"unknown action\"}\n",
-                servers: servers
+                servers: server_array_clone(servers)
             }
         }
     }
@@ -1400,13 +1417,18 @@ fn handle_admin_state(
     path: string,
     full_path: string,
     servers: []Server,
-    frontends: []Frontend,
-    backends: []Backend,
-    routes: []Route,
-    acls: []AclRule,
+    frontends_in: []Frontend,
+    backends_in: []Backend,
+    routes_in: []Route,
+    acls_in: []AclRule,
     config_path: string,
     config_dir: string
 ) -> AdminStateResult {
+    let mut frontends = frontend_array_clone(frontends_in)
+    let mut backends = backend_array_clone(backends_in)
+    let mut routes = route_array_clone(routes_in)
+    let mut acls = acl_array_clone(acls_in)
+
     // Full config reload (operator+). Accept thread applies table swap via full_reload flag.
     if str_eq(path, "/admin/reload") {
         if not str_eq(method, "POST") {
@@ -1414,7 +1436,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1426,7 +1448,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"reload\",\"note\":\"full config table swap; bind changes require restart\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1440,7 +1462,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1452,7 +1474,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"tls-reload\",\"note\":\"TCP TLS contexts reloaded; H3 may require restart\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1492,7 +1514,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 200,
                 body: builder_string(out),
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1505,7 +1527,7 @@ fn handle_admin_state(
             handled: 1,
             status: 403,
             body: "{\"error\":\"config write disabled via API for security. Edit the file on the server directly.\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1519,7 +1541,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1530,7 +1552,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: admin_vhosts_json(frontends, backends, servers, routes),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1545,7 +1567,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1556,7 +1578,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: admin_vhosts_json(frontends, backends, servers, routes),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1570,7 +1592,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1580,17 +1602,17 @@ fn handle_admin_state(
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_domain(domain) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let out_routes = remove_host_route(routes, frontend, domain)
         if len(out_routes) == len(routes) {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"proxy host not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"proxy host not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if save_managed_vhosts(config_path, config_dir, frontends, backends, servers, out_routes) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut body = str_builder()
         builder_write(body, "{\"ok\":true,\"action\":\"proxy-host-delete\",\"frontend\":\"")
@@ -1603,7 +1625,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: builder_string(body),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: out_routes,
@@ -1625,7 +1647,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 405,
                 body: "{\"error\":\"method not allowed\"}\n",
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -1646,10 +1668,10 @@ fn handle_admin_state(
         let ws_s = query_value(full_path, "websocket")
         let enable_s = query_value(full_path, "enable")
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_domain(domain) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut enable = 1
         if str_eq(enable_s, "0") or str_eq(enable_s, "false") or str_eq(enable_s, "off") {
@@ -1692,33 +1714,33 @@ fn handle_admin_state(
         }
         if need_upstream == 1 {
             if valid_admin_name(backend) == 0 {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
             if valid_admin_name(server) == 0 {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
             let hp = parse_host_port(addr)
             if str_eq(hp.host, "") {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server address\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server address\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
             if to_int(hp.port) <= 0 {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server port\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server port\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
         }
         if valid_abs_path(cert) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_abs_path(key) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(host_action, "redirect") {
             if str_eq(target, "") {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"redirect target required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"redirect target required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
         }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found; create a listener in leba.conf and restart\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found; create a listener in leba.conf and restart\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
@@ -1741,15 +1763,11 @@ fn handle_admin_state(
             fe.redirect_https = 0
         }
         out_frontends[fi] = fe
-        let mut out_backends = backends
-        let mut out_servers = servers
-        if need_upstream == 1 {
-            out_backends = ensure_backend(backends, backend)
-            out_servers = upsert_backend_server(servers, backend, server, addr)
-        }
+        let out_backends = admin_vhost_backends(need_upstream, backends, backend)
+        let out_servers = admin_vhost_servers(need_upstream, servers, backend, server, addr)
         let out_routes = upsert_host_route_full(routes, frontend, domain, backend, host_action, target, code, websocket, enable)
         if save_managed_vhosts(config_path, config_dir, out_frontends, out_backends, out_servers, out_routes) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut body = str_builder()
         builder_write(body, "{\"ok\":true,\"action\":\"proxy-host\",\"frontend\":\"")
@@ -1807,7 +1825,7 @@ fn handle_admin_state(
     // POST /admin/proxy-host-location — add/update path location under a host
     if str_eq(path, "/admin/proxy-host-location") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
@@ -1817,32 +1835,32 @@ fn handle_admin_state(
         let addr = query_value(full_path, "addr")
         let ws_s = query_value(full_path, "websocket")
         if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(path_p, "") or not str_has_prefix(path_p, "/") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"path must start with /\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"path must start with /\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_admin_name(backend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid backend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut websocket = 1
         if str_eq(ws_s, "0") or str_eq(ws_s, "off") {
             websocket = 0
         }
-        let mut out_backends = backends
-        let mut out_servers = servers
+        let mut out_backends = backend_array_clone(backends)
+        let mut out_servers = server_array_clone(servers)
         if not str_eq(server, "") and not str_eq(addr, "") {
             if valid_admin_name(server) == 0 {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid server\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
-            out_backends = ensure_backend(backends, backend)
-            out_servers = upsert_backend_server(servers, backend, server, addr)
+            out_backends = admin_vhost_backends(1, backends, backend)
+            out_servers = admin_vhost_servers(1, servers, backend, server, addr)
         } else {
-            out_backends = ensure_backend(backends, backend)
+            out_backends = admin_vhost_backends(1, backends, backend)
         }
         let out_routes = upsert_location_route(routes, frontend, domain, path_p, backend, websocket)
         if save_managed_vhosts(config_path, config_dir, frontends, out_backends, out_servers, out_routes) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=proxy-host-location status=200")
         return AdminStateResult {
@@ -1859,23 +1877,23 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/proxy-host-location-delete") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
         let path_p = query_value(full_path, "path")
         let out_routes = remove_location_route(routes, frontend, domain, path_p)
         if len(out_routes) == len(routes) {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"location not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"location not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if save_managed_vhosts(config_path, config_dir, frontends, backends, servers, out_routes) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"proxy-host-location-delete\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: out_routes,
@@ -1886,29 +1904,29 @@ fn handle_admin_state(
     // Host-scoped access list: deny/allow host_src "domain|ip"
     if str_eq(path, "/admin/host-access-list") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
         let action = query_value(full_path, "action")
         let value = query_value(full_path, "value")
         if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend or domain\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_acl_action(action) == 0 or str_eq(value, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action allow|deny and value (IP prefix) required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action allow|deny and value (IP prefix) required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let compound = domain + "|" + value
         let out_acls = acl_upsert(acls, frontend, action, "host_src", compound)
         let auth_blob = read_managed_auth_blob(config_dir)
         if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"host-access-list\",\"kind\":\"host_src\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1918,7 +1936,7 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/host-access-list-delete") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
@@ -1928,13 +1946,13 @@ fn handle_admin_state(
         let out_acls = acl_remove(acls, frontend, action, "host_src", compound)
         let auth_blob = read_managed_auth_blob(config_dir)
         if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"host-access-list-delete\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1945,26 +1963,26 @@ fn handle_admin_state(
     // Host-scoped basic auth user: auth_user with host=
     if str_eq(path, "/admin/host-http-auth") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let domain = query_value(full_path, "domain")
         let user = query_value(full_path, "user")
         let pass = query_value(full_path, "pass")
         if valid_admin_name(frontend) == 0 or valid_domain(domain) == 0 or valid_admin_name(user) == 0 or str_eq(pass, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"frontend, domain, user, pass required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"frontend, domain, user, pass required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         // Encode host-scoped users as: frontend HOST\n  auth_user U P host DOMAIN
         let blob0 = read_managed_auth_blob(config_dir)
         let blob = upsert_auth_user_blob_host(blob0, frontend, domain, user, pass)
         if save_managed_access(config_path, config_dir, frontends, acls, blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"host-http-auth\",\"full_reload\":true}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1975,14 +1993,14 @@ fn handle_admin_state(
     // --- Certificates (list / issue via lego / renew) -----------------------
     if str_eq(path, "/admin/certificates") {
         if not str_eq(method, "GET") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: acme_list_json(frontends, settings),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -1992,21 +2010,21 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/certificates/issue") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let domain = query_value(full_path, "domain")
         let frontend = query_value(full_path, "frontend")
         let email = query_value(full_path, "email")
         let attach = query_value(full_path, "attach")
         if valid_domain(domain) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid domain\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let challenge = query_value(full_path, "challenge")
         let dns_provider = query_value(full_path, "dns_provider")
@@ -2021,7 +2039,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: st,
                 body: acme_error_json(result.error),
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -2042,7 +2060,7 @@ fn handle_admin_state(
             }
             out_frontends[fi] = fe
             if save_managed_vhosts(config_path, config_dir, out_frontends, backends, servers, routes) == 0 {
-                return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"issued but failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"issued but failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
         }
         let mut body = str_builder()
@@ -2064,7 +2082,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: builder_string(body),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: out_frontends,
             backends: backends,
             routes: routes,
@@ -2074,7 +2092,7 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/certificates/renew") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
         let result = acme_renew(settings)
@@ -2084,7 +2102,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: st,
                 body: acme_error_json(result.error),
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -2096,7 +2114,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"certificates-renew\",\"tls_reload\":true}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -2107,13 +2125,13 @@ fn handle_admin_state(
     // --- Access lists ------------------------------------------------------
     if str_eq(path, "/admin/access-lists") {
         if not str_eq(method, "GET") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: acls_json(acls),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -2123,41 +2141,41 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/access-list") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let action = query_value(full_path, "action")
         let kind = query_value(full_path, "kind")
         let value = query_value(full_path, "value")
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_acl_action(action) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action must be allow or deny\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"action must be allow or deny\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_acl_kind(kind) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid kind\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid kind\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(value, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"value required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"value required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_contains(value, "\n") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid value\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid value\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if find_frontend_idx_admin(frontends, frontend) < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let out_acls = acl_upsert(acls, frontend, action, kind, value)
         let auth_blob = read_managed_auth_blob(config_dir)
         if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=access-list status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"access-list\",\"managed_file\":\"leba.access.conf\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -2167,7 +2185,7 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/access-list-delete") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let action = query_value(full_path, "action")
@@ -2175,18 +2193,18 @@ fn handle_admin_state(
         let value = query_value(full_path, "value")
         let out_acls = acl_remove(acls, frontend, action, kind, value)
         if len(out_acls) == len(acls) {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"rule not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"rule not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let auth_blob = read_managed_auth_blob(config_dir)
         if save_managed_access(config_path, config_dir, frontends, out_acls, auth_blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=access-list-delete status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"access-list-delete\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -2202,7 +2220,7 @@ fn handle_admin_state(
                 handled: 1,
                 status: 200,
                 body: http_auth_json(frontends, blob),
-                servers: servers,
+                servers: server_array_clone(servers),
                 frontends: frontends,
                 backends: backends,
                 routes: routes,
@@ -2210,27 +2228,27 @@ fn handle_admin_state(
             }
         }
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let user = query_value(full_path, "user")
         let pass = query_value(full_path, "pass")
         let realm = query_value(full_path, "realm")
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_admin_name(user) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid user\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid user\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(pass, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_contains(pass, " ") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass must not contain spaces\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"pass must not contain spaces\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
@@ -2245,14 +2263,14 @@ fn handle_admin_state(
         let blob0 = read_managed_auth_blob(config_dir)
         let blob = upsert_auth_user_blob(blob0, frontend, user, pass)
         if save_managed_access(config_path, config_dir, out_frontends, acls, blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=http-auth status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"http-auth\",\"full_reload\":true,\"note\":\"full config reload applies app auth users\"}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: out_frontends,
             backends: backends,
             routes: routes,
@@ -2262,21 +2280,21 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/http-auth-delete") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let user = query_value(full_path, "user")
         let blob0 = read_managed_auth_blob(config_dir)
         let blob = delete_auth_user_blob(blob0, frontend, user)
         if save_managed_access(config_path, config_dir, frontends, acls, blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=http-auth-delete status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"http-auth-delete\",\"full_reload\":true}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: frontends,
             backends: backends,
             routes: routes,
@@ -2286,16 +2304,16 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/http-auth-realm") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let realm = query_value(full_path, "realm")
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
@@ -2303,14 +2321,14 @@ fn handle_admin_state(
         out_frontends[fi] = fe
         let blob = read_managed_auth_blob(config_dir)
         if save_managed_access(config_path, config_dir, out_frontends, acls, blob) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed access config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         log_info_event("admin_action", "action=http-auth-realm status=200")
         return AdminStateResult {
             handled: 1,
             status: 200,
             body: "{\"ok\":true,\"action\":\"http-auth-realm\",\"full_reload\":true}\n",
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: out_frontends,
             backends: backends,
             routes: routes,
@@ -2320,7 +2338,7 @@ fn handle_admin_state(
 
     if str_eq(path, "/admin/vhost-cert") {
         if not str_eq(method, "POST") {
-            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let frontend = query_value(full_path, "frontend")
         let cert = query_value(full_path, "cert")
@@ -2334,28 +2352,28 @@ fn handle_admin_state(
             hostname = query_value(full_path, "domain")
         }
         if valid_admin_name(frontend) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid frontend\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_abs_path(cert) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert path must be absolute\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if valid_abs_path(key) == 0 {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key path must be absolute\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(cert, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"cert required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if str_eq(key, "") {
-            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key required\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"key required\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         if not str_eq(hostname, "") {
             if valid_sni_hostname(hostname) == 0 {
-                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid sni hostname\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+                return AdminStateResult { handled: 1, status: 400, body: "{\"error\":\"invalid sni hostname\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
             }
         }
         let fi = find_frontend_idx_admin(frontends, frontend)
         if fi < 0 {
-            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 404, body: "{\"error\":\"frontend not found\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut out_frontends = frontends
         let mut fe = out_frontends[fi]
@@ -2373,7 +2391,7 @@ fn handle_admin_state(
         }
         out_frontends[fi] = fe
         if save_managed_vhosts(config_path, config_dir, out_frontends, backends, servers, routes) == 0 {
-            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: servers, frontends: frontends, backends: backends, routes: routes, acls: acls }
+            return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
         let mut body = str_builder()
         builder_write(body, "{\"ok\":true,\"action\":\"vhost-cert\",\"managed_file\":\"leba.vhosts.conf\",\"tls_reload\":true,\"sni\":")
@@ -2389,7 +2407,7 @@ fn handle_admin_state(
             handled: 1,
             status: 200,
             body: builder_string(body),
-            servers: servers,
+            servers: server_array_clone(servers),
             frontends: out_frontends,
             backends: backends,
             routes: routes,

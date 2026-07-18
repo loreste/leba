@@ -44,7 +44,7 @@ fn cli_default_auth() -> string {
 }
 
 fn cli_clean_addr(addr: string) -> string {
-    let mut a = addr
+    let mut a = own_string(addr)
     if str_has_prefix(a, "http://") {
         a = substr(a, 7, str_len(a))
     }
@@ -52,16 +52,16 @@ fn cli_clean_addr(addr: string) -> string {
     if slash >= 0 {
         return substr(a, 0, slash)
     }
-    return a
+    return own_string(a)
 }
 
 fn cli_addr_host(addr: string) -> string {
     let clean = cli_clean_addr(addr)
     let hp = parse_host_port(clean)
     if str_eq(hp.port, "0") {
-        return clean
+        return own_string(clean)
     }
-    return hp.host
+    return own_string(hp.host)
 }
 
 fn cli_addr_port(addr: string) -> int {

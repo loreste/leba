@@ -87,38 +87,41 @@ fn waf_local_scan(method: string, path: string, body: string) -> WafResult {
     return waf_result_allow()
 }
 
-// Parse http://host:port/path into components. Defaults port 80.
-fn waf_parse_url(url: string) -> (string, int, string) {
-    let mut u = url
-    if str_has_prefix(u, "http://") {
-        u = substr(u, 7, str_len(u))
-    } else {
-        if str_has_prefix(u, "https://") {
-            // TLS upstream for WAF not supported in v1 — treat host:port still.
-            u = substr(u, 8, str_len(u))
-        }
-    }
-    let slash = str_index(u, "/")
-    let mut hostport = u
-    let mut path = "/v1/inspect"
-    if slash >= 0 {
-        hostport = substr(u, 0, slash)
-        path = substr(u, slash, str_len(u))
-    }
+fn waf_url_parts(hostport: string, path: string) -> (string, int, string) {
     let hp = parse_host_port(hostport)
     let mut port = to_int(hp.port)
     if port <= 0 {
         port = 80
     }
-    let mut host = hp.host
-    if str_eq(host, "") {
-        host = hostport
+    if str_len(hp.host) > 0 {
+        if str_len(path) > 0 {
+            return (own_string(hp.host), port, own_string(path))
+        }
+        return (own_string(hp.host), port, "/v1/inspect")
     }
-    let mut out_path = path
-    if str_eq(out_path, "") {
-        out_path = "/v1/inspect"
+    if str_len(path) > 0 {
+        return (own_string(hostport), port, own_string(path))
     }
-    return (host, port, out_path)
+    return (own_string(hostport), port, "/v1/inspect")
+}
+
+// Parse http://host:port/path into components. Defaults port 80.
+fn waf_parse_url(url: string) -> (string, int, string) {
+    let mut start = 0
+    if str_has_prefix(url, "http://") {
+        start = 7
+    } else {
+        if str_has_prefix(url, "https://") {
+            // TLS upstream for WAF not supported in v1 — treat host:port still.
+            start = 8
+        }
+    }
+    let u = substr(url, start, str_len(url))
+    let slash = str_index(u, "/")
+    if slash >= 0 {
+        return waf_url_parts(substr(u, 0, slash), substr(u, slash, str_len(u)))
+    }
+    return waf_url_parts(u, "")
 }
 
 // Remote inspect: POST raw request (truncated) to sidecar. Returns allow/block/error.

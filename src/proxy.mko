@@ -188,6 +188,38 @@ struct RawRequest {
     authorization: string = ""
 }
 
+fn raw_request_new(
+    ok: int,
+    method: string,
+    path: string,
+    host: string,
+    cookie: string,
+    traceparent: string,
+    body: string,
+    bytes_in: int,
+    upgrade: string,
+    raw: string,
+    connection: string,
+    version: string,
+    authorization: string
+) -> RawRequest {
+    return RawRequest {
+        ok: ok,
+        method: own_string(method),
+        path: own_string(path),
+        host: own_string(host),
+        cookie: own_string(cookie),
+        traceparent: own_string(traceparent),
+        body: own_string(body),
+        bytes_in: bytes_in,
+        upgrade: own_string(upgrade),
+        raw: own_string(raw),
+        connection: own_string(connection),
+        version: own_string(version),
+        authorization: own_string(authorization)
+    }
+}
+
 fn raw_request_complete(raw: string, max_bytes: int) -> int {
     if max_bytes > 0 {
         if str_len(raw) > max_bytes {
@@ -533,16 +565,21 @@ fn h2_raw_request(method: string, path: string, host: string, body: string, cook
     if str_eq(p, "") {
         ok = 0
     }
-    return RawRequest {
-        ok: ok,
-        method: m,
-        path: p,
-        host: h,
-        cookie: cookie,
-        traceparent: traceparent,
-        body: body,
-        bytes_in: str_len(m) + str_len(p) + str_len(h) + str_len(body)
-    }
+    return raw_request_new(
+        ok,
+        m,
+        p,
+        h,
+        cookie,
+        traceparent,
+        body,
+        str_len(m) + str_len(p) + str_len(h) + str_len(body),
+        "",
+        "",
+        "",
+        "",
+        ""
+    )
 }
 
 fn h2_request_from_stream(stream: int) -> RawRequest {
@@ -708,12 +745,12 @@ fn raw_header(raw: string, name: string) -> string {
     builder_write(pb, ":")
     let prefix = str_to_lower(builder_string(pb))
     while i < len(lines) {
-        let line = str_trim_space(lines[i])
-        if str_eq(line, "") {
+        let line = str_trim_space(own_string(lines[i]))
+        if str_len(line) == 0 {
             return ""
         }
-        if str_has_prefix(str_to_lower(line), prefix) {
-            return str_trim_space(substr(line, str_len(prefix), str_len(line)))
+        if str_has_prefix(str_to_lower(own_string(line)), own_string(prefix)) {
+            return own_string(str_trim_space(substr(line, str_len(prefix), str_len(line))))
         }
         i = i + 1
     }
@@ -1149,10 +1186,10 @@ fn raw_request_part(line: string, part_no: int) -> string {
     let mut seen = 0
     let mut i = 0
     while i < len(parts) {
-        let p = str_trim_space(parts[i])
-        if not str_eq(p, "") {
+        let p = str_trim_space(own_string(parts[i]))
+        if str_len(p) > 0 {
             if seen == part_no {
-                return p
+                return own_string(p)
             }
             seen = seen + 1
         }
@@ -1163,36 +1200,42 @@ fn raw_request_part(line: string, part_no: int) -> string {
 
 fn normalize_request_target(target: string) -> string {
     if str_has_prefix(target, "/") {
-        return target
+        return own_string(target)
     }
     if str_eq(target, "*") {
-        return target
+        return own_string(target)
     }
-    let mut t = target
-    if str_has_prefix(t, "http://") {
-        t = substr(t, 7, str_len(t))
-    } else {
-        if str_has_prefix(t, "https://") {
-            t = substr(t, 8, str_len(t))
-        } else {
-            return ""
+    if str_has_prefix(target, "http://") {
+        let rest = substr(target, 7, str_len(target))
+        let slash = str_index(rest, "/")
+        if slash < 0 {
+            return "/"
         }
+        return substr(rest, slash, str_len(rest))
     }
-    let slash = str_index(t, "/")
-    if slash < 0 {
-        return "/"
+    if str_has_prefix(target, "https://") {
+        let rest = substr(target, 8, str_len(target))
+        let slash = str_index(rest, "/")
+        if slash < 0 {
+            return "/"
+        }
+        return substr(rest, slash, str_len(rest))
     }
-    return substr(t, slash, str_len(t))
+    return ""
+}
+
+fn raw_request_first_line(raw: string) -> string {
+    let line_end = str_index(raw, "\r\n")
+    if line_end >= 0 {
+        return substr(raw, 0, line_end)
+    }
+    return own_string(raw)
 }
 
 fn parse_raw_request(raw: string) -> RawRequest {
     let parsed = http_parse(raw)
     let cut = str_index(raw, "\r\n\r\n")
-    let line_end = str_index(raw, "\r\n")
-    let mut first = raw
-    if line_end >= 0 {
-        first = substr(raw, 0, line_end)
-    }
+    let first = raw_request_first_line(raw)
     let mut method = http_parsed_method(parsed)
     let mut path = normalize_request_target(http_parsed_path(parsed))
     let mut body = http_parsed_body(parsed)
@@ -1243,21 +1286,21 @@ fn parse_raw_request(raw: string) -> RawRequest {
         authorization = raw_header(raw, "Authorization")
     }
     let version = raw_request_part(first, 2)
-    return RawRequest {
-        ok: ok,
-        method: method,
-        path: path,
-        host: host,
-        cookie: cookie,
-        traceparent: traceparent,
-        body: body,
-        bytes_in: str_len(raw),
-        upgrade: str_to_lower(upgrade),
-        raw: raw,
-        connection: connection,
-        version: version,
-        authorization: authorization
-    }
+    return raw_request_new(
+        ok,
+        method,
+        path,
+        host,
+        cookie,
+        traceparent,
+        body,
+        str_len(raw),
+        str_to_lower(upgrade),
+        raw,
+        connection,
+        version,
+        authorization
+    )
 }
 
 // Decode Basic auth header without depending on stats pack.
@@ -1668,7 +1711,10 @@ fn prepare_dispatch(
     }
 
     let si = pick_server(srv_list, be, host, fe.sticky_cookie, sticky_val)
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         let mut detail3 = str_builder()
@@ -2094,7 +2140,10 @@ fn prepare_raw_dispatch(
     let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
     stick = stick2
     stick_n = stick_n2
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         let mut detail3 = str_builder()
@@ -2323,7 +2372,10 @@ fn handle_tls_proxy_request(
     stick = stick2
     stick_n = stick_n2
     peer_line = pline
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         log_proxy_reject("no_server", method, path, host, "status=502")
@@ -2685,7 +2737,10 @@ fn handle_h3_proxy_request(
     )
     stick = stick2
     stick_n = stick_n2
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         log_proxy_reject("no_server", method, path, host, "status=502")
@@ -3166,7 +3221,10 @@ fn prepare_ws_dispatch(
     let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
     stick = stick2
     stick_n = stick_n2
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         log_proxy_reject("no_server", method, path, host, "status=502")
@@ -3558,7 +3616,10 @@ fn prepare_tcp_dispatch(
     }
 
     let si = pick_server(srv_list, be, pick_key, "", "")
-    be = next_rr(be)
+    be.rr_idx = be.rr_idx + 1
+    if be.rr_idx > 1000000000 {
+        be.rr_idx = 0
+    }
     be_list[bi] = be
     if si < 0 {
         let mut detail3 = str_builder()

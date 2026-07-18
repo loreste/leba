@@ -122,7 +122,7 @@ fn apply_frontend_bind(fe: Frontend, raw: string) -> Frontend {
     } else {
         if str_contains(raw, ":") {
             let hp = parse_host_port(raw)
-            out.bind_host = hp.host
+            out.bind_host = own_string(hp.host)
             out.bind_port = to_int(hp.port)
         } else {
             out.bind_host = ""
@@ -324,7 +324,7 @@ fn parse_server_line(fields: []string, backend: string) -> Server {
     s.resolve_expand = resolve_expand
     s.resolve_srv = resolve_srv
     if resolve == 1 {
-        s.resolve_name = host
+        s.resolve_name = own_string(host)
     }
     return s
 }
@@ -428,12 +428,14 @@ fn server_in_backend_list(servers: []Server, backend: string, name: string) -> i
 }
 
 fn preserve_server_runtime(s: Server, current: []Server) -> Server {
-    let idx = config_server_idx(current, s.backend, s.name)
+    let mut out = server_clone(s)
+    let lookup_backend = own_string(out.backend)
+    let lookup_name = own_string(out.name)
+    let idx = config_server_idx(server_array_clone(current), lookup_backend, lookup_name)
     if idx < 0 {
-        return s
+        return out
     }
     let old = current[idx]
-    let mut out = s
     out.alive = old.alive
     out.drain = old.drain
     out.fails = old.fails
@@ -445,8 +447,10 @@ fn preserve_server_runtime(s: Server, current: []Server) -> Server {
     out.last_check_ms = old.last_check_ms
     out.last_resolve_ms = old.last_resolve_ms
     // Keep pool only when address unchanged; else re-open on next init_server_pools.
-    if str_eq(old.host, s.host) {
-        if old.port == s.port {
+    let old_host = own_string(old.host)
+    let new_host = own_string(out.host)
+    if str_eq(old_host, new_host) {
+        if old.port == out.port {
             out.pool = old.pool
         } else {
             out.pool = 0 - 1
@@ -455,11 +459,13 @@ fn preserve_server_runtime(s: Server, current: []Server) -> Server {
         out.pool = 0 - 1
     }
     // Preserve resolved IP if new config still has same resolve_name and resolve flag.
-    if s.resolve == 1 {
-        if not str_eq(old.resolve_name, "") {
-            if str_eq(old.resolve_name, s.resolve_name) {
+    if out.resolve == 1 {
+        let old_resolve_name = own_string(old.resolve_name)
+        let new_resolve_name = own_string(out.resolve_name)
+        if not str_eq(old_resolve_name, "") {
+            if str_eq(old_resolve_name, new_resolve_name) {
                 if not str_eq(old.host, "") {
-                    out.host = old.host
+                    out.host = own_string(old.host)
                     if old.port == s.port {
                         out.pool = old.pool
                     }
@@ -556,39 +562,48 @@ fn load_servers_file_list(backend: string, file_path: string, base_dir: string) 
 }
 
 fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string) -> ServersReload {
-    // Two-pass: count then fill by index. Avoids `out = append(out, …)` reassignment
-    // which Mako SAFE free can free at the wrong scope (double-free / UAF).
     let mut loaded_total = 0
     let mut need = 0
     let mut bi = 0
     while bi < len(backends) {
-        let be = backends[bi]
+        let be = backend_clone(backends[bi])
         bi = bi + 1
-        if str_eq(be.servers_file, "") {
+        if str_eq(own_string(be.servers_file), "") {
             let mut ci = 0
             while ci < len(current) {
-                if str_eq(current[ci].backend, be.name) {
+                if str_eq(own_string(current[ci].backend), own_string(be.name)) {
                     need = need + 1
                 }
                 ci = ci + 1
             }
         } else {
-            let rr = load_servers_file_list(be.name, be.servers_file, base_dir)
+            let rr_name = own_string(be.name)
+            let rr_path = own_string(be.servers_file)
+            let rr = load_servers_file_list(rr_name, rr_path, base_dir)
             if rr.ok == 0 {
                 return ServersReload {
                     ok: 0,
                     error: rr.error,
-                    servers: current,
+                    servers: server_array_clone(current),
                     loaded: loaded_total
                 }
             }
             need = need + len(rr.servers)
-            let mut oi = 0
-            while oi < len(current) {
-                let cs = current[oi]
-                oi = oi + 1
-                if str_eq(cs.backend, be.name) {
-                    if server_in_backend_list(rr.servers, be.name, cs.name) == 0 {
+            let mut ci = 0
+            while ci < len(current) {
+                let cs = server_clone(current[ci])
+                ci = ci + 1
+                if str_eq(own_string(cs.backend), own_string(be.name)) {
+                    let mut found = 0
+                    let mut ri = 0
+                    while ri < len(rr.servers) {
+                        let loaded = server_clone(rr.servers[ri])
+                        if str_eq(own_string(loaded.name), own_string(cs.name)) {
+                            found = 1
+                        }
+                        ri = ri + 1
+                    }
+                    if found == 0 {
                         if cs.conns > 0 {
                             need = need + 1
                         }
@@ -602,43 +617,88 @@ fn reload_servers_files(backends: []Backend, current: []Server, base_dir: string
     let mut w = 0
     bi = 0
     while bi < len(backends) {
-        let be = backends[bi]
+        let be = backend_clone(backends[bi])
         bi = bi + 1
-        if str_eq(be.servers_file, "") {
+        if str_eq(own_string(be.servers_file), "") {
             let mut ci = 0
             while ci < len(current) {
-                let cs = current[ci]
+                let cs = server_clone(current[ci])
                 ci = ci + 1
-                if str_eq(cs.backend, be.name) {
-                    out[w] = cs
+                if str_eq(own_string(cs.backend), own_string(be.name)) {
+                    out[w] = server_clone(cs)
                     w = w + 1
                 }
             }
         } else {
-            let rr = load_servers_file_list(be.name, be.servers_file, base_dir)
+            let rr_name = own_string(be.name)
+            let rr_path = own_string(be.servers_file)
+            let rr = load_servers_file_list(rr_name, rr_path, base_dir)
             if rr.ok == 0 {
                 return ServersReload {
                     ok: 0,
                     error: rr.error,
-                    servers: current,
+                    servers: server_array_clone(current),
                     loaded: 0
                 }
             }
             let mut ni = 0
             while ni < len(rr.servers) {
-                let kept = preserve_server_runtime(rr.servers[ni], current)
-                out[w] = kept
+                let mut candidate = server_clone(rr.servers[ni])
+                let mut oi = 0
+                while oi < len(current) {
+                    let old = server_clone(current[oi])
+                    oi = oi + 1
+                    if str_eq(own_string(old.backend), own_string(candidate.backend)) {
+                        if str_eq(own_string(old.name), own_string(candidate.name)) {
+                            candidate.alive = old.alive
+                            candidate.drain = old.drain
+                            candidate.fails = old.fails
+                            candidate.rises = old.rises
+                            candidate.conns = old.conns
+                            candidate.total_req = old.total_req
+                            candidate.total_err = old.total_err
+                            candidate.total_bytes = old.total_bytes
+                            candidate.last_check_ms = old.last_check_ms
+                            candidate.last_resolve_ms = old.last_resolve_ms
+                            if str_eq(own_string(old.host), own_string(candidate.host)) {
+                                if old.port == candidate.port {
+                                    candidate.pool = old.pool
+                                }
+                            }
+                            if candidate.resolve == 1 {
+                                if str_eq(own_string(old.resolve_name), own_string(candidate.resolve_name)) {
+                                    if not str_eq(own_string(old.host), "") {
+                                        candidate.host = own_string(old.host)
+                                        if old.port == candidate.port {
+                                            candidate.pool = old.pool
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                out[w] = candidate
                 w = w + 1
                 ni = ni + 1
             }
             let mut oi = 0
             while oi < len(current) {
-                let cs = current[oi]
+                let cs = server_clone(current[oi])
                 oi = oi + 1
-                if str_eq(cs.backend, be.name) {
-                    if server_in_backend_list(rr.servers, be.name, cs.name) == 0 {
+                if str_eq(own_string(cs.backend), own_string(be.name)) {
+                    let mut found = 0
+                    let mut ri = 0
+                    while ri < len(rr.servers) {
+                        let loaded = server_clone(rr.servers[ri])
+                        if str_eq(own_string(loaded.name), own_string(cs.name)) {
+                            found = 1
+                        }
+                        ri = ri + 1
+                    }
+                    if found == 0 {
                         if cs.conns > 0 {
-                            let mut draining = cs
+                            let mut draining = server_clone(cs)
                             draining.drain = 1
                             out[w] = draining
                             w = w + 1
@@ -781,124 +841,95 @@ fn save_runtime_state_file(state_file: string, base_dir: string, servers: []Serv
     return write_file(full_path, content)
 }
 
-fn parse_route_line(fields: []string, fe: string) -> Route {
-    // route path_prefix /api -> backend
-    // route host x -> backend
-    // route path /exact -> backend
-    // route default -> backend
-    // route host old.example redirect https://new.example [code]
-    // route host gone.example dead [code]
-    // also: route path_prefix /api backend   (arrow optional)
-    let kind = fields[1]
-    let mut value = ""
-    let mut backend = ""
+fn parse_route_line(input_fields: []string, fe: string) -> Route {
+    let fields = strings_copy(input_fields)
+    if len(fields) < 2 {
+        return route_new(fe, "default", "", "")
+    }
+    let kind = own_string(fields[1])
+
     if str_eq(kind, "default") {
-        // route default -> be  OR  route default be
-        // route default redirect URL [code]
-        // route default dead [code]
         if len(fields) >= 3 {
-            if str_eq(fields[2], "redirect") {
+            let op = own_string(fields[2])
+            if str_eq(op, "redirect") {
                 let mut target = ""
                 let mut code = 301
-                if len(fields) >= 4 {
-                    target = fields[3]
-                }
-                if len(fields) >= 5 {
-                    code = to_int(fields[4])
-                }
-                return route_redirect_new(fe, "default", "", target, code)
+                if len(fields) >= 4 { target = own_string(fields[3]) }
+                if len(fields) >= 5 { code = to_int(fields[4]) }
+                return route_redirect_new(fe, kind, "", target, code)
             }
-            if str_eq(fields[2], "dead") {
+            if str_eq(op, "dead") {
                 let mut code = 404
+                if len(fields) >= 4 { code = to_int(fields[3]) }
+                return route_dead_new(fe, kind, "", code)
+            }
+            if str_eq(op, "->") {
                 if len(fields) >= 4 {
-                    code = to_int(fields[3])
+                    return route_new(fe, kind, "", own_string(fields[3]))
                 }
-                return route_dead_new(fe, "default", "", code)
+                return route_new(fe, kind, "", "")
             }
+            return route_new(fe, kind, "", op)
         }
-        if len(fields) >= 4 {
-            if str_eq(fields[2], "->") {
-                backend = fields[3]
-            } else {
-                backend = fields[2]
-            }
-        } else {
-            if len(fields) >= 3 {
-                backend = fields[2]
-            }
-        }
-        return route_new(fe, "default", "", backend)
+        return route_new(fe, kind, "", "")
     }
-    if len(fields) >= 3 {
-        value = fields[2]
-    }
-    // route KIND VALUE redirect TARGET [CODE]
+
+    let mut value = ""
+    if len(fields) >= 3 { value = own_string(fields[2]) }
     if len(fields) >= 4 {
-        if str_eq(fields[3], "redirect") {
+        let op = own_string(fields[3])
+        if str_eq(op, "redirect") {
             let mut target = ""
             let mut code = 301
-            if len(fields) >= 5 {
-                target = fields[4]
-            }
-            if len(fields) >= 6 {
-                code = to_int(fields[5])
-            }
+            if len(fields) >= 5 { target = own_string(fields[4]) }
+            if len(fields) >= 6 { code = to_int(fields[5]) }
             return route_redirect_new(fe, kind, value, target, code)
         }
-        if str_eq(fields[3], "dead") {
+        if str_eq(op, "dead") {
             let mut code = 404
-            if len(fields) >= 5 {
-                code = to_int(fields[4])
-            }
+            if len(fields) >= 5 { code = to_int(fields[4]) }
             return route_dead_new(fe, kind, value, code)
         }
     }
-    // Find backend after "->" or as next non-modifier token after value.
-    // Optional trailers: host HOSTNAME (locations), websocket on|off.
+
+    let mut backend = ""
     let mut host_match = ""
     let mut websocket = 1
-    let mut arrow = 0 - 1
-    let mut i = 0
+    let mut i = 3
     while i < len(fields) {
-        if str_eq(fields[i], "->") {
-            arrow = i
+        let token = own_string(fields[i])
+        if str_eq(token, "->") {
+            if i + 1 < len(fields) {
+                backend = own_string(fields[i + 1])
+                i = i + 2
+                continue
+            }
         }
-        if str_eq(fields[i], "host") {
+        if str_eq(token, "host") {
             if i + 1 < len(fields) {
                 if not str_eq(kind, "host") {
-                    host_match = fields[i + 1]
+                    host_match = own_string(fields[i + 1])
                 }
+                i = i + 2
+                continue
             }
         }
-        if str_eq(fields[i], "websocket") {
+        if str_eq(token, "websocket") {
             if i + 1 < len(fields) {
-                if str_eq(fields[i + 1], "off") or str_eq(fields[i + 1], "0") or str_eq(fields[i + 1], "false") {
+                let ws = own_string(fields[i + 1])
+                if str_eq(ws, "off") or str_eq(ws, "0") or str_eq(ws, "false") {
                     websocket = 0
                 }
+                i = i + 2
+                continue
             }
+        }
+        if str_eq(backend, "") {
+            backend = token
         }
         i = i + 1
     }
-    if arrow >= 0 {
-        if arrow + 1 < len(fields) {
-            backend = fields[arrow + 1]
-        }
-    } else {
-        // No arrow: last non-modifier token after value that is not host/websocket value.
-        // route host x be  OR  route path_prefix /api be
-        if len(fields) >= 4 {
-            if not str_eq(fields[3], "host") {
-                if not str_eq(fields[3], "websocket") {
-                    if not str_eq(fields[3], "redirect") {
-                        if not str_eq(fields[3], "dead") {
-                            backend = fields[3]
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // @redirect:URL and @dead[:code] backend shorthands
+
     if str_has_prefix(backend, "@redirect:") {
         return route_redirect_new(fe, kind, value, substr(backend, 10, str_len(backend)), 301)
     }
@@ -909,7 +940,7 @@ fn parse_route_line(fields: []string, fe: string) -> Route {
         return route_dead_new(fe, kind, value, to_int(substr(backend, 6, str_len(backend))))
     }
     let mut r = route_new(fe, kind, value, backend)
-    r.host_match = host_match
+    r.host_match = own_string(host_match)
     r.websocket = websocket
     return r
 }
@@ -981,7 +1012,7 @@ fn parse_config_text(raw: string) -> World {
             // peers [NAME]  — experimental stick-table sync section
             section = "peers"
             if len(fields) >= 2 {
-                w.peers.name = fields[1]
+                w.peers.name = own_string(fields[1])
             }
             continue
         }
@@ -1011,11 +1042,11 @@ fn parse_config_text(raw: string) -> World {
         // keys inside sections
         if str_eq(section, "defaults") {
             if len(fields) >= 2 {
-                if str_eq(head, "state_file") {
-                    w.state_file = fields[1]
+        if str_eq(head, "state_file") {
+                    w.state_file = own_string(fields[1])
                 } else {
                     if str_eq(head, "state_key") {
-                        w.state_key = fields[1]
+                        w.state_key = own_string(fields[1])
                     } else {
                         w.defaults = apply_defaults_kv(w.defaults, head, expand_env(fields[1]))
                     }
@@ -1292,13 +1323,15 @@ fn parse_config_text(raw: string) -> World {
                                                     if len(fields) >= 2 {
                                                         let cut = str_split(fields[1], ":")
                                                         if len(cut) >= 2 {
-                                                            w.stats_user = cut[0]
-                                                            w.stats_pass = cut[1]
+                                                            let auth_user = own_string(cut[0])
+                                                            let auth_pass = own_string(cut[1])
+                                                            w.stats_user = own_string(auth_user)
+                                                            w.stats_pass = own_string(auth_pass)
                                                             let mut role = "admin"
                                                             if len(cut) >= 3 {
-                                                                role = cut[2]
+                                                                role = own_string(cut[2])
                                                             }
-                                                            w.admin_users = append(w.admin_users, admin_user_new(cut[0], cut[1], role))
+                                                            w.admin_users = append(w.admin_users, admin_user_new(auth_user, auth_pass, role))
                                                         }
                                                     }
                                                 } else {
@@ -1306,7 +1339,7 @@ fn parse_config_text(raw: string) -> World {
                                                     if len(fields) >= 4 {
                                                         w.admin_users = append(w.admin_users, admin_user_hash_new(fields[1], fields[2], fields[3]))
                                                         if str_eq(w.stats_user, "") {
-                                                            w.stats_user = fields[1]
+                                                            w.stats_user = own_string(fields[1])
                                                             w.stats_pass = "sha256"
                                                         }
                                                     }
@@ -1315,8 +1348,8 @@ fn parse_config_text(raw: string) -> World {
                                                     if len(fields) >= 4 {
                                                         w.admin_users = append(w.admin_users, admin_user_new(fields[1], fields[2], fields[3]))
                                                         if str_eq(w.stats_user, "") {
-                                                            w.stats_user = fields[1]
-                                                            w.stats_pass = fields[2]
+                                                            w.stats_user = own_string(fields[1])
+                                                            w.stats_pass = own_string(fields[2])
                                                         }
                                                     }
                                                 } else {
@@ -1324,14 +1357,14 @@ fn parse_config_text(raw: string) -> World {
                                                     if len(fields) >= 4 {
                                                         w.admin_users = append(w.admin_users, admin_user_hash_new(fields[1], fields[2], fields[3]))
                                                         if str_eq(w.stats_user, "") {
-                                                            w.stats_user = fields[1]
+                                                            w.stats_user = own_string(fields[1])
                                                             w.stats_pass = "sha256"
                                                         }
                                                     }
                                                 } else {
                                                 if str_eq(head, "admin_users_file") {
                                                     if len(fields) >= 2 {
-                                                        w.admin_users_file = fields[1]
+                                                        w.admin_users_file = own_string(fields[1])
                                                     }
                                                 } else {
                                                     if str_eq(head, "route") {
@@ -1492,23 +1525,23 @@ fn parse_config_text(raw: string) -> World {
             } else {
                 if str_eq(head, "name") {
                     if len(fields) >= 2 {
-                        w.peers.name = fields[1]
+                        w.peers.name = own_string(fields[1])
                     }
                 } else {
                     if str_eq(head, "cluster") {
                         if len(fields) >= 2 {
-                            w.peers.cluster = fields[1]
+                            w.peers.cluster = own_string(fields[1])
                         }
                     } else {
                         if str_eq(head, "secret") {
                             if len(fields) >= 2 {
-                                w.peers.secret = expand_env(fields[1])
+                                w.peers.secret = own_string(expand_env(fields[1]))
                             }
                         } else {
                             if str_eq(head, "bind") {
                                 if len(fields) >= 2 {
                                     let hp = parse_host_port(fields[1])
-                                    if str_eq(hp.host, "") {
+                                    if str_len(hp.host) == 0 {
                                         // bind :1024 or bind 1024
                                         if str_has_prefix(fields[1], ":") {
                                             w.peers.bind_host = "0.0.0.0"
@@ -1518,7 +1551,7 @@ fn parse_config_text(raw: string) -> World {
                                             w.peers.bind_port = to_int(fields[1])
                                         }
                                     } else {
-                                        w.peers.bind_host = hp.host
+                                    w.peers.bind_host = own_string(hp.host)
                                         w.peers.bind_port = to_int(hp.port)
                                     }
                                 }

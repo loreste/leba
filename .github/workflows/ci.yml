@@ -5,47 +5,44 @@ on:
     branches: [main, master]
   pull_request:
 
-env:
-  # Pin to a known-good Mako (free-analysis path-local free). Override via workflow_dispatch inputs later.
-  MAKO_GIT: https://github.com/loreste/mako
-  # Leave empty to use latest main; set to a full SHA after Mako merges path-local free.
-  MAKO_REV: ""
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Mako (pinned git or PATH)
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Mako
         run: |
           set -euo pipefail
-          if command -v mako >/dev/null 2>&1; then
-            mako version
-            exit 0
-          fi
-          if ! command -v cargo >/dev/null 2>&1; then
-            echo "SKIP_MAKO=1" >> "$GITHUB_ENV"
-            exit 0
-          fi
-          if [[ -n "${MAKO_REV}" ]]; then
-            cargo install --git "$MAKO_GIT" --rev "$MAKO_REV" mako --locked
+          # Same approach as release.yml: clone + path install (cargo --git hits quiche submodule URL issues).
+          git clone --depth 1 https://github.com/loreste/mako.git "$HOME/mako"
+          cd "$HOME/mako"
+          git submodule update --init --recursive || {
+            echo "WARN: submodule init incomplete; continuing without full quiche tree"
+          }
+          if cargo install --path . --bin mako --locked 2>/tmp/mako-install.err; then
+            echo "mako installed (locked)"
           else
-            cargo install --git "$MAKO_GIT" mako --locked
+            cat /tmp/mako-install.err || true
+            cargo install --path . --bin mako
           fi
+          echo "MAKO_STD=$HOME/mako/std" >> "$GITHUB_ENV"
+          echo "MAKO_RUNTIME=$HOME/mako/runtime" >> "$GITHUB_ENV"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          mako version
+          "$HOME/.cargo/bin/mako" version
+          test -d "$HOME/mako/std/crypto"
+          test -d "$HOME/mako/runtime"
 
       - name: Clean Mako object cache
-        if: env.SKIP_MAKO != '1'
         run: rm -rf .mako/cache
 
       - name: Unit tests
-        if: env.SKIP_MAKO != '1'
         run: make test
 
       - name: Build
-        if: env.SKIP_MAKO != '1'
         run: make build
 
       - name: Linux deploy assets
@@ -59,11 +56,9 @@ jobs:
           test -f deploy/ha/leba-healthcheck.sh
 
       - name: Soak harness
-        if: env.SKIP_MAKO != '1'
         run: make test-soak
 
       - name: HA peers smoke
-        if: env.SKIP_MAKO != '1'
         run: make test-ha-peers
 
       - name: Docs presence

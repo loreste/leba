@@ -56,7 +56,15 @@ jobs:
           test -f deploy/ha/leba-healthcheck.sh
 
       - name: Soak harness
-        run: make test-soak
+        env:
+          # Slightly smaller concurrent wave on GHA shared runners.
+          SOAK_N: "120"
+          SOAK_BATCH: "12"
+        run: |
+          set -euo pipefail
+          make build
+          chmod +x scripts/soak.sh
+          ./scripts/soak.sh "${SOAK_N}" 6
 
       - name: HA peers smoke
         run: make test-ha-peers

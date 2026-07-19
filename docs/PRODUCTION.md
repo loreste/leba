@@ -70,15 +70,31 @@ See [LIMITS.md](LIMITS.md) for body size and streaming honesty.
 
 Release artifacts (when published via CI):
 
-- Multi-arch container images (`linux/amd64`, `linux/arm64`)
+- Multi-arch container images (`linux/amd64`, `linux/arm64`) on GHCR
 - Binary checksums (`SHA256SUMS`)
-- CycloneDX or SPDX SBOM attached to the GitHub Release
+- CycloneDX SBOM (`sbom.cdx.json`)
+- **Sigstore cosign** keyless signature bundle (`leba-linux-amd64.cosign.bundle`)
+- Container image signed with the same GitHub OIDC identity (when image push succeeds)
 
-Verify:
+Verify binary:
 
 ```bash
+gh release download v0.14.0 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
 sha256sum -c SHA256SUMS
-# optional: cosign verify … when signing is enabled on the release workflow
+cosign verify-blob \
+  --bundle leba-linux-amd64.cosign.bundle \
+  --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  leba-linux-amd64
+```
+
+Verify container (example):
+
+```bash
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/loreste/leba:0.14.0
 ```
 
 ## Do not claim yet

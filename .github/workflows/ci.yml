@@ -48,8 +48,13 @@ jobs:
         if: env.SKIP_MAKO != '1'
         run: make test-soak
 
+      - name: HA peers smoke
+        if: env.SKIP_MAKO != '1'
+        run: make test-ha-peers
+
       - name: Docs presence
         run: |
           test -f docs/PRODUCTION.md
           test -f docs/LIMITS.md
           test -f docs/ROADMAP.md
+          test -f scripts/ha_peers_smoke.sh

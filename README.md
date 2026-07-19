@@ -7,9 +7,10 @@ showcasing what the language can do in a real systems program.
 NPM-style control plane + HAProxy-class data plane, soak-tested.
 
 ```bash
-# Binary (Linux amd64)
-gh release download v0.14.0 -p 'leba-linux-amd64' -p 'SHA256SUMS'
+# Binary (Linux amd64) + checksums (+ optional cosign bundle)
+gh release download v0.14.0 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
 sha256sum -c SHA256SUMS
+# cosign verify-blob --bundle leba-linux-amd64.cosign.bundle ...  # see docs/PRODUCTION.md
 chmod +x leba-linux-amd64 && sudo mv leba-linux-amd64 /usr/local/bin/leba
 leba version
 

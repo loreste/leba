@@ -68,6 +68,22 @@ on a laptop without host networking / privileged keepalived; use it to rehearse
 docker compose -f deploy/ha/docker-compose.ha.yml up -d
 ```
 
+## Local dual-node smoke (no VIP required)
+
+From a source checkout with a built binary:
+
+```bash
+make test-ha-peers
+# or: ./scripts/ha_peers_smoke.sh
+```
+
+This starts two Leba processes on localhost with stick peers enabled, checks
+peers dial/HELLO in logs and `/metrics`, idles with sessions open, then shuts
+down cleanly and sanity-checks single-node proxy without peers. It does **not**
+drive proxy or stick UPSERT while peer sessions are open (those paths can still
+abort and remain experimental). Complete the production soak checklist below on
+real VMs before treating peers as production.
+
 ## Soak checklist (peers still experimental)
 
 Record results before calling peers **production**:
@@ -79,6 +95,7 @@ Record results before calling peers **production**:
 | Stick continuity | Generate stick traffic on A; fail VIP to B; same client IP pins same server |
 | Reload under HA | `POST /admin/reload` on backup first; then failover |
 | Metrics | `/metrics`: `leba_peers_*`, `leba_stick_entries`, `leba_waf_*` |
+| Local smoke | `make test-ha-peers` green on your toolchain |
 
 ## Admin / API
 

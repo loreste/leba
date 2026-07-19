@@ -104,6 +104,24 @@ jobs:
           }
           EOF
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign binary (keyless OIDC)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle dist/leba-linux-amd64.cosign.bundle \
+            dist/leba-linux-amd64
+          cosign verify-blob \
+            --bundle dist/leba-linux-amd64.cosign.bundle \
+            --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            dist/leba-linux-amd64
+          ls -la dist/
+
       - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -112,6 +130,7 @@ jobs:
             dist/leba-linux-amd64
             dist/SHA256SUMS
             dist/sbom.cdx.json
+            dist/leba-linux-amd64.cosign.bundle
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -134,6 +153,7 @@ jobs:
 
       # Dockerfile expects a prebuilt leba binary in context
       - name: Build and push multi-arch image
+        id: image
         uses: docker/build-push-action@v6
         continue-on-error: true
         with:
@@ -143,3 +163,17 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
+
+      - name: Sign container image (keyless OIDC)
+        if: steps.image.outcome == 'success'
+        continue-on-error: true
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}"
+          cosign sign --yes "$IMAGE"
+          cosign verify \
+            --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE"

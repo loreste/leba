@@ -1,8 +1,10 @@
-MAKO ?= $(shell if [ -x /Users/loreste/mako/target/release/mako ]; then echo /Users/loreste/mako/target/release/mako; else command -v mako; fi)
+# Prefer installed Mako (stable). Override with MAKO=/path/to/mako for local builds.
+# Note: in-tree target/release/mako can be ahead of the std install and may crash.
+MAKO ?= $(shell command -v mako)
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
-.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-concurrent test-adversarial
+.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-ha-peers test-concurrent test-adversarial
 
 all: build
 
@@ -42,6 +44,11 @@ test-concurrent: build
 test-soak: build
 	chmod +x scripts/soak.sh
 	./scripts/soak.sh 200 6
+
+# Dual-node peers lifecycle on localhost (HELLO/metrics/idle; proxy under peers still experimental).
+test-ha-peers: build
+	chmod +x scripts/ha_peers_smoke.sh
+	./scripts/ha_peers_smoke.sh
 
 test-haproxy-compare: build
 	chmod +x scripts/haproxy_compare.sh

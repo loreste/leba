@@ -232,3 +232,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-18 | 0.13.0 enterprise ops (stick API, peers metrics, WAF surface, HA package, preview) |
 | 2026-07-18 | 0.14.0 platform quality (soak, LIMITS/PRODUCTION, H3 recreate, release/SBOM CI) |
 | 2026-07-19 | v0.14.0 GitHub Release published (binary, SHA256SUMS, SBOM, multi-arch GHCR image) |
+| 2026-07-19 | Cosign keyless signing on release + dual-node `make test-ha-peers` smoke |

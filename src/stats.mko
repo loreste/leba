@@ -4,6 +4,12 @@ pull "crypto"
 pack stats
 
 fn server_json(s: Server) -> string {
+    let mut pool_idle = -1
+    let mut pool_open = -1
+    if s.pool >= 0 {
+        pool_idle = tcp_pool_idle(s.pool)
+        pool_open = tcp_pool_open_count(s.pool)
+    }
     let mut b = str_builder()
     builder_write(b, "{")
     builder_write(b, "\"name\":\"")
@@ -24,6 +30,10 @@ fn server_json(s: Server) -> string {
     builder_write(b, int_to_string(s.drain))
     builder_write(b, ",\"conns\":")
     builder_write(b, int_to_string(s.conns))
+    builder_write(b, ",\"pool_idle\":")
+    builder_write(b, int_to_string(pool_idle))
+    builder_write(b, ",\"pool_open\":")
+    builder_write(b, int_to_string(pool_open))
     builder_write(b, ",\"total_req\":")
     builder_write(b, int_to_string(s.total_req))
     builder_write(b, ",\"total_err\":")
@@ -318,7 +328,7 @@ fn metrics_text(
     prom_line0(b, "leba_uptime_ms", uptime)
     builder_write(b, "# HELP leba_info Build/version info (always 1).\n")
     builder_write(b, "# TYPE leba_info gauge\n")
-    builder_write(b, "leba_info{version=\"0.12.0\"} 1\n")
+    builder_write(b, "leba_info{version=\"0.14.0\"} 1\n")
     builder_write(b, "# HELP leba_requests_total Total proxied requests.\n")
     builder_write(b, "# TYPE leba_requests_total counter\n")
     prom_line0(b, "leba_requests_total", st.total_req)
@@ -334,6 +344,27 @@ fn metrics_text(
     builder_write(b, "# HELP leba_rate_limited_total Requests rejected by rate limiting.\n")
     builder_write(b, "# TYPE leba_rate_limited_total counter\n")
     prom_line0(b, "leba_rate_limited_total", st.rate_limited)
+    builder_write(b, "# HELP leba_waf_blocked_total Requests blocked by WAF.\n")
+    builder_write(b, "# TYPE leba_waf_blocked_total counter\n")
+    prom_line0(b, "leba_waf_blocked_total", st.waf_blocked)
+    builder_write(b, "# HELP leba_waf_detected_total WAF detections in detect mode.\n")
+    builder_write(b, "# TYPE leba_waf_detected_total counter\n")
+    prom_line0(b, "leba_waf_detected_total", st.waf_detected)
+    builder_write(b, "# HELP leba_peers_hello_ok_total Successful peer HELLO exchanges.\n")
+    builder_write(b, "# TYPE leba_peers_hello_ok_total counter\n")
+    prom_line0(b, "leba_peers_hello_ok_total", st.peers_hello_ok)
+    builder_write(b, "# HELP leba_peers_auth_fail_total Peer auth failures.\n")
+    builder_write(b, "# TYPE leba_peers_auth_fail_total counter\n")
+    prom_line0(b, "leba_peers_auth_fail_total", st.peers_auth_fail)
+    builder_write(b, "# HELP leba_peers_upserts_in_total Stick upserts received from peers.\n")
+    builder_write(b, "# TYPE leba_peers_upserts_in_total counter\n")
+    prom_line0(b, "leba_peers_upserts_in_total", st.peers_upserts_in)
+    builder_write(b, "# HELP leba_peers_upserts_out_total Stick upserts broadcast to peers.\n")
+    builder_write(b, "# TYPE leba_peers_upserts_out_total counter\n")
+    prom_line0(b, "leba_peers_upserts_out_total", st.peers_upserts_out)
+    builder_write(b, "# HELP leba_peers_reconnects_total Outbound peer dial/reconnect attempts that connected.\n")
+    builder_write(b, "# TYPE leba_peers_reconnects_total counter\n")
+    prom_line0(b, "leba_peers_reconnects_total", st.peers_reconnects)
     builder_write(b, "# HELP leba_retries_total Upstream retry attempts.\n")
     builder_write(b, "# TYPE leba_retries_total counter\n")
     prom_line0(b, "leba_retries_total", st.retries)
@@ -382,6 +413,10 @@ fn metrics_text(
     builder_write(b, "# TYPE leba_server_connections gauge\n")
     builder_write(b, "# HELP leba_server_maxconn Configured server connection limit, or zero when unlimited.\n")
     builder_write(b, "# TYPE leba_server_maxconn gauge\n")
+    builder_write(b, "# HELP leba_server_pool_idle Idle upstream connections in the Mako TCP pool.\n")
+    builder_write(b, "# TYPE leba_server_pool_idle gauge\n")
+    builder_write(b, "# HELP leba_server_pool_open Open upstream connections in the Mako TCP pool.\n")
+    builder_write(b, "# TYPE leba_server_pool_open gauge\n")
     builder_write(b, "# HELP leba_server_requests_total Requests sent to a server.\n")
     builder_write(b, "# TYPE leba_server_requests_total counter\n")
     builder_write(b, "# HELP leba_server_errors_total Errors from a server.\n")
@@ -398,6 +433,14 @@ fn metrics_text(
         builder_write(b, f"leba_server_up{{backend=\"{sb}\",server=\"{sn}\"}} {up}\n")
         builder_write(b, f"leba_server_connections{{backend=\"{sb}\",server=\"{sn}\"}} {s.conns}\n")
         builder_write(b, f"leba_server_maxconn{{backend=\"{sb}\",server=\"{sn}\"}} {s.maxconn}\n")
+        let mut pool_idle = -1
+        let mut pool_open = -1
+        if s.pool >= 0 {
+            pool_idle = tcp_pool_idle(s.pool)
+            pool_open = tcp_pool_open_count(s.pool)
+        }
+        builder_write(b, f"leba_server_pool_idle{{backend=\"{sb}\",server=\"{sn}\"}} {pool_idle}\n")
+        builder_write(b, f"leba_server_pool_open{{backend=\"{sb}\",server=\"{sn}\"}} {pool_open}\n")
         builder_write(b, f"leba_server_requests_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_req}\n")
         builder_write(b, f"leba_server_errors_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_err}\n")
         builder_write(b, f"leba_server_bytes_total{{backend=\"{sb}\",server=\"{sn}\"}} {s.total_bytes}\n")
@@ -466,7 +509,7 @@ fn stats_json(
     let mut b = str_builder()
     builder_write(b, "{")
     builder_write(b, "\"name\":\"leba\",")
-    builder_write(b, "\"version\":\"0.12.0\",")
+    builder_write(b, "\"version\":\"0.14.0\",")
     builder_write(b, "\"uptime_ms\":")
     builder_write(b, int_to_string(uptime))
     builder_write(b, ",\"total_req\":")
@@ -479,6 +522,20 @@ fn stats_json(
     builder_write(b, int_to_string(st.denied))
     builder_write(b, ",\"rate_limited\":")
     builder_write(b, int_to_string(st.rate_limited))
+    builder_write(b, ",\"waf_blocked\":")
+    builder_write(b, int_to_string(st.waf_blocked))
+    builder_write(b, ",\"waf_detected\":")
+    builder_write(b, int_to_string(st.waf_detected))
+    builder_write(b, ",\"peers_hello_ok\":")
+    builder_write(b, int_to_string(st.peers_hello_ok))
+    builder_write(b, ",\"peers_auth_fail\":")
+    builder_write(b, int_to_string(st.peers_auth_fail))
+    builder_write(b, ",\"peers_upserts_in\":")
+    builder_write(b, int_to_string(st.peers_upserts_in))
+    builder_write(b, ",\"peers_upserts_out\":")
+    builder_write(b, int_to_string(st.peers_upserts_out))
+    builder_write(b, ",\"peers_reconnects\":")
+    builder_write(b, int_to_string(st.peers_reconnects))
     builder_write(b, ",\"retries\":")
     builder_write(b, int_to_string(st.retries))
     builder_write(b, ",\"last_latency_ms\":")
@@ -810,6 +867,11 @@ fn admin_path_required_role(method: string, path: string) -> string {
             return "operator"
         }
     }
+    if str_eq(method, "DELETE") {
+        if str_has_prefix(path, "/admin/") {
+            return "operator"
+        }
+    }
     return "viewer"
 }
 
@@ -896,18 +958,113 @@ struct StatsConnResult {
     tls_reload: int
     // 1 = accept thread should full_config_reload from config_path.
     full_reload: int
+    // Stick table mutation (when stick_dirty=1, accept thread replaces table).
+    stick_table: map[string]string
+    stick_count: int
+    stick_dirty: int
+    // 1 = frontends/backends/servers/routes/acls are owned clones to adopt.
+    tables_dirty: int
 }
 
 fn stats_conn_result(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route, acls: []AclRule) -> StatsConnResult {
+    // No table transfer — keep accept-thread arrays as sole owners (avoids free-alias).
+    let _ = frontends
+    let _ = backends
+    let _ = servers
+    let _ = routes
+    let _ = acls
     return StatsConnResult {
-        frontends: frontends,
-        backends: backends,
-        servers: servers,
-        routes: routes,
-        acls: acls,
+        frontends: make([]Frontend, 0, 0),
+        backends: make([]Backend, 0, 0),
+        servers: make([]Server, 0, 0),
+        routes: make([]Route, 0, 0),
+        acls: make([]AclRule, 0, 0),
         tls_reload: 0,
-        full_reload: 0
+        full_reload: 0,
+        stick_table: make(map[string]string),
+        stick_count: 0,
+        stick_dirty: 0,
+        tables_dirty: 0
     }
+}
+
+fn stats_conn_result_mut(frontends: []Frontend, backends: []Backend, servers: []Server, routes: []Route, acls: []AclRule) -> StatsConnResult {
+    return StatsConnResult {
+        frontends: frontend_array_clone(frontends),
+        backends: backend_array_clone(backends),
+        servers: server_array_clone(servers),
+        routes: route_array_clone(routes),
+        acls: acl_array_clone(acls),
+        tls_reload: 0,
+        full_reload: 0,
+        stick_table: make(map[string]string),
+        stick_count: 0,
+        stick_dirty: 0,
+        tables_dirty: 1
+    }
+}
+
+// Stick-table runtime API: GET summary/entries, DELETE clear/entry.
+// Returns (handled, status, body, table, count, dirty).
+fn handle_stick_tables_api(
+    method: string,
+    ponly: string,
+    full_path: string,
+    table: map[string]string,
+    stick_count: int,
+    backends: []Backend
+) -> (int, int, string, map[string]string, int, int) {
+    let empty = make(map[string]string)
+    if not str_has_prefix(ponly, "/admin/stick-tables") {
+        return (0, 0, "", empty, stick_count, 0)
+    }
+    let now = now_ms()
+    // GET /admin/stick-tables
+    if str_eq(ponly, "/admin/stick-tables") {
+        if str_eq(method, "GET") {
+            return (1, 200, stick_tables_summary_json(table, backends, stick_count, now), empty, stick_count, 0)
+        }
+        if str_eq(method, "DELETE") {
+            let backend = query_value(full_path, "backend")
+            let t2, c2, cleared = stick_table_clear(table, stick_count, backend)
+            let mut b = str_builder()
+            builder_write(b, "{\"ok\":true,\"action\":\"stick-tables-clear\",\"cleared\":")
+            builder_write(b, int_to_string(cleared))
+            builder_write(b, ",\"entry_count\":")
+            builder_write(b, int_to_string(c2))
+            builder_write(b, "}\n")
+            return (1, 200, builder_string(b), t2, c2, 1)
+        }
+        return (1, 405, "{\"error\":\"method not allowed\"}\n", empty, stick_count, 0)
+    }
+    // GET /admin/stick-tables/entries
+    if str_eq(ponly, "/admin/stick-tables/entries") {
+        if not str_eq(method, "GET") {
+            return (1, 405, "{\"error\":\"method not allowed\"}\n", empty, stick_count, 0)
+        }
+        let backend = query_value(full_path, "backend")
+        let lim_s = query_value(full_path, "limit")
+        let mut lim = 200
+        if not str_eq(lim_s, "") {
+            lim = to_int(lim_s)
+        }
+        return (1, 200, stick_tables_entries_json(table, now, backend, lim), empty, stick_count, 0)
+    }
+    // DELETE /admin/stick-tables/entry?key=
+    if str_eq(ponly, "/admin/stick-tables/entry") {
+        if not str_eq(method, "DELETE") {
+            if not str_eq(method, "POST") {
+                return (1, 405, "{\"error\":\"method not allowed\"}\n", empty, stick_count, 0)
+            }
+        }
+        let key = query_value(full_path, "key")
+        if str_eq(key, "") {
+            return (1, 400, "{\"error\":\"key required\"}\n", empty, stick_count, 0)
+        }
+        let t3, c3 = stick_table_delete(table, key, stick_count)
+        return (1, 200, "{\"ok\":true,\"action\":\"stick-entry-delete\"}\n", t3, c3, 1)
+    }
+    return (1, 404, "{\"error\":\"unknown stick-tables path\"}\n", empty, stick_count, 0)
 }
 
 fn stats_http_reason(status: int) -> string {
@@ -1151,6 +1308,7 @@ fn handle_stats_tls_conn(
     config_dir: string,
     oidc: OidcConfig,
     peers: PeersConfig,
+    stick_table: map[string]string,
     stick_count: int
 ) -> StatsConnResult {
     let parsed = http_parse(raw)
@@ -1174,12 +1332,12 @@ fn handle_stats_tls_conn(
     if str_eq(ponly, "/livez") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
     if str_eq(ponly, "/readyz") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
 
     let oidc_on = oidc_ready(oidc)
@@ -1362,6 +1520,18 @@ fn handle_stats_tls_conn(
         let _ = stats_tls_respond_json(conn, method, 403, "{\"error\":\"forbidden\"}\n")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
+    let st_h, st_status, st_body, st_tab, st_cnt, st_dirty = handle_stick_tables_api(method, ponly, path, stick_table, stick_count, backends)
+    if st_h == 1 {
+        let _ = stats_tls_respond_json(conn, method, st_status, st_body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, st_status, "stick_tables")
+        let mut scr_st = stats_conn_result(frontends, backends, servers, routes, acls)
+        if st_dirty == 1 {
+            scr_st.stick_table = st_tab
+            scr_st.stick_count = st_cnt
+            scr_st.stick_dirty = 1
+        }
+        return scr_st
+    }
     let ar = handle_admin_state(method, ponly, path, servers, frontends, backends, routes, acls, config_path, config_dir)
     if ar.handled == 1 {
         if ar.status == 200 {
@@ -1371,7 +1541,10 @@ fn handle_stats_tls_conn(
         }
         let _ = stats_tls_respond_json(conn, method, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result(frontends, backends, servers, routes, acls)
+        if admin_path_mutates_state(ponly) == 1 or str_eq(ponly, "/admin/reload") or str_eq(ponly, "/admin/tls-reload") {
+            scr = stats_conn_result_mut(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        }
         if str_eq(ponly, "/admin/tls-reload") {
             if ar.status == 200 {
                 scr.tls_reload = 1
@@ -1466,6 +1639,7 @@ fn handle_stats_raw_conn(
     config_dir: string,
     oidc: OidcConfig,
     peers: PeersConfig,
+    stick_table: map[string]string,
     stick_count: int
 ) -> StatsConnResult {
     let parsed = http_parse(raw)
@@ -1489,12 +1663,12 @@ fn handle_stats_raw_conn(
     if str_eq(ponly, "/livez") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
     if str_eq(ponly, "/readyz") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
 
     let role = admin_auth_role(auth_hdr, admin_users, stats_user, stats_pass)
@@ -1523,6 +1697,18 @@ fn handle_stats_raw_conn(
         let _ = stats_raw_respond_json(fd, method, 403, "{\"error\":\"forbidden\"}\n")
         return stats_conn_result(frontends, backends, servers, routes, acls)
     }
+    let st_h, st_status, st_body, st_tab, st_cnt, st_dirty = handle_stick_tables_api(method, ponly, path, stick_table, stick_count, backends)
+    if st_h == 1 {
+        let _ = stats_raw_respond_json(fd, method, st_status, st_body)
+        log_admin_audit(req_id, auth_user, role, method, ponly, st_status, "stick_tables")
+        let mut scr_st = stats_conn_result(frontends, backends, servers, routes, acls)
+        if st_dirty == 1 {
+            scr_st.stick_table = st_tab
+            scr_st.stick_count = st_cnt
+            scr_st.stick_dirty = 1
+        }
+        return scr_st
+    }
     let ar = handle_admin_state(method, ponly, path, servers, frontends, backends, routes, acls, config_path, config_dir)
     if ar.handled == 1 {
         if ar.status == 200 {
@@ -1532,7 +1718,10 @@ fn handle_stats_raw_conn(
         }
         let _ = stats_raw_respond_json(fd, method, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result(frontends, backends, servers, routes, acls)
+        if admin_path_mutates_state(ponly) == 1 or str_eq(ponly, "/admin/reload") or str_eq(ponly, "/admin/tls-reload") {
+            scr = stats_conn_result_mut(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        }
         if str_eq(ponly, "/admin/tls-reload") {
             if ar.status == 200 {
                 scr.tls_reload = 1
@@ -1661,12 +1850,12 @@ fn handle_stats_conn(
     if str_eq(ponly, "/livez") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = http_respond_json(c, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
     if str_eq(ponly, "/readyz") {
         let ar = handle_admin(method, ponly, servers, backends, config_dir)
         let _ = http_respond_json(c, ar.status, ar.body)
-        return stats_conn_result(frontends, backends, ar.servers, routes, acls)
+        return stats_conn_result_mut(frontends, backends, ar.servers, routes, acls)
     }
 
     let role = admin_auth_role(http_header(c, "Authorization"), admin_users, stats_user, stats_pass)
@@ -1705,7 +1894,7 @@ fn handle_stats_conn(
         }
         let _ = http_respond_json(c, ar.status, ar.body)
         log_admin_audit(req_id, auth_user, role, method, ponly, ar.status, "handled")
-        let mut scr = stats_conn_result(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
+        let mut scr = stats_conn_result_mut(ar.frontends, ar.backends, ar.servers, ar.routes, ar.acls)
         if str_eq(ponly, "/admin/tls-reload") {
             if ar.status == 200 {
                 scr.tls_reload = 1

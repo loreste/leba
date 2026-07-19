@@ -331,26 +331,83 @@ function viewHosts(){
 
 function viewBackends(){
   if(!DATA)return '';const d=DATA;
-  let h='<div class="panel"><h3>Backends</h3><table><tr><th>Name</th><th>Balance</th><th>Stick</th><th>DNS</th><th>Servers</th><th>Up</th><th>Health</th></tr>';
+  let h='<div class="panel"><h3>Backends</h3><table><tr><th>Name</th><th>Balance</th><th>Stick</th><th>DNS</th><th>Servers</th><th>Up</th><th>Health</th><th class="op-only"></th></tr>';
   (d.backends||[]).forEach(b=>{
     const stick=b.stick_on?`<span class="pill up">on ${esc(b.stick_on)}</span>`:'off';
     const dns=b.resolve_interval_ms?`<span class="pill">${b.resolve_interval_ms}ms</span>`:'—';
     h+=`<tr><td><strong>${esc(b.name)}</strong></td><td>${esc(b.balance)}</td><td>${stick}</td><td>${dns}</td>
-    <td>${b.servers}</td><td>${b.up}</td><td class="mono">${esc(b.health_path||'—')}</td></tr>`;
+    <td>${b.servers}</td><td>${b.up}</td><td class="mono">${esc(b.health_path||'—')}</td>
+    <td class="op-only"><button class="btn sm" onclick="showAddServer('${esc(b.name)}')">+ Server</button></td></tr>`;
   });
   h+='</table></div>';
-  h+='<div class="panel"><h3>Stick tables</h3><p class="muted" style="margin-bottom:.8rem">Source-IP stick (<code>stick on src</code>) applies on cleartext, TLS, and HTTP/3 (H3 uses XFF or cookie; shared table + peers). Peers sync is configured in <code>leba.conf</code>.</p>';
-  h+='<table><tr><th>Backend</th><th>stick_on</th><th>Size</th><th>Expire</th></tr>';
-  (d.backends||[]).filter(b=>b.stick_on).forEach(b=>{
-    h+=`<tr><td>${esc(b.name)}</td><td class="mono">${esc(b.stick_on)}</td><td>${b.stick_size||100000}</td><td>${b.stick_expire_ms||0}ms</td></tr>`;
-  });
-  if(!(d.backends||[]).some(b=>b.stick_on))h+='<tr><td colspan=4 class="muted">No backends with stick tables</td></tr>';
-  h+='</table></div>';return h;
+  h+='<div class="panel"><h3>Stick tables</h3><p class="muted" style="margin-bottom:.8rem">Source-IP stick (<code>stick on src</code>) on H1–H3. Runtime list/clear via <code>/admin/stick-tables</code>. Peers sync in <code>leba.conf</code>.</p>';
+  h+='<div class="row op-only" style="gap:.5rem;margin-bottom:.75rem"><button class="btn sm bad" onclick="clearStickTables()">Clear all entries</button><button class="btn sm" onclick="loadStickEntries()">Refresh entries</button></div>';
+  h+='<div id="stickLive"><p class="muted">Loading stick runtime…</p></div>';
+  h+='<div id="stickEntries" style="margin-top:1rem"></div></div>';
+  setTimeout(()=>{loadStickSummary();loadStickEntries()},0);
+  return h;
+}
+
+async function loadStickSummary(){
+  const el=$('#stickLive');if(!el)return;
+  try{
+    const d=await api('/admin/stick-tables');
+    let h=`<div class="grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:.75rem">
+      <div class="stat-card"><div class="label">Tracked</div><div class="value">${d.entry_count||0}</div></div>
+      <div class="stat-card"><div class="label">Live</div><div class="value">${d.live_count||0}</div></div>
+      <div class="stat-card"><div class="label">Stick backends</div><div class="value">${(d.backends||[]).length}</div></div></div>`;
+    h+='<table><tr><th>Backend</th><th>stick_on</th><th>Size</th><th>Expire</th><th>Live</th><th class="op-only"></th></tr>';
+    (d.backends||[]).forEach(b=>{
+      h+=`<tr><td>${esc(b.backend)}</td><td class="mono">${esc(b.stick_on)}</td><td>${b.size||0}</td><td>${b.expire_ms||0}ms</td><td>${b.live_entries||0}</td>
+      <td class="op-only"><button class="btn sm bad" onclick="clearStickTables('${esc(b.backend)}')">Clear</button></td></tr>`;
+    });
+    if(!(d.backends||[]).length)h+='<tr><td colspan=6 class="muted">No backends with stick tables</td></tr>';
+    h+='</table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
+}
+
+async function loadStickEntries(){
+  const el=$('#stickEntries');if(!el)return;
+  try{
+    const d=await api('/admin/stick-tables/entries?limit=100');
+    let h='<h3 style="font-size:.95rem;margin-bottom:.5rem">Entries (max 100)</h3><table><tr><th>Key</th><th>Backend</th><th>Server</th><th>Expires</th><th class="op-only"></th></tr>';
+    (d.entries||[]).forEach(e=>{
+      h+=`<tr><td class="mono">${esc(e.key)}</td><td>${esc(e.backend)}</td><td>${esc(e.server)}</td><td class="mono">${e.expires_ms||0}</td>
+      <td class="op-only"><button class="btn sm bad" onclick="deleteStickEntry('${esc(e.key)}')">Delete</button></td></tr>`;
+    });
+    if(!(d.entries||[]).length)h+='<tr><td colspan=5 class="muted">No live entries</td></tr>';
+    h+='</table>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
+}
+
+async function clearStickTables(backend){
+  if(!confirm(backend?'Clear stick entries for '+backend+'?':'Clear ALL stick table entries?'))return;
+  try{
+    const q=backend?'?backend='+encodeURIComponent(backend):'';
+    await api('/admin/stick-tables'+q,'DELETE');
+    toast('Stick table cleared');loadStickSummary();loadStickEntries();
+  }catch(e){toast(e.message,1)}
+}
+
+async function deleteStickEntry(key){
+  try{
+    await api('/admin/stick-tables/entry?key='+encodeURIComponent(key),'DELETE');
+    toast('Entry deleted');loadStickSummary();loadStickEntries();
+  }catch(e){toast(e.message,1)}
+}
+
+function showAddServer(be){
+  const name=prompt('Server name for backend '+be);if(!name)return;
+  const addr=prompt('Address host:port');if(!addr)return;
+  api('/admin/server?backend='+encodeURIComponent(be)+'&name='+encodeURIComponent(name)+'&addr='+encodeURIComponent(addr),'POST')
+    .then(()=>{toast('Server added');refresh()}).catch(e=>toast(e.message,1));
 }
 
 function viewFrontends(){
   if(!DATA)return '';const d=DATA;
-  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS / SNI</th><th>WAF</th><th>Auth</th><th>ACME</th><th>Protocols</th><th>Rate</th></tr>';
+  let h='<div class="panel"><h3>Frontends</h3><table><tr><th>Name</th><th>Bind</th><th>Mode</th><th>TLS / SNI</th><th>WAF</th><th>Auth</th><th>ACME</th><th>Protocols</th><th>Rate</th><th class="op-only">WAF mode</th></tr>';
   (d.frontends||[]).forEach(f=>{
     const sni=(f.tls_sni||[]).length;
     const tls=f.tls_cert?(sni?`<span class="pill up">TLS+${sni} SNI</span>`:'<span class="pill up">TLS</span>'):'off';
@@ -360,9 +417,22 @@ function viewFrontends(){
     <td>${f.auth_basic_realm?'<span class="pill warn">Basic</span>':'off'}</td>
     <td>${f.acme_webroot?'<span class="pill up" title="'+esc(f.acme_webroot)+'">webroot</span>':'—'}</td>
     <td class="mono">${esc(f.protocols||'http/1.1')}</td>
-    <td>${f.rate_limit||0}/s</td></tr>`;
+    <td>${f.rate_limit||0}/s</td>
+    <td class="op-only"><select onchange="setWafMode('${esc(f.name)}',this.value)">
+      <option value="off"${!f.waf_mode||f.waf_mode==='off'?' selected':''}>off</option>
+      <option value="detect"${f.waf_mode==='detect'?' selected':''}>detect</option>
+      <option value="block"${f.waf_mode==='block'||f.waf_mode==='on'?' selected':''}>block</option>
+    </select></td></tr>`;
   });
   h+='</table></div>';
+  h+=`<div class="panel"><h3>WAF</h3>
+    <div class="grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:.75rem">
+      <div class="stat-card"><div class="label">Blocked</div><div class="value">${d.waf_blocked||0}</div><div class="sub">Prometheus leba_waf_blocked_total</div></div>
+      <div class="stat-card"><div class="label">Detected</div><div class="value">${d.waf_detected||0}</div><div class="sub">detect mode hits</div></div>
+    </div>
+    <div id="wafRules"><p class="muted">Loading sample rules…</p></div>
+  </div>`;
+  setTimeout(loadWafRules,0);
   // SNI table
   h+='<div class="panel"><h3>TLS SNI certificates</h3>';
   let sniRows='';
@@ -420,15 +490,27 @@ function viewPlatform(){
 
   h+='<div class="panel"><h3>Operations</h3><div class="row op-only" style="gap:.6rem;flex-wrap:wrap">';
   h+='<button class="btn primary" onclick="tlsReload()">TLS reload</button>';
+  h+='<button class="btn" onclick="previewReload()">Preview apply (doctor)</button>';
   h+='<button class="btn primary" onclick="fullReload()">Full config reload</button>';
   h+='<button class="btn" onclick="reloadServers()">Reload servers_file</button>';
-  h+='</div><p class="muted" style="margin-top:.75rem;font-size:.8rem">Full reload rebinds HTTP/TCP/UDP/H3/stats/peers and re-applies OIDC discovery. Configure peers &amp; OIDC in <code>leba.conf</code>.</p></div>';
+  h+='</div><div id="doctorBox" class="muted" style="margin-top:.75rem;font-size:.82rem;white-space:pre-wrap"></div>';
+  h+='<p class="muted" style="margin-top:.75rem;font-size:.8rem">Full reload rebinds HTTP/TCP/UDP/H3/stats/peers and re-applies OIDC discovery. Configure peers &amp; OIDC in <code>leba.conf</code>.</p></div>';
+
+  h+=`<div class="panel"><h3>Peers runtime</h3>
+    <table><tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>HELLO ok</td><td>${d.peers_hello_ok||0}</td></tr>
+    <tr><td>Auth fail</td><td>${d.peers_auth_fail||0}</td></tr>
+    <tr><td>Upserts in / out</td><td>${d.peers_upserts_in||0} / ${d.peers_upserts_out||0}</td></tr>
+    <tr><td>Reconnects (connected)</td><td>${d.peers_reconnects||0}</td></tr>
+    </table>
+    <p class="muted" style="margin-top:.5rem;font-size:.78rem">Still experimental until soak report — see docs/HA.md.</p>
+  </div>`;
 
   h+='<div class="panel"><h3>Enterprise features</h3><table><tr><th>Feature</th><th>Status</th><th>Notes</th></tr>';
   h+=`<tr><td>Multi-cert SNI</td><td>${sni?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>tls_sni / proxy-host cert</td></tr>`;
-  h+=`<tr><td>Stick tables (H1/H2/H3)</td><td>${stick.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>stick on src · cookie · peers</td></tr>`;
+  h+=`<tr><td>Stick tables (H1/H2/H3)</td><td>${stick.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>stick on src · cookie · peers · /admin/stick-tables</td></tr>`;
   h+=`<tr><td>DNS resolve / expand / SRV</td><td>${dns.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>docs/DNS.md</td></tr>`;
-  h+=`<tr><td>WAF adapter</td><td>${waf.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>local + remote inspect</td></tr>`;
+  h+=`<tr><td>WAF adapter</td><td>${waf.length?'<span class="pill up">ACTIVE</span>':'<span class="pill">config</span>'}</td><td>local + remote · blocked ${d.waf_blocked||0}</td></tr>`;
   h+=`<tr><td>Stick peers (HA)</td><td><span class="pill">config</span></td><td>peers section · docs/HA.md</td></tr>`;
   const oidc=d.oidc||{};const peers=d.peers||{};
   h+=`<tr><td>Admin OIDC SSO</td><td>${oidc.ready?'<span class="pill up">READY</span>':(oidc.enabled?'<span class="pill">enabled</span>':'<span class="pill">off</span>')}</td><td>${esc(oidc.issuer||'oidc section')} · /oidc/login</td></tr>`;
@@ -458,7 +540,8 @@ async function loadAnalyticsData(){
 }
 
 function viewConfig(){
-  const fes=DATA?.frontends||[];
+  const d=DATA||{};
+  const fes=d.frontends||[];
   const acme=fes.filter(f=>f.acme_webroot);
   const basic=fes.filter(f=>f.auth_basic_realm);
   const sni=fes.reduce((n,f)=>n+(f.tls_sni||[]).length,0);
@@ -471,10 +554,24 @@ function viewConfig(){
   <tr><td>OIDC SSO</td><td>${(d.oidc&&d.oidc.ready)?'<span class="pill up">ready</span>':(d.oidc&&d.oidc.enabled)?'enabled':'off'} · /oidc/login</td></tr>
   <tr><td>Stick peers</td><td>${(d.peers&&d.peers.ready)?'<span class="pill up">ready</span>':(d.peers&&d.peers.enabled)?'enabled':'off'} · remotes ${(d.peers&&d.peers.remote_count)||0}</td></tr>
   <tr><td>App HTTP Basic</td><td>${basic.length?'<span class="pill up">'+basic.length+' frontend(s)</span>':'off'}</td></tr>
-  <tr><td>WAF</td><td>${waf.length?'<span class="pill warn">'+waf.length+' frontend(s)</span>':'off'}</td></tr>
+  <tr><td>WAF</td><td>${waf.length?'<span class="pill warn">'+waf.length+' frontend(s)</span>':'off'} · blocked ${d.waf_blocked||0}</td></tr>
   <tr><td>ACME webroot</td><td>${acme.length?'<span class="pill up">'+acme.map(f=>esc(f.name)).join(', ')+'</span>':'not set'}</td></tr>
   <tr><td>RBAC</td><td><span class="pill up">ENFORCED</span></td></tr>
   <tr><td>Audit logging</td><td><span class="pill up">ON</span></td></tr></table></div>
+  <div class="panel"><h3>Config apply preview</h3>
+  <div class="row op-only" style="gap:.5rem;margin-bottom:.5rem">
+    <button class="btn" onclick="previewReload()">Run doctor preview</button>
+    <button class="btn" onclick="runDoctor()">GET /admin/doctor</button>
+    <button class="btn primary" onclick="fullReload()">Apply full reload</button>
+  </div>
+  <div class="row" style="gap:.4rem;flex-wrap:wrap;margin-bottom:.5rem">
+    <input id="exMethod" value="GET" style="width:80px">
+    <input id="exPath" value="/" style="width:120px" placeholder="path">
+    <input id="exHost" value="localhost" style="width:140px" placeholder="host">
+    <button class="btn sm" onclick="runExplain()">Explain request</button>
+  </div>
+  <pre id="previewBox" class="muted" style="font-size:.78rem;white-space:pre-wrap;max-height:280px;overflow:auto"></pre>
+  </div>
   <div class="panel"><h3>TLS / ACME ops</h3>
   <div class="form-grid op-only">
     <div><label>Frontend</label><select id="certFe">${fes.filter(f=>f.mode==='http'||f.mode==='stats').map(f=>'<option value="'+esc(f.name)+'">'+esc(f.name)+'</option>').join('')}</select></div>
@@ -518,11 +615,45 @@ function viewAPI(){
   <tr><td>POST</td><td class="mono">/admin/vhost-cert</td><td>Default or SNI cert (<code>hostname=</code>)</td></tr>
   <tr><td>POST</td><td class="mono">/admin/tls-reload</td><td>Live TLS + SNI refresh</td></tr>
   <tr><td>POST</td><td class="mono">/admin/reload</td><td>Full config reload + rebind (admin)</td></tr>
+  <tr><td>GET/POST</td><td class="mono">/admin/preview-reload</td><td>Doctor preview without apply</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/doctor · /admin/explain</td><td>Config doctor + request dry-run</td></tr>
+  <tr><td>GET/DELETE</td><td class="mono">/admin/stick-tables*</td><td>Stick table list / clear / entries</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/server · server-delete</td><td>Runtime server upsert/delete</td></tr>
+  <tr><td>POST</td><td class="mono">/admin/waf-mode</td><td>Per-frontend WAF mode toggle</td></tr>
+  <tr><td>GET</td><td class="mono">/admin/waf-rules</td><td>Sample local WAF signatures</td></tr>
   <tr><td>POST</td><td class="mono">/admin/reload-servers</td><td>Reload servers_file</td></tr>
   <tr><td>GET</td><td class="mono">/oidc/login</td><td>Start OIDC SSO</td></tr>
   <tr><td>GET</td><td class="mono">/metrics</td><td>Prometheus</td></tr>
   <tr><td>GET</td><td class="mono">/readyz · /livez</td><td>Probes</td></tr>
   </table></div>`;
+}
+
+async function setWafMode(fe,mode){
+  try{await api('/admin/waf-mode?frontend='+encodeURIComponent(fe)+'&mode='+encodeURIComponent(mode),'POST');
+  toast('WAF '+fe+' → '+mode);await refresh()}catch(e){toast(e.message,1)}
+}
+async function loadWafRules(){
+  const el=$('#wafRules');if(!el)return;
+  try{const d=await api('/admin/waf-rules');
+  let h='<table><tr><th>ID</th><th>Category</th><th>Pattern</th></tr>';
+  (d.rules||[]).forEach(r=>{h+=`<tr><td class="mono">${esc(r.id)}</td><td>${esc(r.category)}</td><td class="mono">${esc(r.pattern)}</td></tr>`});
+  h+='</table><p class="muted" style="font-size:.75rem;margin-top:.4rem">'+(d.note||'')+'</p>';
+  el.innerHTML=h}catch(e){el.innerHTML='<p class="muted">'+esc(e.message)+'</p>'}
+}
+async function previewReload(){
+  try{const d=await api('/admin/preview-reload','POST');
+  const box=$('#previewBox')||$('#doctorBox');
+  if(box)box.textContent=(d.ok?'OK to apply':'Would fail')+'\n'+(d.text||d.error||'');
+  toast(d.ok?'Preview: doctor OK':'Preview: doctor failed',!d.ok)}catch(e){toast(e.message,1)}
+}
+async function runDoctor(){
+  try{const d=await api('/admin/doctor');const box=$('#previewBox')||$('#doctorBox');
+  if(box)box.textContent=d.text||JSON.stringify(d);toast(d.ok?'Doctor OK':'Doctor errors',!d.ok)}catch(e){toast(e.message,1)}
+}
+async function runExplain(){
+  const m=$('#exMethod')?.value||'GET',p=$('#exPath')?.value||'/',h=$('#exHost')?.value||'';
+  try{const d=await api('/admin/explain?method='+encodeURIComponent(m)+'&path='+encodeURIComponent(p)+'&host='+encodeURIComponent(h));
+  const box=$('#previewBox');if(box)box.textContent=d.text||JSON.stringify(d)}catch(e){toast(e.message,1)}
 }
 
 // ---- Actions ----

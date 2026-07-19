@@ -351,6 +351,185 @@ fn stick_table_set(
     return (out, count, exp)
 }
 
+// Backend prefix for stick keys: "backend|src|…"
+fn stick_key_backend(key: string) -> string {
+    let cut = str_index(key, "|")
+    if cut < 0 {
+        return ""
+    }
+    return substr(key, 0, cut)
+}
+
+// Count live (non-empty, non-expired) entries, optionally filtered by backend name.
+fn stick_table_live_count(table: map[string]string, now_ms: int, backend_filter: string) -> int {
+    let keys = maps_keys(table)
+    let mut n = 0
+    for _, k in range keys {
+        if str_eq(k, "") {
+            continue
+        }
+        if not str_eq(backend_filter, "") {
+            if not str_eq(stick_key_backend(k), backend_filter) {
+                continue
+            }
+        }
+        let enc = table[k]
+        if str_eq(enc, "") {
+            continue
+        }
+        let exp = stick_decode_expires(enc)
+        if exp > 0 {
+            if now_ms > exp {
+                continue
+            }
+        }
+        n = n + 1
+    }
+    return n
+}
+
+// Clear entries: all when backend_filter empty, else only keys for that backend.
+// Returns (table, new_count, cleared).
+fn stick_table_clear(
+    table: map[string]string,
+    entry_count: int,
+    backend_filter: string
+) -> (map[string]string, int, int) {
+    let mut out = maps_clone(table)
+    let keys = maps_keys(out)
+    let mut cleared = 0
+    let mut count = entry_count
+    for _, k in range keys {
+        if str_eq(k, "") {
+            continue
+        }
+        let enc = out[k]
+        if str_eq(enc, "") {
+            continue
+        }
+        if not str_eq(backend_filter, "") {
+            if not str_eq(stick_key_backend(k), backend_filter) {
+                continue
+            }
+        }
+        out[k] = ""
+        cleared = cleared + 1
+        count = count - 1
+    }
+    if count < 0 {
+        count = 0
+    }
+    return (out, count, cleared)
+}
+
+// JSON summary: entry_count + per-backend stick config and live entries.
+fn stick_tables_summary_json(
+    table: map[string]string,
+    backends: []Backend,
+    stick_count: int,
+    now_ms: int
+) -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"entry_count\":")
+    builder_write(b, int_to_string(stick_count))
+    builder_write(b, ",\"live_count\":")
+    builder_write(b, int_to_string(stick_table_live_count(table, now_ms, "")))
+    builder_write(b, ",\"backends\":[")
+    let mut first = 1
+    for _, be in range backends {
+        if str_eq(be.stick_on, "") {
+            continue
+        }
+        if first == 0 {
+            builder_write(b, ",")
+        }
+        first = 0
+        let live = stick_table_live_count(table, now_ms, be.name)
+        let mut sz = be.stick_size
+        if sz <= 0 {
+            sz = 100000
+        }
+        builder_write(b, "{\"backend\":\"")
+        builder_write(b, json_escape(be.name))
+        builder_write(b, "\",\"stick_on\":\"")
+        builder_write(b, json_escape(be.stick_on))
+        builder_write(b, "\",\"size\":")
+        builder_write(b, int_to_string(sz))
+        builder_write(b, ",\"expire_ms\":")
+        builder_write(b, int_to_string(be.stick_expire_ms))
+        builder_write(b, ",\"live_entries\":")
+        builder_write(b, int_to_string(live))
+        builder_write(b, "}")
+    }
+    builder_write(b, "]}\n")
+    return builder_string(b)
+}
+
+// List stick entries as JSON (capped). backend_filter optional.
+fn stick_tables_entries_json(
+    table: map[string]string,
+    now_ms: int,
+    backend_filter: string,
+    limit: int
+) -> string {
+    let mut lim = limit
+    if lim <= 0 {
+        lim = 200
+    }
+    if lim > 2000 {
+        lim = 2000
+    }
+    let keys = maps_keys(table)
+    let mut b = str_builder()
+    builder_write(b, "{\"limit\":")
+    builder_write(b, int_to_string(lim))
+    builder_write(b, ",\"entries\":[")
+    let mut n = 0
+    let mut first = 1
+    for _, k in range keys {
+        if n >= lim {
+            break
+        }
+        if str_eq(k, "") {
+            continue
+        }
+        if not str_eq(backend_filter, "") {
+            if not str_eq(stick_key_backend(k), backend_filter) {
+                continue
+            }
+        }
+        let enc = table[k]
+        if str_eq(enc, "") {
+            continue
+        }
+        let exp = stick_decode_expires(enc)
+        if exp > 0 {
+            if now_ms > exp {
+                continue
+            }
+        }
+        let srv = stick_decode_server(enc)
+        if first == 0 {
+            builder_write(b, ",")
+        }
+        first = 0
+        builder_write(b, "{\"key\":\"")
+        builder_write(b, json_escape(k))
+        builder_write(b, "\",\"backend\":\"")
+        builder_write(b, json_escape(stick_key_backend(k)))
+        builder_write(b, "\",\"server\":\"")
+        builder_write(b, json_escape(srv))
+        builder_write(b, "\",\"expires_ms\":")
+        builder_write(b, int_to_string(exp))
+        builder_write(b, "}")
+        n = n + 1
+    }
+    builder_write(b, "],\"returned\":")
+    builder_write(b, int_to_string(n))
+    builder_write(b, "}\n")
+    return builder_string(b)
+}
+
 fn find_server_idx_by_name(servers: []Server, backend: string, name: string) -> int {
     for i, s in range servers {
         if str_eq(s.backend, backend) {
@@ -528,7 +707,9 @@ fn retry_plan_empty() -> RetryPlan {
 
 fn retry_hop_from_server(s: Server, si: int) -> RetryHop {
     return RetryHop {
-        host: s.host,
+        // RetryPlan crosses the scheduler boundary. Keep a distinct owned
+        // string so the worker cannot release the accept thread's Server.host.
+        host: own_string(s.host),
         port: s.port,
         pool: s.pool,
         server_idx: si

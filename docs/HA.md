@@ -63,13 +63,42 @@ Behavior:
 3. Incoming upserts prefer the entry with the later absolute expiry.
 4. Serviced only on the accept thread (no map races with workers).
 
-**Status:** experimental. Prefer private networks / firewall peer ports. Peers
-are not required for active/standby VIP HA; they improve stick continuity after
-failover for `stick on src` on **cleartext, TLS HTTP/1–2, and HTTP/3** frontends.
-Stick keys use the client **IP** (not source port); with `xff on`, the first
-`X-Forwarded-For` hop is used when present. On HTTP/3, peer address is not
-available from Mako yet, so stick falls back to XFF when present (and still
+**Status:** experimental (production path metrics shipped in 0.13; call
+production only after soak). Prefer private networks / firewall peer ports.
+Peers are not required for active/standby VIP HA; they improve stick continuity
+after failover for `stick on src` on **cleartext, TLS HTTP/1–2, and HTTP/3**
+frontends. Stick keys use the client **IP** (not source port); with `xff on`,
+the first `X-Forwarded-For` hop is used when present. On HTTP/3, peer address is
+not available from Mako yet, so stick falls back to XFF when present (and still
 shares the same in-process table + peer UPSERT path as TCP/TLS).
+
+### Peers metrics (0.13+)
+
+| Series | Meaning |
+|--------|---------|
+| `leba_peers_enabled` / `leba_peers_ready` | Config |
+| `leba_peers_remotes` | Configured remotes |
+| `leba_peers_hello_ok_total` | Successful HELLO |
+| `leba_peers_auth_fail_total` | Auth / protocol rejects |
+| `leba_peers_upserts_in_total` / `leba_peers_upserts_out_total` | Stick sync |
+| `leba_peers_reconnects_total` | Outbound dials that connected |
+
+Reconnect: accept thread re-dials missing remotes about every 5s via
+`peers_dial_missing`. Identity/secret changes on reload reset sessions.
+
+### Stick runtime API
+
+| Method | Path |
+|--------|------|
+| GET | `/admin/stick-tables` |
+| GET | `/admin/stick-tables/entries?backend=&limit=` |
+| DELETE | `/admin/stick-tables?backend=` |
+| DELETE | `/admin/stick-tables/entry?key=` |
+
+### Soak notes
+
+See **[deploy/ha/README.md](../deploy/ha/README.md)** for the turnkey dual-node
+package, keepalived, compose lab, and soak checklist.
 
 ## Config reload under HA
 

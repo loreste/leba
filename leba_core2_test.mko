@@ -657,6 +657,16 @@ fn TestSipCallIdExtraction() {
     assert_eq_str(sip_call_id(compact), "compact-42")
 }
 
+fn TestUpstreamConnectionReusePolicy() {
+    assert_eq(upstream_connection_reusable(0, 200, ""), 0)
+    assert_eq(upstream_connection_reusable(1, 0, ""), 0)
+    assert_eq(upstream_connection_reusable(1, 200, "Content-Length: 0\r\n"), 1)
+    assert_eq(upstream_connection_reusable(1, 200, "Connection: close\r\n"), 0)
+    assert_eq(upstream_connection_reusable(1, 200, "connection: keep-alive\r\n"), 1)
+    assert_eq(upstream_connection_reusable(1, 200, "X-Connection: close\r\n"), 1)
+    assert_eq(upstream_connection_reusable(1, 200, "Proxy-Connection: close\r\n"), 0)
+}
+
 fn TestSipCallIdBalanceIsStable() {
     let mut servers = make([]Server, 0, 2)
     servers = append(servers, server_new("s1", "h", 1, 1, 1, "sip"))
@@ -1043,6 +1053,43 @@ fn TestFindHttpListenerByNameAndBind() {
     assert_eq(find_http_listener_idx(listeners, "web", "127.0.0.1", 80), 0)
     assert_eq(find_http_listener_idx(listeners, "web", "127.0.0.1", 81), 0 - 1)
     assert_eq_str(frontend_bind_key("127.0.0.1", 443), "127.0.0.1:443")
+}
+
+fn TestStickTableRuntimeApiHelpers() {
+    let mut table = make(map[string]string)
+    let mut count = 0
+    let t1, c1, exp1 = stick_table_set(table, "app|src|1.2.3.4", "srv1", 60000, 100, 1000000, count)
+    assert(exp1 > 0)
+    assert_eq(c1, 1)
+    table = t1
+    count = c1
+    let t2, c2, exp2 = stick_table_set(table, "api|src|9.9.9.9", "s2", 60000, 100, 1000000, count)
+    table = t2
+    count = c2
+    assert_eq(count, 2)
+    assert_eq(stick_table_live_count(table, 1000000, ""), 2)
+    assert_eq(stick_table_live_count(table, 1000000, "app"), 1)
+    assert_eq_str(stick_key_backend("app|src|1.2.3.4"), "app")
+    let summary = stick_tables_summary_json(table, make([]Backend, 0, 0), count, 1000000)
+    assert(str_contains(summary, "\"entry_count\":2"))
+    let entries = stick_tables_entries_json(table, 1000000, "app", 10)
+    assert(str_contains(entries, "srv1"))
+    assert(str_contains(entries, "app|src|1.2.3.4"))
+    let t3, c3, cleared = stick_table_clear(table, count, "app")
+    assert_eq(cleared, 1)
+    assert_eq(c3, 1)
+    assert_eq_str(stick_table_get(t3, "app|src|1.2.3.4", 1000000), "")
+    assert_eq_str(stick_table_get(t3, "api|src|9.9.9.9", 1000000), "s2")
+    let t4, c4, cleared_all = stick_table_clear(t3, c3, "")
+    assert_eq(cleared_all, 1)
+    assert_eq(c4, 0)
+    let _ = exp2
+    let _ = t4
+    // WAF sample catalog
+    let rules = waf_sample_rules_json()
+    assert(str_contains(rules, "local.path_traversal"))
+    assert_eq(waf_mode_valid("detect"), 1)
+    assert_eq(waf_mode_valid("nope"), 0)
 }
 
 fn TestStickTableGetSetAndPick() {

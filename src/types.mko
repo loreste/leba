@@ -276,6 +276,25 @@ struct LiveStats {
     last_req_ms: int
     last_latency_ms: int
     max_latency_ms: int
+    // WAF product counters (accept-thread)
+    waf_blocked: int
+    waf_detected: int
+    // Peers runtime counters (accept-thread)
+    peers_hello_ok: int
+    peers_auth_fail: int
+    peers_upserts_in: int
+    peers_upserts_out: int
+    peers_reconnects: int
+}
+
+// Runtime peers session stats snapshot (config + live).
+struct PeersRuntime {
+    sessions: int
+    hello_ok: int
+    auth_fail: int
+    upserts_in: int
+    upserts_out: int
+    reconnects: int
 }
 
 struct Config {
@@ -316,7 +335,25 @@ fn stats_new() -> LiveStats {
         retries: 0,
         last_req_ms: 0,
         last_latency_ms: 0,
-        max_latency_ms: 0
+        max_latency_ms: 0,
+        waf_blocked: 0,
+        waf_detected: 0,
+        peers_hello_ok: 0,
+        peers_auth_fail: 0,
+        peers_upserts_in: 0,
+        peers_upserts_out: 0,
+        peers_reconnects: 0
+    }
+}
+
+fn peers_runtime_new() -> PeersRuntime {
+    return PeersRuntime {
+        sessions: 0,
+        hello_ok: 0,
+        auth_fail: 0,
+        upserts_in: 0,
+        upserts_out: 0,
+        reconnects: 0
     }
 }
 
@@ -647,7 +684,7 @@ fn frontend_array_clone(src: []Frontend) -> []Frontend {
 
 // Upsert an SNI cert by hostname (case-sensitive config key; Mako matches case-insensitively).
 fn frontend_upsert_tls_sni(fe: Frontend, hostname: string, cert: string, key: string) -> Frontend {
-    let mut out = fe
+    let mut out = frontend_clone(fe)
     let mut next = make([]TlsSniEntry, 0, len(out.tls_sni) + 1)
     let mut found = 0
     for _, e in range out.tls_sni {
@@ -655,7 +692,7 @@ fn frontend_upsert_tls_sni(fe: Frontend, hostname: string, cert: string, key: st
             next = append(next, tls_sni_entry_new(hostname, cert, key))
             found = 1
         } else {
-            next = append(next, e)
+            next = append(next, tls_sni_entry_new(e.hostname, e.cert, e.key))
         }
     }
     if found == 0 {

@@ -2,7 +2,7 @@ MAKO ?= $(shell if [ -x /Users/loreste/mako/target/release/mako ]; then echo /Us
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
-.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare
+.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-concurrent test-adversarial
 
 all: build
 
@@ -37,6 +37,11 @@ test-adversarial: test test-linux-assets
 test-concurrent: build
 	chmod +x scripts/concurrent_smoke.sh
 	./scripts/concurrent_smoke.sh 200
+
+# Connection budget, keep-alive, body limit, reload under load (0.14 platform quality).
+test-soak: build
+	chmod +x scripts/soak.sh
+	./scripts/soak.sh 200 6
 
 test-haproxy-compare: build
 	chmod +x scripts/haproxy_compare.sh

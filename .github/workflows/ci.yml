@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Mako (if available as release binary)
+        run: |
+          set -euo pipefail
+          if command -v mako >/dev/null 2>&1; then
+            mako version
+            exit 0
+          fi
+          echo "Mako not in PATH — installing via cargo if rust present, else skip compile tests"
+          if command -v cargo >/dev/null 2>&1; then
+            cargo install --git https://github.com/loreste/mako mako --locked || true
+          fi
+          if ! command -v mako >/dev/null 2>&1; then
+            echo "SKIP_MAKO=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Unit tests
+        if: env.SKIP_MAKO != '1'
+        run: make test
+
+      - name: Build
+        if: env.SKIP_MAKO != '1'
+        run: make build
+
+      - name: Linux deploy assets
+        run: make test-linux-assets
+
+      - name: HA package assets
+        run: |
+          test -f deploy/ha/README.md
+          test -f deploy/ha/keepalived.conf.example
+          test -f deploy/ha/docker-compose.ha.yml
+          test -f deploy/ha/leba-healthcheck.sh
+
+      - name: Soak harness
+        if: env.SKIP_MAKO != '1'
+        run: make test-soak
+
+      - name: Docs presence
+        run: |
+          test -f docs/PRODUCTION.md
+          test -f docs/LIMITS.md
+          test -f docs/ROADMAP.md

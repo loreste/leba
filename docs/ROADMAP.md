@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Baseline** | Leba **0.12.0** (2026-07) — host parity + DNS-01 |
+| **Baseline** | Leba **0.14.0** (2026-07) — platform quality |
 | **North star** | HAProxy-class data plane + Nginx Proxy Manager (NPM) day-1 UX, open-core price |
 | **Status** | Living roadmap — update each release |
 | **Related** | [COMPETITIVE_ARCHITECTURE.md](COMPETITIVE_ARCHITECTURE.md) (design depth), [PAINPOINTS.md](PAINPOINTS.md) (ops workflows) |
@@ -118,37 +118,37 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 
 ---
 
-### 0.13 — Enterprise ops surface
+### 0.13 — Enterprise ops surface ✅ *(0.13.0)*
 
 **Goal:** HAProxy Enterprise “day 2” without Fusion.
 
-| Work | Priority | Acceptance |
-|------|----------|------------|
-| Stick-table runtime API: list / clear / stats | P0 | `GET/DELETE /admin/stick-tables…` + UI |
-| Peers production path: auth soak, reconnect, metrics | P0 | Flag still experimental until soak report |
-| WAF product surface: mode toggle, blocked counters, sample rules | P1 | UI + Prometheus series |
-| Turnkey HA package: dual-node compose + keepalived template | P1 | `deploy/ha/` end-to-end README |
-| Runtime object API expansion (backends/servers CRUD) | P1 | Operator role; doctor on write |
-| Config “apply” preview (doctor + explain before reload) | P2 | UI button |
+| Work | Priority | Status |
+|------|----------|--------|
+| Stick-table runtime API: list / clear / stats | P0 | ✅ `GET/DELETE /admin/stick-tables…` + UI |
+| Peers production path: auth soak, reconnect, metrics | P0 | ✅ metrics + reconnect; still experimental until soak report |
+| WAF product surface: mode toggle, blocked counters, sample rules | P1 | ✅ UI + Prometheus + `/admin/waf-*` |
+| Turnkey HA package: dual-node compose + keepalived template | P1 | ✅ `deploy/ha/` README + compose |
+| Runtime object API expansion (backends/servers CRUD) | P1 | ✅ `POST /admin/server` + delete |
+| Config “apply” preview (doctor + explain before reload) | P2 | ✅ `/admin/preview-reload` + doctor/explain UI |
 
 **Exit:** H2 runtime, H3 docs+recipe, H4 usable; peers still honest if not soak-complete.
 
 ---
 
-### 0.14 — Platform quality
+### 0.14 — Platform quality ✅ *(0.14.0)*
 
 **Goal:** Trust for production edge.
 
-| Work | Priority | Acceptance |
-|------|----------|------------|
-| Concurrent / soak harness (connection budget, KA, reload under load) | P0 | CI job or `make test-soak` |
-| Streaming / large body policy (document limits; optional pump path) | P1 | Doc + doctor warning |
-| H3 cert reload strategy (recreate vs restart_required) | P1 | Consistent API field |
-| TLS client keep-alive (if needed) | P2 | Benchmark gated |
-| OpenTelemetry export (optional) | P2 | Or stick to Prometheus |
-| Supply chain: signed releases, SBOM, multi-arch images | P0 | gh releases + checksums |
+| Work | Priority | Status |
+|------|----------|--------|
+| Concurrent / soak harness (connection budget, KA, reload under load) | P0 | ✅ `make test-soak` / `scripts/soak.sh` + CI |
+| Streaming / large body policy (document limits; optional pump path) | P1 | ✅ `docs/LIMITS.md` + doctor WARN &gt;16MB |
+| H3 cert reload strategy (recreate vs restart_required) | P1 | ✅ `h3_strategy=recreate` + in-process rebind |
+| TLS client keep-alive (if needed) | P2 | Deferred — cleartext KA only; see LIMITS.md |
+| OpenTelemetry export (optional) | P2 | Deferred — Prometheus remains default |
+| Supply chain: signed releases, SBOM, multi-arch images | P0 | ✅ release workflow + SHA256SUMS + SBOM + multi-arch |
 
-**Exit:** Can recommend for production SMB/edge with runbook.
+**Exit:** Can recommend for production SMB/edge with runbook (`docs/PRODUCTION.md`).
 
 ---
 
@@ -214,7 +214,9 @@ A and B can run in parallel after 0.11.x; C continuous.
 
 1. ~~**0.11.1** stabilize~~ ✅
 2. ~~**0.12** host parity~~ ✅
-3. **0.13** — Stick-table admin API + peers soak + WAF product surface
+3. ~~**0.13** enterprise ops~~ ✅
+4. ~~**0.14** platform quality~~ ✅
+5. **0.15+** — stretch (SAML, native ACME, open-core) only when demanded
 
 That sequence maximizes “feels like NPM” first while keeping the HAProxy-class plane credible for the enterprise track.
 
@@ -227,3 +229,5 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-18 | Initial roadmap from 0.11.0 baseline (NPM control plane shipped) |
 | 2026-07-18 | 0.11.1 stabilize complete (ACME UX, expiry, compose demo, doctor hardening) |
 | 2026-07-18 | 0.12.0 NPM host parity (locations, WS, enable, host ACL/auth, DNS-01, renew timer) |
+| 2026-07-18 | 0.13.0 enterprise ops (stick API, peers metrics, WAF surface, HA package, preview) |
+| 2026-07-18 | 0.14.0 platform quality (soak, LIMITS/PRODUCTION, H3 recreate, release/SBOM CI) |

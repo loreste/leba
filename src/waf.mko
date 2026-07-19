@@ -43,6 +43,42 @@ fn waf_mode_active(mode: string) -> int {
     return 0
 }
 
+// Sample local rule catalog for admin UI / API (built-in signatures).
+fn waf_sample_rules_json() -> string {
+    let mut b = str_builder()
+    builder_write(b, "{\"rules\":[")
+    builder_write(b, "{\"id\":\"local.path_traversal\",\"category\":\"lfi\",\"pattern\":\"../\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.xss_script\",\"category\":\"xss\",\"pattern\":\"script_tag\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.xss_js\",\"category\":\"xss\",\"pattern\":\"javascript:\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.sqli_union\",\"category\":\"sqli\",\"pattern\":\"union select\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.sqli_or\",\"category\":\"sqli\",\"pattern\":\"or 1=1\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.sqli_drop\",\"category\":\"sqli\",\"pattern\":\"drop table\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.rce_wget\",\"category\":\"rce\",\"pattern\":\";wget\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.rce_subshell\",\"category\":\"rce\",\"pattern\":\"subshell\",\"status\":403},")
+    builder_write(b, "{\"id\":\"local.lfi_passwd\",\"category\":\"lfi\",\"pattern\":\"/etc/passwd\",\"status\":403}")
+    builder_write(b, "],\"note\":\"Built-in local signatures. Use waf_url for CRS/sidecar depth.\"}\n")
+    return builder_string(b)
+}
+
+fn waf_mode_valid(mode: string) -> int {
+    if str_eq(mode, "off") {
+        return 1
+    }
+    if str_eq(mode, "detect") {
+        return 1
+    }
+    if str_eq(mode, "block") {
+        return 1
+    }
+    if str_eq(mode, "on") {
+        return 1
+    }
+    if str_eq(mode, "") {
+        return 1
+    }
+    return 0
+}
+
 // Cheap local signatures (path + body). Case-insensitive substring checks.
 fn waf_local_scan(method: string, path: string, body: string) -> WafResult {
     let hay = str_to_lower(path + " " + body)

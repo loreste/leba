@@ -242,7 +242,7 @@ Typical paths:
 
 ## Status
 
-Leba is working software with 80+ automated tests (v0.12.0). It handles
+Leba is working software with 80+ automated tests (v0.14.0). It handles
 HTTP/1-3, TCP, UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind
 real traffic. v0.11 ships an NPM-style control plane (proxy hosts, certificates
 via lego, access lists) on a HAProxy-class data plane.

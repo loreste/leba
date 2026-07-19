@@ -1,0 +1,105 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Mako
+        run: |
+          set -euo pipefail
+          if command -v mako >/dev/null 2>&1; then mako version; exit 0; fi
+          if command -v cargo >/dev/null 2>&1; then
+            cargo install --git https://github.com/loreste/mako mako --locked
+          fi
+          command -v mako
+
+      - name: Build binary
+        run: |
+          make build
+          mkdir -p dist
+          cp leba "dist/leba-linux-amd64"
+          chmod +x "dist/leba-linux-amd64"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum leba-linux-amd64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: SBOM (CycloneDX-ish minimal)
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          cat > dist/sbom.cdx.json <<EOF
+          {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "metadata": {
+              "component": {
+                "type": "application",
+                "name": "leba",
+                "version": "${VERSION}",
+                "purl": "pkg:generic/leba@${VERSION}"
+              }
+            },
+            "components": [
+              {
+                "type": "library",
+                "name": "mako",
+                "description": "Language/runtime used to build Leba"
+              }
+            ]
+          }
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/leba-linux-amd64
+            dist/SHA256SUMS
+            dist/sbom.cdx.json
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          build-args: |
+            TARGETARCH=amd64

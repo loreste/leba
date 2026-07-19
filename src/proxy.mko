@@ -57,6 +57,8 @@ struct ProxyResult {
     stick_table: map[string]string
     stick_count: int = 0
     stick_peer_line: string = ""
+    waf_blocked: int = 0
+    waf_detected: int = 0
 }
 
 fn raw_response_status(raw: string) -> int {
@@ -164,6 +166,8 @@ struct Dispatch {
     stick_count: int = 0
     // Peers UPSERT line when this request wrote stick (broadcast on accept thread).
     stick_peer_line: string = ""
+    waf_blocked: int = 0
+    waf_detected: int = 0
     servers: []Server
     backends: []Backend
     buckets: []RateBucket
@@ -549,7 +553,7 @@ fn h2_header_value_ci(name: string) -> string {
     return ""
 }
 
-fn h2_raw_request(method: string, path: string, host: string, body: string, cookie: string, traceparent: string) -> RawRequest {
+fn h2_raw_request(method: string, path: string, host: string, body: string, cookie: string, traceparent: string, authorization: string) -> RawRequest {
     let mut m = method
     if str_eq(m, "") {
         m = "GET"
@@ -578,7 +582,7 @@ fn h2_raw_request(method: string, path: string, host: string, body: string, cook
         "",
         "",
         "",
-        ""
+        authorization
     )
 }
 
@@ -586,7 +590,7 @@ fn h2_request_from_stream(stream: int) -> RawRequest {
     let block = http2_conn_header_block(stream)
     let n = hpack_decode_block(block)
     if n < 0 {
-        return h2_raw_request("", "", "", "", "", "")
+        return h2_raw_request("", "", "", "", "", "", "")
     }
     let method = h2_header_value(":method")
     let path = h2_header_value(":path")
@@ -596,8 +600,9 @@ fn h2_request_from_stream(stream: int) -> RawRequest {
     }
     let cookie = h2_header_value_ci("cookie")
     let traceparent = h2_header_value_ci("traceparent")
+    let authorization = h2_header_value_ci("authorization")
     let body = http2_stream_body(stream)
-    return h2_raw_request(method, path, host, body, cookie, traceparent)
+    return h2_raw_request(method, path, host, body, cookie, traceparent, authorization)
 }
 
 fn h2_stream_request_complete(stream: int) -> int {
@@ -1069,16 +1074,58 @@ fn h2_encode_pass_headers(extra_headers: string) -> string {
     return builder_string(out)
 }
 
-fn sip_header(raw: string, name: string) -> string {
-    return raw_header(raw, name)
+fn sip_call_id(raw: string) -> string {
+    // Mako's SIP parser handles compact names (Call-ID/i), case folding, and
+    // folded header values without the generic HTTP prefix matcher.
+    return sip_header(raw, "Call-ID")
 }
 
-fn sip_call_id(raw: string) -> string {
-    let cid = sip_header(raw, "Call-ID")
-    if not str_eq(cid, "") {
-        return cid
+fn upstream_header_value(headers: string, name: string) -> string {
+    let want = str_to_lower(str_trim_space(name))
+    if str_eq(want, "") {
+        return ""
     }
-    return sip_header(raw, "i")
+    let lines = str_split(headers, "\r\n")
+    for _, line in range lines {
+        let t = str_trim_space(line)
+        let cut = str_index(t, ":")
+        if cut <= 0 {
+            continue
+        }
+        let got = str_to_lower(str_trim_space(substr(t, 0, cut)))
+        if str_eq(got, want) {
+            return str_trim_space(substr(t, cut + 1, str_len(t)))
+        }
+    }
+    return ""
+}
+
+fn upstream_header_has_token(headers: string, name: string, token: string) -> int {
+    let value = str_to_lower(upstream_header_value(headers, name))
+    let want = str_to_lower(str_trim_space(token))
+    if str_eq(value, "") or str_eq(want, "") {
+        return 0
+    }
+    let parts = str_split(value, ",")
+    for _, part in range parts {
+        if str_eq(str_trim_space(part), want) {
+            return 1
+        }
+    }
+    return 0
+}
+
+fn upstream_connection_reusable(ok: int, status: int, headers: string) -> int {
+    if ok == 0 or status <= 0 {
+        return 0
+    }
+    if upstream_header_has_token(headers, "Connection", "close") == 1 {
+        return 0
+    }
+    if upstream_header_has_token(headers, "Proxy-Connection", "close") == 1 {
+        return 0
+    }
+    return 1
 }
 
 fn udp_flow_find(flows: []UdpFlow, frontend: string, backend: string, call_id: string) -> int {
@@ -1552,9 +1599,13 @@ fn prepare_dispatch(
     let host = http_header(c, "Host")
     let body = http_body(c)
     let traceparent = proxy_traceparent(http_header(c, "traceparent"), fe.access_log)
+    let authorization = http_header(c, "Authorization")
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
-    let req_extra, resp_extra = render_header_extras(header_rules)
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
+    if not str_eq(authorization, "") {
+        req_extra = req_extra + "\r\nAuthorization: " + authorization
+    }
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -1798,7 +1849,10 @@ fn prepare_raw_dispatch(
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
     let client_ip = tcp_peer_addr(c)
-    let req_extra, resp_extra = render_header_extras(header_rules)
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
+    if not str_eq(req.authorization, "") {
+        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+    }
     let client_ka = client_wants_keepalive(req.version, req.connection)
     let mut srv_list = servers
     let mut be_list = backends
@@ -1835,19 +1889,19 @@ fn prepare_raw_dispatch(
         retry_plan: retry_plan_empty(),
         frontend_idx: frontend_idx,
         ka_count: ka_count,
-        stick_table: stick,
+        stick_table: make(map[string]string),
         stick_count: stick_n,
-        servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
+        stick_peer_line: "",
+        waf_blocked: 0,
+        waf_detected: 0,
+        servers: make([]Server, 0, 0),
+        backends: make([]Backend, 0, 0),
+        buckets: make([]RateBucket, 0, 0),
     }
 
     if req.bytes_in == 0 {
         let mut d0 = empty
         d0.err = 0
-        d0.servers = srv_list
-        d0.backends = be_list
-        d0.buckets = rate_list
         return d0
     }
 
@@ -1856,9 +1910,6 @@ fn prepare_raw_dispatch(
         let mut da = empty
         da.err = 0
         da.bytes_out = 1
-        da.servers = srv_list
-        da.backends = be_list
-        da.buckets = rate_list
         if fe.access_log == 1 {
             let rid = make_req_id()
             print(access_log_line(method, path, 200, "acme-challenge", "-", 0, 0, rid, "", ""))
@@ -1877,18 +1928,17 @@ fn prepare_raw_dispatch(
             let _ = raw_http_respond_401_basic(c, method, basic_realm)
             let mut dauth = empty
             dauth.denied = 1
-            dauth.servers = srv_list
-            dauth.backends = be_list
-            dauth.buckets = rate_list
             return dauth
         }
     }
 
     // WAF (local signatures + optional remote inspect). ACME already bypassed.
+    let mut waf_det_flag = 0
     if waf_mode_active(fe.waf_mode) == 1 {
         let wr = waf_inspect(fe.waf_mode, fe.waf_url, fe.waf_fail, fe.waf_timeout_ms, method, path, body, req.raw)
         if str_eq(wr.action, "detect") {
             log_warn_event("waf_detect", f"frontend={fe.name} rule={wr.rule} path={path}")
+            waf_det_flag = 1
         }
         if str_eq(wr.action, "block") {
             log_proxy_reject("waf_block", method, path, host, f"status={wr.status} rule={wr.rule}")
@@ -1899,9 +1949,7 @@ fn prepare_raw_dispatch(
             let _ = raw_http_respond_method(c, method, wr.status, msg)
             let mut dwaf = empty
             dwaf.denied = 1
-            dwaf.servers = srv_list
-            dwaf.backends = be_list
-            dwaf.buckets = rate_list
+            dwaf.waf_blocked = 1
             return dwaf
         }
     }
@@ -1916,9 +1964,6 @@ fn prepare_raw_dispatch(
         let mut dr = empty
         dr.err = 0
         dr.bytes_out = 0
-        dr.servers = srv_list
-        dr.backends = be_list
-        dr.buckets = rate_list
         if fe.access_log == 1 {
             let rid = make_req_id()
             let mut code = fe.redirect_code
@@ -1936,9 +1981,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("request_too_large", method, path, host, "status=413")
         let _ = raw_http_respond_method(c, method, 413, "request too large\n")
         let mut dsize = empty
-        dsize.servers = srv_list
-        dsize.backends = be_list
-        dsize.buckets = rate_list
         return dsize
         }
     }
@@ -1947,9 +1989,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("malformed_request", method, path, host, "status=400")
         let _ = raw_http_respond_method(c, method, 400, "bad request\n")
         let mut d = empty
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
         return d
     }
 
@@ -1958,9 +1997,6 @@ fn prepare_raw_dispatch(
         let _ = raw_http_respond_full(c, method, 204, "text/plain", cors_headers(), "")
         let mut dc = empty
         dc.err = 0
-        dc.servers = srv_list
-        dc.backends = be_list
-        dc.buckets = rate_list
         return dc
     }
 
@@ -1969,9 +2005,6 @@ fn prepare_raw_dispatch(
         let mut ds = empty
         ds.err = 0
         ds.bytes_out = 1
-        ds.servers = srv_list
-        ds.backends = be_list
-        ds.buckets = rate_list
         return ds
     }
 
@@ -1983,9 +2016,6 @@ fn prepare_raw_dispatch(
                 let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
                 let mut d = empty
                 d.rate_limited = 1
-                d.servers = srv_list
-                d.backends = be_list
-                d.buckets = rate_list
                 return d
             }
             rate_list[ri] = rate_take(rate_list[ri])
@@ -1997,9 +2027,6 @@ fn prepare_raw_dispatch(
                 let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
                 let mut d = empty
                 d.rate_limited = 1
-                d.servers = srv_list
-                d.backends = be_list
-                d.buckets = rate_list
                 return d
             }
             rate_list = client_rate_take_ip(rate_list, client_ip, fe.rate_limit)
@@ -2010,9 +2037,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
         let _ = raw_http_respond_method(c, method, 503, "frontend maxconn reached\n")
         let mut d = empty
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
         return d
     }
 
@@ -2021,9 +2045,6 @@ fn prepare_raw_dispatch(
         let _ = raw_http_respond_method(c, method, 403, "forbidden\n")
         let mut d = empty
         d.denied = 1
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
         return d
     }
 
@@ -2038,9 +2059,6 @@ fn prepare_raw_dispatch(
                 let _ = raw_http_respond_method(c, method, 403, "websocket disabled\n")
                 let mut dws = empty
                 dws.denied = 1
-                dws.servers = srv_list
-                dws.backends = be_list
-                dws.buckets = rate_list
                 return dws
             }
         }
@@ -2053,9 +2071,6 @@ fn prepare_raw_dispatch(
             let mut dr = empty
             dr.err = 0
             dr.bytes_out = 0
-            dr.servers = srv_list
-            dr.backends = be_list
-            dr.buckets = rate_list
             if fe.access_log == 1 {
                 let rid = make_req_id()
                 print(access_log_line(method, path, code, "redirect", rt.target, 0, 0, rid, "", ""))
@@ -2071,9 +2086,6 @@ fn prepare_raw_dispatch(
             let mut dd = empty
             dd.err = 0
             dd.bytes_out = 0
-            dd.servers = srv_list
-            dd.backends = be_list
-            dd.buckets = rate_list
             if fe.access_log == 1 {
                 let rid = make_req_id()
                 print(access_log_line(method, path, code, "dead", "-", 0, 0, rid, "", ""))
@@ -2092,9 +2104,6 @@ fn prepare_raw_dispatch(
                 let mut dw = empty
                 dw.err = 0
                 dw.bytes_out = str_len(body_welcome)
-                dw.servers = srv_list
-                dw.backends = be_list
-                dw.buckets = rate_list
                 return dw
             }
         }
@@ -2104,9 +2113,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("backend_missing", method, path, host, builder_string(detail))
         let _ = raw_http_respond_method(c, method, 503, "no backend\n")
         let mut d = empty
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
         return d
     }
 
@@ -2120,9 +2126,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("backend_maxconn", method, path, host, builder_string(detail2))
         let _ = raw_http_respond_method(c, method, 503, "backend maxconn reached\n")
         let mut d = empty
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
         return d
     }
 
@@ -2152,11 +2155,6 @@ fn prepare_raw_dispatch(
         log_proxy_reject("no_server", method, path, host, builder_string(detail3))
         let _ = raw_http_respond_method(c, method, 502, "no server\n")
         let mut d = empty
-        d.servers = srv_list
-        d.backends = be_list
-        d.buckets = rate_list
-        d.stick_table = stick
-        d.stick_count = stick_n
         d.stick_peer_line = peer_line
         return d
     }
@@ -2212,9 +2210,12 @@ fn prepare_raw_dispatch(
         stick_table: stick,
         stick_count: stick_n,
         stick_peer_line: peer_line,
+        waf_blocked: 0,
+        waf_detected: waf_det_flag,
+        // servers already owned after server_conn_delta; backends/buckets must not alias caller.
         servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
+        backends: backend_array_clone(be_list),
+        buckets: rate_bucket_array_clone(rate_list),
     }
 }
 
@@ -2240,7 +2241,10 @@ fn handle_tls_proxy_request(
     let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
-    let req_extra, resp_extra = render_header_extras(header_rules)
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
+    if not str_eq(req.authorization, "") {
+        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+    }
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -2638,7 +2642,7 @@ fn handle_h3_proxy_request(
     let traceparent = proxy_traceparent(req.traceparent, fe.access_log)
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
-    let req_extra, resp_extra = render_header_extras(header_rules)
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -2855,7 +2859,8 @@ fn worker_upstream(
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
             }
-            let _rel = tcp_pool_release(pool, fd, ok)
+            let reusable = upstream_connection_reusable(ok, http_forward_status(fr), uph)
+            let _rel = tcp_pool_release(pool, fd, reusable)
         }
     }
     if res.ok == 0 {
@@ -2925,7 +2930,8 @@ fn try_upstream_hop(
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
             }
-            let _rel = tcp_pool_release(hop.pool, fd, ok)
+            let reusable = upstream_connection_reusable(ok, http_forward_status(fr), uph)
+            let _rel = tcp_pool_release(hop.pool, fd, reusable)
         }
     }
     if res.ok == 0 {
@@ -3069,7 +3075,8 @@ fn worker_tls_upstream(
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
             }
-            let _rel = tcp_pool_release(pool, fd, ok)
+            let reusable = upstream_connection_reusable(ok, http_forward_status(fr), uph)
+            let _rel = tcp_pool_release(pool, fd, reusable)
         }
     }
     if res.ok == 0 {
@@ -3120,7 +3127,10 @@ fn prepare_ws_dispatch(
     let method = req.method
     let path = req.path
     let host = req.host
-    let req_extra, resp_extra = render_header_extras(header_rules)
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
+    if not str_eq(req.authorization, "") {
+        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+    }
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets

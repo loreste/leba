@@ -43,15 +43,30 @@ fn apply_done(
     servers: []Server,
     st: LiveStats
 ) -> LiveStats {
-    // servers mutated by caller after server_conn_delta — we only touch stats here
-    let mut out = st
-    out.total_req = out.total_req + 1
-    out.total_bytes_out = out.total_bytes_out + bytes
-    out.retries = out.retries + retries
+    // Field-wise update — avoids struct copy edge cases when LiveStats grows.
+    let mut out = stats_new()
+    out.started_ms = st.started_ms
+    out.total_req = st.total_req + 1
+    out.total_err = st.total_err
+    out.total_bytes_in = st.total_bytes_in
+    out.total_bytes_out = st.total_bytes_out + bytes
+    out.active_conns = st.active_conns
+    out.denied = st.denied
+    out.rate_limited = st.rate_limited
+    out.retries = st.retries + retries
+    out.last_req_ms = now_ms()
+    out.last_latency_ms = st.last_latency_ms
+    out.max_latency_ms = st.max_latency_ms
+    out.waf_blocked = st.waf_blocked
+    out.waf_detected = st.waf_detected
+    out.peers_hello_ok = st.peers_hello_ok
+    out.peers_auth_fail = st.peers_auth_fail
+    out.peers_upserts_in = st.peers_upserts_in
+    out.peers_upserts_out = st.peers_upserts_out
+    out.peers_reconnects = st.peers_reconnects
     if err != 0 {
         out.total_err = out.total_err + 1
     }
-    out.last_req_ms = now_ms()
     if out.active_conns > 0 {
         out.active_conns = out.active_conns - 1
     }

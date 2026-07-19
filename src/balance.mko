@@ -410,35 +410,39 @@ fn stick_table_live_count(table: map[string]string, now_ms: int, backend_filter:
 }
 
 // Clear entries: all when backend_filter empty, else only keys for that backend.
-// Returns (table, new_count, cleared).
+// Returns (table, new_count, cleared). Rebuilds an owned map (no maps_clone).
 fn stick_table_clear(
     table: map[string]string,
     entry_count: int,
     backend_filter: string
 ) -> (map[string]string, int, int) {
-    let mut out = maps_clone(table)
-    let keys = maps_keys(out)
+    let _ = entry_count
+    let mut out = make(map[string]string)
+    let keys = maps_keys(table)
     let mut cleared = 0
-    let mut count = entry_count
+    let mut count = 0
     for _, k in range keys {
         if str_eq(k, "") {
             continue
         }
-        let enc = out[k]
+        let enc = table[k]
         if str_eq(enc, "") {
             continue
         }
-        if not str_eq(backend_filter, "") {
-            if not str_eq(stick_key_backend(k), backend_filter) {
-                continue
+        let mut drop = 0
+        if str_eq(backend_filter, "") {
+            drop = 1
+        } else {
+            if str_eq(stick_key_backend(k), backend_filter) {
+                drop = 1
             }
         }
-        out[k] = ""
-        cleared = cleared + 1
-        count = count - 1
-    }
-    if count < 0 {
-        count = 0
+        if drop == 1 {
+            cleared = cleared + 1
+        } else {
+            out[own_string(k)] = own_string(enc)
+            count = count + 1
+        }
     }
     return (out, count, cleared)
 }

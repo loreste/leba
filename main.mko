@@ -743,7 +743,7 @@ fn main() {
                                     }
                                 }
                                 if srp.stick_dirty == 1 {
-                                    stick_table = srp.stick_table
+                                    stick_table = stick_table_own(srp.stick_table)
                                     stick_count = srp.stick_count
                                 }
                                 if srp.tls_reload == 1 {
@@ -862,7 +862,7 @@ fn main() {
                                             servers = dp.servers
                                             backends = dp.backends
                                             buckets = dp.buckets
-                                            stick_table = dp.stick_table
+                                            stick_table = stick_table_own(dp.stick_table)
                                             stick_count = dp.stick_count
                                             if not str_eq(dp.stick_peer_line, "") {
                                                 let nout = peers_broadcast(peer_conns, dp.stick_peer_line)
@@ -1021,7 +1021,7 @@ fn main() {
                                     }
                                 }
                                 if srp.stick_dirty == 1 {
-                                    stick_table = srp.stick_table
+                                    stick_table = stick_table_own(srp.stick_table)
                                     stick_count = srp.stick_count
                                 }
                                 if srp.tls_reload == 1 {
@@ -1184,7 +1184,7 @@ fn main() {
                                         servers = tr.servers
                                         backends = tr.backends
                                         buckets = tr.buckets
-                                        stick_table = tr.stick_table
+                                        stick_table = stick_table_own(tr.stick_table)
                                         stick_count = tr.stick_count
                                         if not str_eq(tr.stick_peer_line, "") {
                                             let nout_h2 = peers_broadcast(peer_conns, tr.stick_peer_line)
@@ -1220,7 +1220,7 @@ fn main() {
                                             servers = dp.servers
                                             backends = dp.backends
                                             buckets = dp.buckets
-                                            stick_table = dp.stick_table
+                                            stick_table = stick_table_own(dp.stick_table)
                                             stick_count = dp.stick_count
                                             if not str_eq(dp.stick_peer_line, "") {
                                                 let nout_ws = peers_broadcast(peer_conns, dp.stick_peer_line)
@@ -1285,7 +1285,7 @@ fn main() {
                                             servers = dp_tls.servers
                                             backends = dp_tls.backends
                                             buckets = dp_tls.buckets
-                                            stick_table = dp_tls.stick_table
+                                            stick_table = stick_table_own(dp_tls.stick_table)
                                             stick_count = dp_tls.stick_count
                                             if not str_eq(dp_tls.stick_peer_line, "") {
                                                 let nout_tls = peers_broadcast(peer_conns, dp_tls.stick_peer_line)
@@ -1385,7 +1385,7 @@ fn main() {
                                 servers = tr.servers
                                 backends = tr.backends
                                 buckets = tr.buckets
-                                stick_table = tr.stick_table
+                                stick_table = stick_table_own(tr.stick_table)
                                 stick_count = tr.stick_count
                                 if not str_eq(tr.stick_peer_line, "") {
                                     let nout_h3 = peers_broadcast(peer_conns, tr.stick_peer_line)

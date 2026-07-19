@@ -40,30 +40,32 @@ jobs:
       - name: Install Mako
         run: |
           set -euo pipefail
-          if command -v mako >/dev/null 2>&1; then
-            mako version
-            exit 0
-          fi
           # Clone Mako; submodules (quiche) may be incomplete — build best-effort without H3 if needed.
           git clone --depth 1 https://github.com/loreste/mako.git "$HOME/mako"
           cd "$HOME/mako"
           git submodule update --init --recursive || {
             echo "WARN: submodule init incomplete; continuing without full quiche tree"
           }
-          # Prefer path install so we control submodule state
           if cargo install --path . --bin mako --locked 2>/tmp/mako-install.err; then
             echo "mako installed (locked)"
           else
             cat /tmp/mako-install.err || true
             cargo install --path . --bin mako
           fi
+          # Compiler needs std/runtime trees (not only the binary).
+          echo "MAKO_STD=$HOME/mako/std" >> "$GITHUB_ENV"
+          echo "MAKO_RUNTIME=$HOME/mako/runtime" >> "$GITHUB_ENV"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/mako" version
+          test -d "$HOME/mako/std/crypto"
+          test -d "$HOME/mako/runtime"
 
       - name: Build binary
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          export MAKO_STD="${MAKO_STD:-$HOME/mako/std}"
+          export MAKO_RUNTIME="${MAKO_RUNTIME:-$HOME/mako/runtime}"
           make build
           mkdir -p dist
           cp leba "dist/leba-linux-amd64"

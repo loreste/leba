@@ -59,7 +59,7 @@ full process restart is only needed if the linked Mako/quiche build cannot open 
 See [HA.md](HA.md) and [deploy/ha/README.md](../deploy/ha/README.md).
 
 - VIP with keepalived + `readyz`
-- Optional stick peers (experimental until soak signed off)
+- Optional stick peers (local dual-node smoke green; multi-hour VIP soak still required before production HA)
 - Practice reload on backup before VIP move
 
 ## Limits

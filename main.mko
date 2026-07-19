@@ -522,7 +522,7 @@ fn main() {
                         let dialed = peers_dial_missing(peers_cfg, peer_conns)
                         for _, pc in range dialed {
                             let _ = evloop_add(tcp_ev, pc.fd, 1)
-                            peer_conns = append(peer_conns, pc)
+                            peer_conns = append(peer_conns, peer_conn_clone(pc))
                             st.peers_reconnects = st.peers_reconnects + 1
                         }
                     }
@@ -927,7 +927,7 @@ fn main() {
                             let _ = tcp_set_timeout(pfd, 5000)
                             let mut pc = peer_conn_new(pfd, 0, 0 - 1)
                             let _ = evloop_add(tcp_ev, pfd, 1)
-                            peer_conns = append(peer_conns, pc)
+                            peer_conns = append(peer_conns, peer_conn_clone(pc))
                             log_info_event("peers_accept", f"fd={pfd}")
                         }
                     }
@@ -947,14 +947,25 @@ fn main() {
                                 let mut pj = 0
                                 while pj < len(peer_conns) {
                                     if pj != pi_peer {
-                                        next_pc = append(next_pc, peer_conns[pj])
+                                        next_pc = append(next_pc, peer_conn_clone(peer_conns[pj]))
                                     }
                                     pj = pj + 1
                                 }
                                 peer_conns = next_pc
                             } else {
-                                let fr = peers_feed(peer_conns[pi_peer], chunk, peers_cfg, stick_table, stick_count, now_ms())
-                                stick_table = fr.table
+                                // Pass a deep-owned stick snapshot so peers_feed never free-aliases
+                                // the accept-thread table; re-own on adopt after HELLO/UPSERT.
+                                let fr = peers_feed(
+                                    peer_conns[pi_peer],
+                                    chunk,
+                                    peers_cfg,
+                                    stick_table_own(stick_table),
+                                    stick_count,
+                                    now_ms()
+                                )
+                                // Only replace long-lived table on real mutations or after
+                                // feed that already deep-owned (always re-own for safety).
+                                stick_table = stick_table_own(fr.table)
                                 stick_count = fr.count
                                 st.peers_hello_ok = st.peers_hello_ok + fr.hello
                                 st.peers_auth_fail = st.peers_auth_fail + fr.auth_fail
@@ -970,13 +981,13 @@ fn main() {
                                     let mut pj2 = 0
                                     while pj2 < len(peer_conns) {
                                         if pj2 != pi_peer {
-                                            next_pc2 = append(next_pc2, peer_conns[pj2])
+                                            next_pc2 = append(next_pc2, peer_conn_clone(peer_conns[pj2]))
                                         }
                                         pj2 = pj2 + 1
                                     }
                                     peer_conns = next_pc2
                                 } else {
-                                    peer_conns[pi_peer] = fr.conn
+                                    peer_conns[pi_peer] = peer_conn_clone(fr.conn)
                                 }
                             }
                             pi_peer = len(peer_conns)

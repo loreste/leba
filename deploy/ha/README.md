@@ -78,11 +78,11 @@ make test-ha-peers
 ```
 
 This starts two Leba processes on localhost with stick peers enabled, checks
-peers dial/HELLO in logs and `/metrics`, idles with sessions open, then shuts
-down cleanly and sanity-checks single-node proxy without peers. It does **not**
-drive proxy or stick UPSERT while peer sessions are open (those paths can still
-abort and remain experimental). Complete the production soak checklist below on
-real VMs before treating peers as production.
+peers dial/HELLO and `/metrics`, drives proxy traffic with sessions open,
+asserts stick UPSERT sync (`upserts_out`/`upserts_in` + live stick tables),
+restarts the backup for reconnect, and proxies again. Complete the production
+soak checklist below on real VMs (VIP failover, multi-hour soak) before calling
+peers **production** in your environment.
 
 ## Soak checklist (peers still experimental)
 

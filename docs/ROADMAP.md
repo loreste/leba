@@ -125,7 +125,7 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 | Work | Priority | Status |
 |------|----------|--------|
 | Stick-table runtime API: list / clear / stats | P0 | ✅ `GET/DELETE /admin/stick-tables…` + UI |
-| Peers production path: auth soak, reconnect, metrics | P0 | ✅ metrics + reconnect; still experimental until soak report |
+| Peers production path: auth soak, reconnect, metrics | P0 | ✅ metrics + reconnect + free-alias fix; `make test-ha-peers` (still multi-hour soak for prod sign-off) |
 | WAF product surface: mode toggle, blocked counters, sample rules | P1 | ✅ UI + Prometheus + `/admin/waf-*` |
 | Turnkey HA package: dual-node compose + keepalived template | P1 | ✅ `deploy/ha/` README + compose |
 | Runtime object API expansion (backends/servers CRUD) | P1 | ✅ `POST /admin/server` + delete |
@@ -233,3 +233,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-18 | 0.14.0 platform quality (soak, LIMITS/PRODUCTION, H3 recreate, release/SBOM CI) |
 | 2026-07-19 | v0.14.0 GitHub Release published (binary, SHA256SUMS, SBOM, multi-arch GHCR image) |
 | 2026-07-19 | Cosign keyless signing on release + dual-node `make test-ha-peers` smoke |
+| 2026-07-19 | Peers free-alias fix: proxy + stick UPSERT + reconnect stable (`stick_table_own`) |

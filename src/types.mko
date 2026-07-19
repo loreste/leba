@@ -489,6 +489,18 @@ fn peer_conn_new(fd: int, is_outbound: int, peer_idx: int) -> PeerConn {
     }
 }
 
+// Own string fields so PeerConn can be moved between arrays without free-alias.
+fn peer_conn_clone(src: PeerConn) -> PeerConn {
+    return PeerConn {
+        fd: src.fd,
+        name: own_string(src.name),
+        buf: own_string(src.buf),
+        hello_ok: src.hello_ok,
+        is_outbound: src.is_outbound,
+        peer_idx: src.peer_idx
+    }
+}
+
 // --- Admin OIDC (authorization code + session cookie) ----------------------
 
 struct OidcConfig {

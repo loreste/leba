@@ -45,7 +45,7 @@ test-soak: build
 	chmod +x scripts/soak.sh
 	./scripts/soak.sh 200 6
 
-# Dual-node peers lifecycle on localhost (HELLO/metrics/idle; proxy under peers still experimental).
+# Dual-node peers smoke: HELLO, proxy, stick UPSERT sync, reconnect.
 test-ha-peers: build
 	chmod +x scripts/ha_peers_smoke.sh
 	./scripts/ha_peers_smoke.sh

@@ -271,8 +271,27 @@ fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Serve
 
 // --- Stick tables (accept-thread only; map[string]string values "server|expires_ms") ---
 
+// Deep-owned copy of a stick table. Prefer this over maps_clone when the result
+// becomes the long-lived accept-thread table — maps_clone results from peers
+// feed were free-aliasing and aborting on the next proxy request.
+fn stick_table_own(table: map[string]string) -> map[string]string {
+    let mut out = make(map[string]string)
+    let keys = maps_keys(table)
+    for _, k in range keys {
+        if str_eq(k, "") {
+            continue
+        }
+        let enc = table[k]
+        if str_eq(enc, "") {
+            continue
+        }
+        out[own_string(k)] = own_string(enc)
+    }
+    return out
+}
+
 fn stick_make_key(backend: string, kind: string, val: string) -> string {
-    return backend + "|" + kind + "|" + val
+    return own_string(backend + "|" + kind + "|" + val)
 }
 
 fn stick_encode(server_name: string, expires_ms: int) -> string {
@@ -322,19 +341,21 @@ fn stick_table_set(
     now_ms: int,
     entry_count: int
 ) -> (map[string]string, int, int) {
-    if str_eq(key, "") {
+    let k = own_string(key)
+    let srv = own_string(server_name)
+    if str_eq(k, "") {
         return (table, entry_count, 0)
     }
-    if str_eq(server_name, "") {
+    if str_eq(srv, "") {
         return (table, entry_count, 0)
     }
-    let mut out = maps_clone(table)
+    let mut out = stick_table_own(table)
     let mut count = entry_count
     let mut max = max_size
     if max <= 0 {
         max = 100000
     }
-    let existing = out[key]
+    let existing = out[k]
     if str_eq(existing, "") {
         if count >= max {
             // At capacity — refuse new keys (existing keys still refresh).
@@ -347,7 +368,7 @@ fn stick_table_set(
         ttl = 1800000
     }
     let exp = now_ms + ttl
-    out[key] = stick_encode(server_name, exp)
+    out[k] = own_string(stick_encode(srv, exp))
     return (out, count, exp)
 }
 
@@ -555,7 +576,7 @@ fn pick_server_stick(
     now_ms: int,
     entry_count: int
 ) -> (int, map[string]string, int, string) {
-    let mut table = maps_clone(stick_table)
+    let mut table = stick_table_own(stick_table)
     let mut count = entry_count
     // Cookie sticky first (inside pick_server). Table only when no usable cookie pin.
     let mut cookie_pinned = 0
@@ -592,7 +613,10 @@ fn pick_server_stick(
                     table = t2
                     count = c2
                     if exp > 0 {
-                        let line = "UPSERT " + stick_key + " " + own_string(servers[si].name) + " " + int_to_string(exp) + "\n"
+                        // Owned payload for peers_broadcast (must not alias stick_key views).
+                        let line = own_string(
+                            "UPSERT " + own_string(stick_key) + " " + own_string(servers[si].name) + " " + int_to_string(exp) + "\n"
+                        )
                         return (si, table, count, line)
                     }
                 }

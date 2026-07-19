@@ -1,5 +1,7 @@
-// Experimental stick-table peers (HA active/standby sync).
+// Stick-table peers (HA active/standby sync).
 // Line protocol over TCP, serviced on the accept-thread event loop.
+// Ownership: protocol fields and stick maps must be deep-owned (stick_table_own /
+// own_string) — maps_clone alone free-aliased and aborted under proxy load.
 //
 // Messages (space-separated, one line each):
 //   HELLO <node> <cluster> <token>
@@ -46,10 +48,12 @@ fn stick_table_set_abs(
     now_ms: int,
     entry_count: int
 ) -> (map[string]string, int) {
-    if str_eq(key, "") {
+    let k = own_string(key)
+    let srv = own_string(server_name)
+    if str_eq(k, "") {
         return (table, entry_count)
     }
-    if str_eq(server_name, "") {
+    if str_eq(srv, "") {
         return (table, entry_count)
     }
     if expires_ms > 0 {
@@ -57,13 +61,13 @@ fn stick_table_set_abs(
             return (table, entry_count)
         }
     }
-    let mut out = maps_clone(table)
+    let mut out = stick_table_own(table)
     let mut count = entry_count
     let mut max = max_size
     if max <= 0 {
         max = 100000
     }
-    let existing = out[key]
+    let existing = out[k]
     if str_eq(existing, "") {
         if count >= max {
             return (out, count)
@@ -76,20 +80,21 @@ fn stick_table_set_abs(
             return (out, count)
         }
     }
-    out[key] = stick_encode(server_name, expires_ms)
+    out[k] = own_string(stick_encode(srv, expires_ms))
     return (out, count)
 }
 
 fn stick_table_delete(table: map[string]string, key: string, entry_count: int) -> (map[string]string, int) {
-    if str_eq(key, "") {
+    let k = own_string(key)
+    if str_eq(k, "") {
         return (table, entry_count)
     }
-    let mut out = maps_clone(table)
-    let existing = out[key]
+    let mut out = stick_table_own(table)
+    let existing = out[k]
     if str_eq(existing, "") {
         return (out, entry_count)
     }
-    out[key] = ""
+    out[k] = ""
     let mut count = entry_count - 1
     if count < 0 {
         count = 0
@@ -150,12 +155,14 @@ fn peers_apply_line(
     remote_name: string,
     hello_ok: int
 ) -> PeersApplyResult {
+    // Own remote_name: callers may pass PeerConn.name which must not alias line fields.
+    // Deep-own stick table so returned map is safe as the accept-thread long-lived table.
     let mut out = PeersApplyResult {
-        table: maps_clone(table),
+        table: stick_table_own(table),
         count: entry_count,
         close: 0,
         reply: "",
-        remote_name: remote_name,
+        remote_name: own_string(remote_name),
         hello_ok: hello_ok,
         event_hello: 0,
         event_auth_fail: 0,
@@ -169,7 +176,8 @@ fn peers_apply_line(
     if len(fields) == 0 {
         return out
     }
-    let cmd = fields[0]
+    // Protocol fields are views into `line` / read buffer — own before store.
+    let cmd = own_string(fields[0])
 
     if str_eq(cmd, "HELLO") {
         if len(fields) < 4 {
@@ -177,9 +185,9 @@ fn peers_apply_line(
             out.event_auth_fail = 1
             return out
         }
-        let node = fields[1]
-        let cluster = fields[2]
-        let token = fields[3]
+        let node = own_string(fields[1])
+        let cluster = own_string(fields[2])
+        let token = own_string(fields[3])
         if not str_eq(cluster, cfg.cluster) {
             log_warn_event("peers_auth_failed", f"reason=cluster remote={node}")
             out.close = 1
@@ -214,7 +222,7 @@ fn peers_apply_line(
 
     if str_eq(cmd, "OK") {
         if len(fields) >= 2 {
-            out.remote_name = fields[1]
+            out.remote_name = own_string(fields[1])
         }
         if out.hello_ok == 0 {
             out.event_hello = 1
@@ -235,8 +243,8 @@ fn peers_apply_line(
 
     if str_eq(cmd, "UPSERT") {
         if len(fields) >= 4 {
-            let key = fields[1]
-            let server = fields[2]
+            let key = own_string(fields[1])
+            let server = own_string(fields[2])
             let exp = to_int(fields[3])
             let t2, c2 = stick_table_set_abs(out.table, key, server, exp, 100000, now_ms, out.count)
             out.table = t2
@@ -248,7 +256,8 @@ fn peers_apply_line(
 
     if str_eq(cmd, "DELETE") {
         if len(fields) >= 2 {
-            let t3, c3 = stick_table_delete(out.table, fields[1], out.count)
+            let del_key = own_string(fields[1])
+            let t3, c3 = stick_table_delete(out.table, del_key, out.count)
             out.table = t3
             out.count = c3
         }
@@ -288,8 +297,10 @@ fn peers_feed(
     entry_count: int,
     now_ms: int
 ) -> PeersFeedResult {
-    let mut conn = pc
-    conn.buf = conn.buf + data
+    // Clone so caller's PeerConn slot is not free-aliased while we mutate buf/name.
+    let mut conn = peer_conn_clone(pc)
+    // Own concatenated buffer (data may be a short-lived tcp_read view).
+    conn.buf = own_string(conn.buf + data)
     let mut reply_all = ""
     let mut close = 0
     let mut tab = table
@@ -305,8 +316,9 @@ fn peers_feed(
         if nl < 0 {
             break
         }
-        let line = substr(conn.buf, 0, nl)
-        conn.buf = substr(conn.buf, nl + 1, str_len(conn.buf))
+        // Own the line before shrinking buf — apply_line fields must not alias buf.
+        let line = own_string(substr(conn.buf, 0, nl))
+        conn.buf = own_string(substr(conn.buf, nl + 1, str_len(conn.buf)))
         let ar = peers_apply_line(line, cfg, tab, count, now_ms, conn.name, conn.hello_ok)
         tab = ar.table
         count = ar.count
@@ -314,7 +326,7 @@ fn peers_feed(
         auth_n = auth_n + ar.event_auth_fail
         upsert_n = upsert_n + ar.event_upsert
         if not str_eq(ar.remote_name, "") {
-            conn.name = ar.remote_name
+            conn.name = own_string(ar.remote_name)
         }
         conn.hello_ok = ar.hello_ok
         if not str_eq(ar.reply, "") {
@@ -333,7 +345,7 @@ fn peers_feed(
         conn: conn,
         table: tab,
         count: count,
-        reply: reply_all,
+        reply: own_string(reply_all),
         close: close,
         hello: hello_n,
         auth_fail: auth_n,
@@ -346,6 +358,8 @@ fn peers_broadcast(conns: []PeerConn, line: string) -> int {
     if str_eq(line, "") {
         return 0
     }
+    // Own once: line may be a temporary from pick_server_stick.
+    let payload = own_string(line)
     let mut n = 0
     for _, c in range conns {
         if c.fd < 0 {
@@ -354,7 +368,7 @@ fn peers_broadcast(conns: []PeerConn, line: string) -> int {
         if c.hello_ok != 1 {
             continue
         }
-        let _ = tcp_write(c.fd, line)
+        let _ = tcp_write(c.fd, payload)
         n = n + 1
     }
     return n

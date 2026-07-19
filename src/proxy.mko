@@ -1604,7 +1604,7 @@ fn prepare_dispatch(
     let span_id = traceparent_span_id(traceparent)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(authorization, "") {
-        req_extra = req_extra + "\r\nAuthorization: " + authorization
+        req_extra = req_extra + "Authorization: " + authorization + "\r\n"
     }
     let mut srv_list = servers
     let mut be_list = backends
@@ -1851,7 +1851,7 @@ fn prepare_raw_dispatch(
     let client_ip = tcp_peer_addr(c)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(req.authorization, "") {
-        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+        req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
     let client_ka = client_wants_keepalive(req.version, req.connection)
     let mut srv_list = servers
@@ -2243,7 +2243,7 @@ fn handle_tls_proxy_request(
     let span_id = traceparent_span_id(traceparent)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(req.authorization, "") {
-        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+        req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
     let mut srv_list = servers
     let mut be_list = backends
@@ -3129,7 +3129,7 @@ fn prepare_ws_dispatch(
     let host = req.host
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(req.authorization, "") {
-        req_extra = req_extra + "\r\nAuthorization: " + req.authorization
+        req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
     let mut srv_list = servers
     let mut be_list = backends

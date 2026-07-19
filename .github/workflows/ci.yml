@@ -5,26 +5,40 @@ on:
     branches: [main, master]
   pull_request:
 
+env:
+  # Pin to a known-good Mako (free-analysis path-local free). Override via workflow_dispatch inputs later.
+  MAKO_GIT: https://github.com/loreste/mako
+  # Leave empty to use latest main; set to a full SHA after Mako merges path-local free.
+  MAKO_REV: ""
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Mako (if available as release binary)
+      - name: Install Mako (pinned git or PATH)
         run: |
           set -euo pipefail
           if command -v mako >/dev/null 2>&1; then
             mako version
             exit 0
           fi
-          echo "Mako not in PATH — installing via cargo if rust present, else skip compile tests"
-          if command -v cargo >/dev/null 2>&1; then
-            cargo install --git https://github.com/loreste/mako mako --locked || true
-          fi
-          if ! command -v mako >/dev/null 2>&1; then
+          if ! command -v cargo >/dev/null 2>&1; then
             echo "SKIP_MAKO=1" >> "$GITHUB_ENV"
+            exit 0
           fi
+          if [[ -n "${MAKO_REV}" ]]; then
+            cargo install --git "$MAKO_GIT" --rev "$MAKO_REV" mako --locked
+          else
+            cargo install --git "$MAKO_GIT" mako --locked
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          mako version
+
+      - name: Clean Mako object cache
+        if: env.SKIP_MAKO != '1'
+        run: rm -rf .mako/cache
 
       - name: Unit tests
         if: env.SKIP_MAKO != '1'

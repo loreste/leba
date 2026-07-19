@@ -1,5 +1,6 @@
 # Prefer installed Mako (stable). Override with MAKO=/path/to/mako for local builds.
 # Note: in-tree target/release/mako can be ahead of the std install and may crash.
+# After upgrading Mako: `make clean-cache` then rebuild (object cache is not versioned by free-analysis).
 MAKO ?= $(shell command -v mako)
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
@@ -71,5 +72,9 @@ run: build
 smoke: build
 	./scripts/smoke.sh
 
-clean:
+# Wipe Mako object cache after upgrading the compiler (stale .mako/cache/c can free wrong names).
+clean-cache:
+	rm -rf .mako/cache
+
+clean: clean-cache
 	rm -f leba /tmp/leba /tmp/leba_origin

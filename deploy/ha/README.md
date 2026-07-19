@@ -84,9 +84,10 @@ restarts the backup for reconnect, and proxies again. Complete the production
 soak checklist below on real VMs (VIP failover, multi-hour soak) before calling
 peers **production** in your environment.
 
-## Soak checklist (peers still experimental)
+## Soak checklist (before production peers)
 
-Record results before calling peers **production**:
+Local `make test-ha-peers` covers HELLO / proxy / UPSERT / reconnect. Record the
+following on real VMs before calling peers **production**:
 
 | Check | How |
 |-------|-----|

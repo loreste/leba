@@ -33,7 +33,7 @@
 
 - HTTP/1.1, H2 (ALPN), H3/QUIC (quiche builds), WebSocket, TCP, SIP/UDP Call-ID affinity
 - Balance: RR, least_conn, ip_hash, weighted, random, consistent-hash, SIP Call-ID
-- Sticky cookie + stick-on-src tables (H1–H3); peers **experimental**
+- Sticky cookie + stick-on-src tables (H1–H3); peers dual-node smoke green (VIP soak still for prod sign-off)
 - Drain / ready / disable / enable; active + passive health
 - TLS termination, mTLS, multi-cert SNI, live `tls-reload`
 - ACL, rate limit, header rules (wired), WAF adapter, app HTTP Basic
@@ -55,10 +55,10 @@
 |-----|----------------|
 | ACME is lego-orchestrated, not pure in-process JOSE | NPM feels “one click”; we need lego + port 80 + email |
 | Access lists UI is ACL + Basic only | NPM has richer per-host toggles (WS, block exploits, custom locations) |
-| Peers / HA are experimental + keepalived DIY | Ent buyers expect turnkey active/standby stick sync |
-| No native ACME DNS-01 product path | Many hosts can’t open :80 |
-| Streaming / large bodies / RTP | Not edge-LB day-1; don’t block 0.12–0.13 |
-| Mako SAFE free still maturing | CI green with workarounds; watch for regressions |
+| Peers VIP multi-hour soak not productized | Dual-node smoke + ownership fixes green; keepalived DIY + site soak remain |
+| No native ACME DNS-01 product path | Many hosts can’t open :80 (lego DNS-01 API exists; product packaging later) |
+| Streaming / large bodies / RTP | Not edge-LB day-1; see LIMITS.md |
+| Mako SAFE free still maturing | Ownership fixes + CI installs Mako; watch free-analysis regressions |
 
 ---
 
@@ -168,7 +168,7 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 
 1. **Day-1 UX before more algorithms** — NPM users leave on certs + hosts, not least_conn.
 2. **Config remains source of truth** — managed includes, no hidden DB.
-3. **Honesty** — experimental peers, H3 cert limits, external ACME.
+3. **Honesty** — peers need site VIP soak; H3 cert limits; external ACME.
 4. **Hitless where it counts** — TLS reload + full table reload; document restarts.
 5. **Measure** — each release: N/H scorecard + soak notes.
 
@@ -234,3 +234,5 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-19 | v0.14.0 GitHub Release published (binary, SHA256SUMS, SBOM, multi-arch GHCR image) |
 | 2026-07-19 | Cosign keyless signing on release + dual-node `make test-ha-peers` smoke |
 | 2026-07-19 | Peers free-alias fix: proxy + stick UPSERT + reconnect stable (`stick_table_own`) |
+| 2026-07-19 | Stick table residual ownership (`stick_table_clear` + all accept-thread adoptions) |
+| 2026-07-19 | CI installs Mako (clone+path), runs unit/build/soak/`test-ha-peers` honestly |

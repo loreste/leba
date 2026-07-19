@@ -34,7 +34,7 @@ failover without peers:
 - Cookie sticky (`sticky cookie NAME`) survives better if the cookie names the
   upstream server and that server is still eligible.
 
-### Experimental peers (stick-table sync)
+### Stick-table peers (HA sync)
 
 Leba can sync stick-table upserts between nodes over a private TCP channel:
 
@@ -62,15 +62,25 @@ Behavior:
 2. On local stick write: broadcast `UPSERT key server expires_ms` to ready peers.
 3. Incoming upserts prefer the entry with the later absolute expiry.
 4. Serviced only on the accept thread (no map races with workers).
+5. Stick maps and peer protocol fields are **deep-owned** (`stick_table_own` /
+   `own_string`) so proxy traffic and reconnect stay stable under Mako ownership.
 
-**Status:** experimental (production path metrics shipped in 0.13; call
-production only after soak). Prefer private networks / firewall peer ports.
-Peers are not required for active/standby VIP HA; they improve stick continuity
-after failover for `stick on src` on **cleartext, TLS HTTP/1–2, and HTTP/3**
-frontends. Stick keys use the client **IP** (not source port); with `xff on`,
-the first `X-Forwarded-For` hop is used when present. On HTTP/3, peer address is
-not available from Mako yet, so stick falls back to XFF when present (and still
-shares the same in-process table + peer UPSERT path as TCP/TLS).
+**Status:** dual-node automation green (`make test-ha-peers` — HELLO, proxy with
+peers open, UPSERT sync, reconnect). Still call **production** only after your
+VIP multi-hour soak (see [deploy/ha/README.md](../deploy/ha/README.md)). Prefer
+private networks / firewall peer ports. Peers are not required for active/standby
+VIP HA; they improve stick continuity after failover for `stick on src` on
+**cleartext, TLS HTTP/1–2, and HTTP/3** frontends. Stick keys use the client
+**IP** (not source port); with `xff on`, the first `X-Forwarded-For` hop is used
+when present. On HTTP/3, peer address is not available from Mako yet, so stick
+falls back to XFF when present (and still shares the same in-process table +
+peer UPSERT path as TCP/TLS).
+
+**Local smoke:**
+
+```bash
+make test-ha-peers
+```
 
 ### Peers metrics (0.13+)
 

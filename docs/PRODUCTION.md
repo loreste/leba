@@ -59,7 +59,7 @@ full process restart is only needed if the linked Mako/quiche build cannot open 
 See [HA.md](HA.md) and [deploy/ha/README.md](../deploy/ha/README.md).
 
 - VIP with keepalived + `readyz`
-- Optional stick peers (local dual-node smoke green; multi-hour VIP soak still required before production HA)
+- Optional stick peers (`make test-ha-peers` green: HELLO, proxy, UPSERT sync, reconnect; multi-hour VIP soak still required before production HA)
 - Practice reload on backup before VIP move
 
 ## Limits
@@ -101,4 +101,5 @@ cosign verify \
 
 - “HAProxy Enterprise replacement” without H1–H4 + soak + support story
 - Unlimited streaming reverse proxy
-- Peers **production** without a signed soak report
+- Peers **production** without a signed multi-hour VIP soak report (local
+  `make test-ha-peers` is necessary but not sufficient)

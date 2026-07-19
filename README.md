@@ -25,7 +25,7 @@ gh repo clone loreste/leba && cd leba && make build
   and consistent-hash algorithms
 - Sticky cookie session persistence
 - Source-IP stick tables (`stick on src`, capacity/TTL) for HTTP/1–3 (H3 via XFF/cookie)
-- Experimental stick-table peers (HA sync over private TCP; see `docs/HA.md`)
+- Stick-table peers (HA sync over private TCP; `make test-ha-peers` green — see `docs/HA.md`)
 - DNS service discovery (`resolve` / `expand` / `srv` + `resolve_interval`)
 - Per-server weight and maxconn limits
 - Per-backend maxconn limits
@@ -268,10 +268,10 @@ Linux packaging sketch: [`deploy/linux/`](deploy/linux/) · HA keepalived: [`dep
 
 ## Status
 
-Leba is working software with 80+ automated tests and a soak harness (**v0.14.0**).
-It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS, stick tables, WAF adapter,
-and an NPM-style control plane (proxy hosts, lego ACME, access lists) on a
-HAProxy-class data plane.
+Leba is working software with 80+ automated tests, a soak harness, and dual-node
+peers smoke (**v0.14.0**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
+stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, lego ACME,
+access lists) on a HAProxy-class data plane.
 
 **Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — release plan and beat criteria
 vs NPM / HAProxy Enterprise. Design depth: [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md).
@@ -285,4 +285,5 @@ Known limits:
 - Full config reload with HTTP/TCP/UDP/H3/stats/peers rebind and live OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
 - ACME is lego-orchestrated (not in-process JOSE); see [`docs/ACME.md`](docs/ACME.md).
 - No response compression (gzip/brotli) or response caching yet.
-- Stick-table peers remain experimental until soak is signed off for your cluster.
+- Stick-table peers: dual-node smoke + ownership fixes shipped; treat as
+  **production** only after your VIP multi-hour soak (see [`docs/HA.md`](docs/HA.md)).

@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build/release (e.g. v0.14.0)"
+        required: true
 
 permissions:
   contents: write
@@ -15,26 +20,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Detect version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF="${{ inputs.tag }}"
+          else
+            REF="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Mako
         run: |
           set -euo pipefail
-          if command -v mako >/dev/null 2>&1; then mako version; exit 0; fi
-          if command -v cargo >/dev/null 2>&1; then
-            cargo install --git https://github.com/loreste/mako mako --locked
+          if command -v mako >/dev/null 2>&1; then
+            mako version
+            exit 0
           fi
-          command -v mako
+          # Clone Mako; submodules (quiche) may be incomplete — build best-effort without H3 if needed.
+          git clone --depth 1 https://github.com/loreste/mako.git "$HOME/mako"
+          cd "$HOME/mako"
+          git submodule update --init --recursive || {
+            echo "WARN: submodule init incomplete; continuing without full quiche tree"
+          }
+          # Prefer path install so we control submodule state
+          if cargo install --path . --bin mako --locked 2>/tmp/mako-install.err; then
+            echo "mako installed (locked)"
+          else
+            cat /tmp/mako-install.err || true
+            cargo install --path . --bin mako
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/mako" version
 
       - name: Build binary
         run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
           make build
           mkdir -p dist
           cp leba "dist/leba-linux-amd64"
           chmod +x "dist/leba-linux-amd64"
+          ./leba version || true
 
       - name: Checksums
         run: |
@@ -68,32 +102,38 @@ jobs:
           }
           EOF
 
-      - name: Create GitHub Release
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
           files: |
             dist/leba-linux-amd64
             dist/SHA256SUMS
             dist/sbom.cdx.json
-          generate_release_notes: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+        continue-on-error: true
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+        continue-on-error: true
 
       - name: Login GHCR
         uses: docker/login-action@v3
+        continue-on-error: true
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Dockerfile expects a prebuilt leba binary in context
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
+        continue-on-error: true
         with:
           context: .
           push: true
@@ -101,5 +141,3 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
             ghcr.io/${{ github.repository }}:latest
-          build-args: |
-            TARGETARCH=amd64

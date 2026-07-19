@@ -76,8 +76,10 @@ Recommended deployment shape:
 
 Current hardening:
 
-- raw HTTP requests larger than 1 MiB are rejected before upstream forwarding,
-- raw HTTP request limits are configurable with `request_body_limit`,
+- raw HTTP requests larger than the configured limit (default 1 MiB) are rejected
+  with HTTP 413 before upstream forwarding,
+- raw HTTP request limits are configurable with `request_body_limit` (see
+  [LIMITS.md](LIMITS.md); doctor warns above 16MB),
 - protected admin requests write audit logs with request id, authenticated
   user, role, method, path, status, and outcome,
 - ACL denies are enforced before backend selection,

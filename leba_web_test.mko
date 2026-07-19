@@ -11,6 +11,8 @@ pull . "./src/admin.mko"
 pull . "./src/acme.mko"
 pull . "./src/oidc.mko"
 pull . "./src/peers.mko"
+pull . "./src/waf.mko"
+pull . "./src/doctor.mko"
 pull . "./src/stats.mko"
 pull . "./src/webadmin.mko"
 
@@ -52,7 +54,7 @@ fn TestStatsJsonShape() {
     assert(str_contains(j, "\"routes\""))
     assert(str_contains(j, "\"acls\""))
     assert(str_contains(j, "\"servers\""))
-    assert(str_contains(j, "0.12.0"))
+    assert(str_contains(j, "0.14.0"))
     assert(str_contains(j, "rate_limit"))
     assert(str_contains(j, "request_body_limit_bytes"))
     assert(str_contains(j, "health_interval_ms"))
@@ -170,8 +172,12 @@ fn TestMetricsTextShape() {
     assert(str_contains(m, "leba_backend_connections{backend=\"api\"} 2"))
     assert(str_contains(m, "leba_backend_maxconn{backend=\"api\"} 3"))
     assert(str_contains(m, "leba_server_maxconn{backend=\"api\",server=\"s1\"} 5"))
+    assert(str_contains(m, "leba_server_pool_idle{backend=\"api\",server=\"s1\"} -1"))
+    assert(str_contains(m, "leba_server_pool_open{backend=\"api\",server=\"s1\"} -1"))
     assert(str_contains(m, "leba_server_requests_total{backend=\"api\",server=\"s1\"} 4"))
-    assert(str_contains(m, "leba_info{version=\"0.12.0\"} 1"))
+    assert(str_contains(m, "leba_info{version=\"0.14.0\"} 1"))
+    assert(str_contains(m, "leba_waf_blocked_total"))
+    assert(str_contains(m, "leba_peers_hello_ok_total"))
     assert(str_contains(m, "leba_stick_entries 42"))
     assert(str_contains(m, "leba_backend_stick{backend=\"api\""))
     assert(str_contains(m, "leba_oidc_ready 1"))
@@ -590,8 +596,33 @@ fn TestAdminPathRolesForCertificatesAndAuth() {
     assert_eq_str(admin_path_required_role("POST", "/admin/http-auth"), "admin")
     assert_eq_str(admin_path_required_role("POST", "/admin/access-list"), "operator")
     assert_eq_str(admin_path_required_role("GET", "/admin/certificates"), "viewer")
+    assert_eq_str(admin_path_required_role("DELETE", "/admin/stick-tables"), "operator")
+    assert_eq_str(admin_path_required_role("GET", "/admin/stick-tables"), "viewer")
+    assert_eq_str(admin_path_required_role("POST", "/admin/waf-mode"), "operator")
+    assert_eq_str(admin_path_required_role("GET", "/admin/doctor"), "viewer")
     assert_eq(admin_path_mutates_state("/admin/access-list"), 1)
     assert_eq(admin_path_mutates_state("/admin/certificates/issue"), 1)
+}
+
+fn TestTlsReloadH3StrategyFields() {
+    let ar = handle_admin_state(
+        "POST",
+        "/admin/tls-reload",
+        "/admin/tls-reload",
+        make([]Server, 0, 0),
+        make([]Frontend, 0, 0),
+        make([]Backend, 0, 0),
+        make([]Route, 0, 0),
+        make([]AclRule, 0, 0),
+        "",
+        "/tmp"
+    )
+    assert_eq(ar.handled, 1)
+    assert_eq(ar.status, 200)
+    assert(str_contains(ar.body, "\"h3_strategy\":\"recreate\""))
+    assert(str_contains(ar.body, "\"tcp_tls_reloaded\":true"))
+    assert(str_contains(ar.body, "\"h3_restart_required\":false"))
+    assert(str_contains(ar.body, "\"h3_recreate\":true"))
 }
 
 fn TestAcmeTokenValidation() {

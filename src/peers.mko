@@ -135,6 +135,10 @@ struct PeersApplyResult {
     // Remote node name learned from HELLO
     remote_name: string
     hello_ok: int
+    // Event counters for metrics (deltas for this line)
+    event_hello: int
+    event_auth_fail: int
+    event_upsert: int
 }
 
 fn peers_apply_line(
@@ -152,7 +156,10 @@ fn peers_apply_line(
         close: 0,
         reply: "",
         remote_name: remote_name,
-        hello_ok: hello_ok
+        hello_ok: hello_ok,
+        event_hello: 0,
+        event_auth_fail: 0,
+        event_upsert: 0
     }
     let t = str_trim_space(line)
     if str_eq(t, "") {
@@ -167,6 +174,7 @@ fn peers_apply_line(
     if str_eq(cmd, "HELLO") {
         if len(fields) < 4 {
             out.close = 1
+            out.event_auth_fail = 1
             return out
         }
         let node = fields[1]
@@ -175,25 +183,30 @@ fn peers_apply_line(
         if not str_eq(cluster, cfg.cluster) {
             log_warn_event("peers_auth_failed", f"reason=cluster remote={node}")
             out.close = 1
+            out.event_auth_fail = 1
             return out
         }
         if str_eq(node, cfg.name) {
             log_warn_event("peers_auth_failed", f"reason=self_connect remote={node}")
             out.close = 1
+            out.event_auth_fail = 1
             return out
         }
         let expect = peers_auth_token(cfg.secret, node, cluster)
         if str_eq(expect, "") {
             out.close = 1
+            out.event_auth_fail = 1
             return out
         }
         if not str_eq(token, expect) {
             log_warn_event("peers_auth_failed", f"reason=token remote={node}")
             out.close = 1
+            out.event_auth_fail = 1
             return out
         }
         out.remote_name = node
         out.hello_ok = 1
+        out.event_hello = 1
         out.reply = peers_encode_ok(cfg)
         log_info_event("peers_hello", f"remote={node} cluster={cluster}")
         return out
@@ -202,6 +215,9 @@ fn peers_apply_line(
     if str_eq(cmd, "OK") {
         if len(fields) >= 2 {
             out.remote_name = fields[1]
+        }
+        if out.hello_ok == 0 {
+            out.event_hello = 1
         }
         out.hello_ok = 1
         return out
@@ -212,6 +228,7 @@ fn peers_apply_line(
         if not str_eq(cmd, "SYNC_END") {
             log_warn_event("peers_proto", "reason=hello_required")
             out.close = 1
+            out.event_auth_fail = 1
         }
         return out
     }
@@ -224,6 +241,7 @@ fn peers_apply_line(
             let t2, c2 = stick_table_set_abs(out.table, key, server, exp, 100000, now_ms, out.count)
             out.table = t2
             out.count = c2
+            out.event_upsert = 1
         }
         return out
     }
@@ -250,6 +268,17 @@ fn peers_apply_line(
     return out
 }
 
+struct PeersFeedResult {
+    conn: PeerConn
+    table: map[string]string
+    count: int
+    reply: string
+    close: int
+    hello: int
+    auth_fail: int
+    upserts: int
+}
+
 // Feed bytes into a peer connection buffer; apply complete lines.
 fn peers_feed(
     pc: PeerConn,
@@ -258,13 +287,16 @@ fn peers_feed(
     table: map[string]string,
     entry_count: int,
     now_ms: int
-) -> (PeerConn, map[string]string, int, string, int) {
+) -> PeersFeedResult {
     let mut conn = pc
     conn.buf = conn.buf + data
     let mut reply_all = ""
     let mut close = 0
     let mut tab = table
     let mut count = entry_count
+    let mut hello_n = 0
+    let mut auth_n = 0
+    let mut upsert_n = 0
     // Process lines
     let mut guard = 0
     while guard < 10000 {
@@ -278,6 +310,9 @@ fn peers_feed(
         let ar = peers_apply_line(line, cfg, tab, count, now_ms, conn.name, conn.hello_ok)
         tab = ar.table
         count = ar.count
+        hello_n = hello_n + ar.event_hello
+        auth_n = auth_n + ar.event_auth_fail
+        upsert_n = upsert_n + ar.event_upsert
         if not str_eq(ar.remote_name, "") {
             conn.name = ar.remote_name
         }
@@ -294,13 +329,24 @@ fn peers_feed(
     if str_len(conn.buf) > 65536 {
         close = 1
     }
-    return (conn, tab, count, reply_all, close)
+    return PeersFeedResult {
+        conn: conn,
+        table: tab,
+        count: count,
+        reply: reply_all,
+        close: close,
+        hello: hello_n,
+        auth_fail: auth_n,
+        upserts: upsert_n
+    }
 }
 
-fn peers_broadcast(conns: []PeerConn, line: string) {
+// Count outbound UPSERTs written to ready peers.
+fn peers_broadcast(conns: []PeerConn, line: string) -> int {
     if str_eq(line, "") {
-        return
+        return 0
     }
+    let mut n = 0
     for _, c in range conns {
         if c.fd < 0 {
             continue
@@ -309,7 +355,22 @@ fn peers_broadcast(conns: []PeerConn, line: string) {
             continue
         }
         let _ = tcp_write(c.fd, line)
+        n = n + 1
     }
+    return n
+}
+
+fn peers_session_count(conns: []PeerConn) -> int {
+    let mut n = 0
+    for _, c in range conns {
+        if c.fd < 0 {
+            continue
+        }
+        if c.hello_ok == 1 {
+            n = n + 1
+        }
+    }
+    return n
 }
 
 fn peers_write(fd: int, data: string) -> int {

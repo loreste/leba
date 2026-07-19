@@ -156,11 +156,12 @@ fn apply_defaults_kv(d: Defaults, key: string, val: string) -> Defaults {
 }
 
 fn apply_backend_kv(b: Backend, key: string, val: string) -> Backend {
-    let mut out = b
+    // Own all string fields — config line buffers are freed after parse.
+    let mut out = backend_clone(b)
     match key {
-        "balance" => { out.balance = val },
-        "servers_file" => { out.servers_file = val },
-        "health_path" => { out.health_path = val },
+        "balance" => { out.balance = own_string(val) },
+        "servers_file" => { out.servers_file = own_string(val) },
+        "health_path" => { out.health_path = own_string(val) },
         "health_interval" => { out.health_interval_ms = parse_duration_ms(val) },
         "health_interval_ms" => { out.health_interval_ms = to_int(val) },
         "health_timeout" => { out.health_timeout_ms = parse_duration_ms(val) },
@@ -171,7 +172,7 @@ fn apply_backend_kv(b: Backend, key: string, val: string) -> Backend {
         "connect_timeout_ms" => { out.connect_timeout_ms = to_int(val) },
         "maxconn" => { out.maxconn = to_int(val) },
         "retries" => { out.retries = to_int(val) },
-        "stick_on" => { out.stick_on = val },
+        "stick_on" => { out.stick_on = own_string(val) },
         "stick_size" => { out.stick_size = to_int(val) },
         "stick_expire" => { out.stick_expire_ms = parse_duration_ms(val) },
         "stick_expire_ms" => { out.stick_expire_ms = to_int(val) },
@@ -398,12 +399,18 @@ fn load_servers_file_into(w: World, backend: string, file_path: string, base_dir
 
 fn load_all_servers_files(w: World, base_dir: string) -> World {
     let mut out = w
-    for bi, be in range out.backends {
-        if not str_eq(be.servers_file, "") {
-            out = load_servers_file_into(out, be.name, be.servers_file, base_dir)
-            if out.ok == 0 {
-                return out
-            }
+    // Index loop + own_string: reassigning `out` invalidates ranged iterators over backends.
+    let mut bi = 0
+    while bi < len(out.backends) {
+        let bname = own_string(out.backends[bi].name)
+        let spath = own_string(out.backends[bi].servers_file)
+        bi = bi + 1
+        if str_eq(spath, "") {
+            continue
+        }
+        out = load_servers_file_into(out, bname, spath, base_dir)
+        if out.ok == 0 {
+            return out
         }
     }
     return out
@@ -508,6 +515,14 @@ fn init_server_pools(servers: []Server, backends: []Backend) -> []Server {
         }
     }
     return out
+}
+
+fn close_server_pools(servers: []Server) {
+    for _, s in range servers {
+        if s.pool >= 0 {
+            let _ = tcp_pool_close(s.pool)
+        }
+    }
 }
 
 fn load_servers_file_list(backend: string, file_path: string, base_dir: string) -> ServersReload {
@@ -1448,8 +1463,9 @@ fn parse_config_text(raw: string) -> World {
             if bi < 0 {
                 continue
             }
-            let mut bes = w.backends
-            let mut be = bes[bi]
+            // Clone array so store-back does not free the live backend name/path strings.
+            let mut bes = backend_array_clone(w.backends)
+            let mut be = backend_clone(bes[bi])
             if str_eq(head, "server") {
                 if len(fields) >= 3 {
                     w.servers = append(w.servers, parse_server_line(fields, cur_name))
@@ -1459,7 +1475,7 @@ fn parse_config_text(raw: string) -> World {
                     // stick on src
                     if len(fields) >= 3 {
                         if str_eq(fields[1], "on") {
-                            be.stick_on = fields[2]
+                            be.stick_on = own_string(fields[2])
                         }
                     }
                 } else {

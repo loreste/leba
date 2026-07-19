@@ -1,0 +1,52 @@
+# Dual-node Leba lab (stick peers). Not a full VRRP demo — front with host LB/VIP in prod.
+# Usage: docker compose -f deploy/ha/docker-compose.ha.yml up -d
+
+services:
+  leba-a:
+    image: ghcr.io/loreste/leba:latest
+    # build: { context: ../.., dockerfile: Dockerfile }
+    container_name: leba-a
+    ports:
+      - "8080:80"
+      - "8404:8404"
+    volumes:
+      - ./leba-a.conf:/etc/leba/leba.conf:ro
+      - ./admin-users.conf:/etc/leba/admin-users.conf:ro
+    environment:
+      LEBA_PEERS_SECRET: ${LEBA_PEERS_SECRET:-change-me-peers}
+      LEBA_CONFIG: /etc/leba/leba.conf
+    networks:
+      ha:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+
+  leba-b:
+    image: ghcr.io/loreste/leba:latest
+    container_name: leba-b
+    ports:
+      - "8081:80"
+      - "8405:8404"
+    volumes:
+      - ./leba-b.conf:/etc/leba/leba.conf:ro
+      - ./admin-users.conf:/etc/leba/admin-users.conf:ro
+    environment:
+      LEBA_PEERS_SECRET: ${LEBA_PEERS_SECRET:-change-me-peers}
+      LEBA_CONFIG: /etc/leba/leba.conf
+    networks:
+      ha:
+        ipv4_address: 172.28.0.11
+    restart: unless-stopped
+
+  # Simple upstream for demos
+  origin:
+    image: nginx:alpine
+    networks:
+      ha:
+        ipv4_address: 172.28.0.20
+
+networks:
+  ha:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

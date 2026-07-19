@@ -7,6 +7,7 @@ pull . "./src/balance.mko"
 pull . "./src/health.mko"
 pull . "./src/rate.mko"
 pull . "./src/doctor.mko"
+pull . "./src/waf.mko"
 pull . "./src/admin.mko"
 pull . "./src/acme.mko"
 

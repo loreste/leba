@@ -514,6 +514,27 @@ fn doctor_world(w: World) -> DoctorReport {
         }
     }
 
+    // Body / streaming policy (0.14) — large limits increase accept-thread memory.
+    let mut def_body = w.defaults.request_body_limit_bytes
+    if def_body <= 0 {
+        def_body = 1048576
+    }
+    if def_body > 16777216 {
+        builder_write(b, "WARN   defaults request_body_limit >16MB; large bodies are buffered, not streamed\n")
+        builder_write(b, "  fix:  lower request_body_limit or accept memory cost; see docs/LIMITS.md\n")
+        warnings = warnings + 1
+    }
+    for _, feb in range w.frontends {
+        let mut bl = feb.request_body_limit_bytes
+        if bl <= 0 {
+            bl = def_body
+        }
+        if bl > 16777216 {
+            builder_write(b, "WARN   frontend request_body_limit >16MB; not a streaming pump path (docs/LIMITS.md)\n")
+            warnings = warnings + 1
+        }
+    }
+
     if has_stats_frontend == 1 {
         if len(w.admin_users) == 0 {
             if str_eq(w.stats_user, "") {

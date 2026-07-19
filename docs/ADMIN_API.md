@@ -38,9 +38,42 @@ Roles:
 
 | Role | Access |
 |------|--------|
-| `viewer` | Dashboard, `/stats`, `/metrics`, `/admin/servers` |
-| `operator` | Viewer access plus server state changes, virtual-host changes, and `servers_file` reload |
-| `admin` | Full admin access |
+| `viewer` | Dashboard, `/stats`, `/metrics`, `/admin/servers`, stick-tables GET, doctor/explain |
+| `operator` | Viewer access plus server state, stick clear, WAF mode, virtual-host changes, `servers_file` reload |
+| `admin` | Full admin access (ACME issue/renew, reload, app auth writes) |
+
+## TLS reload (0.14+)
+
+### `POST /admin/tls-reload`
+
+| Field | Meaning |
+|-------|---------|
+| `tcp_tls_reloaded` | TCP TLS contexts reloaded in place |
+| `h3_strategy` | Always `recreate` for HTTP/3 |
+| `h3_recreate` | Accept thread rebinds H3 when cert/key paths change |
+| `h3_restart_required` | `false` when in-process recreate is available |
+| `h3_frontends` | Count of HTTP frontends advertising H3 in `protocols` |
+
+## Stick tables (0.13+)
+
+| Method | Path | Role |
+|--------|------|------|
+| GET | `/admin/stick-tables` | viewer |
+| GET | `/admin/stick-tables/entries?backend=&limit=` | viewer |
+| DELETE | `/admin/stick-tables?backend=` | operator |
+| DELETE | `/admin/stick-tables/entry?key=` | operator |
+
+## Doctor / preview (0.13+)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/admin/doctor` | Config doctor JSON |
+| GET | `/admin/explain?method=&path=&host=&frontend=` | Request dry-run |
+| GET/POST | `/admin/preview-reload` | Doctor without apply |
+| POST | `/admin/server?backend=&name=&addr=` | Upsert managed server |
+| POST | `/admin/server-delete?backend=&name=` | Remove managed server |
+| POST | `/admin/waf-mode?frontend=&mode=` | `off` / `detect` / `block` |
+| GET | `/admin/waf-rules` | Sample local signatures |
 
 ## Probes
 

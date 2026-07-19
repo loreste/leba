@@ -68,7 +68,7 @@
 
 | ID | Criterion | 0.11 status | Done when |
 |----|-----------|-------------|-----------|
-| **N1** | Install | Partial | Published image + `docker compose up` docs; default password story |
+| **N1** | Install | **Met** (0.14) | Published binary + GHCR image + `docker compose` / `LEBA_IMAGE` docs |
 | **N2** | Proxy host CRUD | **Met** | GUI/API HTTPS host → upstream &lt; 5 min |
 | **N3** | Cert renew without restart | **Met** (TCP TLS) | lego + `tls_server_reload`; H3 may restart |
 | **N3b** | Multi-host multi-cert | **Met** (SNI) | Per-domain cert in UI without process restart |
@@ -231,3 +231,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-18 | 0.12.0 NPM host parity (locations, WS, enable, host ACL/auth, DNS-01, renew timer) |
 | 2026-07-18 | 0.13.0 enterprise ops (stick API, peers metrics, WAF surface, HA package, preview) |
 | 2026-07-18 | 0.14.0 platform quality (soak, LIMITS/PRODUCTION, H3 recreate, release/SBOM CI) |
+| 2026-07-19 | v0.14.0 GitHub Release published (binary, SHA256SUMS, SBOM, multi-arch GHCR image) |

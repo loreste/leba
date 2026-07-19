@@ -1,6 +1,11 @@
 # Leba — one-command NPM-style demo.
 #
-#   docker compose up --build
+#   # From source (builds local image):
+#   make build && docker compose up --build
+#
+#   # Or published release image (no local Mako needed):
+#   LEBA_IMAGE=ghcr.io/loreste/leba:0.14.0 docker compose up
+#
 #   open http://localhost:8404/   (admin / change-me)
 #   curl http://localhost/        → demo origin via Leba
 #
@@ -12,8 +17,8 @@ services:
     restart: unless-stopped
 
   leba:
+    image: ${LEBA_IMAGE:-leba:local}
     build: .
-    image: leba:local
     restart: unless-stopped
     depends_on:
       - origin

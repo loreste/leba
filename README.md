@@ -3,8 +3,18 @@
 Leba is a load balancer written in [Mako](https://github.com/loreste/mako),
 showcasing what the language can do in a real systems program.
 
+**Current release: [v0.14.0](https://github.com/loreste/leba/releases/tag/v0.14.0)** —
+NPM-style control plane + HAProxy-class data plane, soak-tested.
+
 ```bash
-gh repo clone loreste/leba
+# Binary (Linux amd64)
+gh release download v0.14.0 -p 'leba-linux-amd64' -p 'SHA256SUMS'
+sha256sum -c SHA256SUMS
+chmod +x leba-linux-amd64 && sudo mv leba-linux-amd64 /usr/local/bin/leba
+leba version
+
+# Or clone and build from source
+gh repo clone loreste/leba && cd leba && make build
 ```
 
 ## Features
@@ -209,6 +219,16 @@ leba version                              Print version
 
 ## Quick start (Docker demo)
 
+**Option A — published image (fastest):**
+
+```bash
+docker pull ghcr.io/loreste/leba:0.14.0
+# Use with your own leba.conf, or the compose file below with image override:
+LEBA_IMAGE=ghcr.io/loreste/leba:0.14.0 docker compose up
+```
+
+**Option B — build from this repo:**
+
 ```bash
 # 1) build binary for the image
 make build
@@ -224,11 +244,14 @@ curl -s http://localhost/            # → hello from leba demo origin
 Replace `LEBA_SESSION_SECRET` and admin password before any public deploy.
 Optional ACME: `LEBA_ACME_EMAIL=you@example.com docker compose up --build`.
 
+Production runbook: [`docs/PRODUCTION.md`](docs/PRODUCTION.md) · HA pair: [`deploy/ha/README.md`](deploy/ha/README.md)
+
 ## Deployment
 
 ```bash
 leba doctor /etc/leba/leba.conf    # validate
 leba -f /etc/leba/leba.conf        # run
+make test-soak                     # from a source checkout: admin + proxy load
 ```
 
 Typical paths:
@@ -240,24 +263,25 @@ Typical paths:
 /var/log/leba/access.log
 ```
 
+Linux packaging sketch: [`deploy/linux/`](deploy/linux/) · HA keepalived: [`deploy/ha/`](deploy/ha/)
+
 ## Status
 
-Leba is working software with 80+ automated tests (v0.14.0). It handles
-HTTP/1-3, TCP, UDP/SIP, WebSocket, TLS/mTLS, and has been deployed behind
-real traffic. v0.11 ships an NPM-style control plane (proxy hosts, certificates
-via lego, access lists) on a HAProxy-class data plane.
+Leba is working software with 80+ automated tests and a soak harness (**v0.14.0**).
+It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS, stick tables, WAF adapter,
+and an NPM-style control plane (proxy hosts, lego ACME, access lists) on a
+HAProxy-class data plane.
 
 **Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — release plan and beat criteria
 vs NPM / HAProxy Enterprise. Design depth: [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md).
 
 Known limits:
 - HTTP/2 covers multiplexed request/response; long-lived streaming and server
-  push are not goals.
-- HTTP/3 requires a quiche-linked build. Upstream prefers keep-alive pools when
-  `init_server_pools` is active; otherwise falls back to per-request connect.
+  push are not goals (see [`docs/LIMITS.md`](docs/LIMITS.md)).
+- HTTP/3 requires a quiche-linked build. Cert reload recreates H3 listeners
+  (`h3_strategy=recreate` on `POST /admin/tls-reload`).
 - SIP support is signaling-focused; media relay is not implemented.
 - Full config reload with HTTP/TCP/UDP/H3/stats/peers rebind and live OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
-- No built-in Let's Encrypt client; use external ACME + `acme_webroot` +
-  `POST /admin/tls-reload` (see [`docs/ACME.md`](docs/ACME.md)).
+- ACME is lego-orchestrated (not in-process JOSE); see [`docs/ACME.md`](docs/ACME.md).
 - No response compression (gzip/brotli) or response caching yet.
-- No WAF/request body inspection yet.
+- Stick-table peers remain experimental until soak is signed off for your cluster.

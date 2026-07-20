@@ -1212,7 +1212,11 @@ fn main() {
                                         let _ = tls_conn_close(tconn)
                                         completed = completed + 1
                                     } else {
-                                        let raw_bytes = tls_read(tconn, 65536)
+                                        let mut tls_req_limit = h.frontend.request_body_limit_bytes
+                                        if tls_req_limit <= 0 {
+                                            tls_req_limit = 1048576
+                                        }
+                                        let raw_bytes = tls_read_http_request(tconn, tls_req_limit)
                                         let raw_req = parse_raw_request(raw_bytes)
                                         // WSS: tunnel Upgrade: websocket off the accept thread
                                         if str_eq(raw_req.upgrade, "websocket") {

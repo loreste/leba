@@ -251,6 +251,36 @@ fn raw_request_complete(raw: string, max_bytes: int) -> int {
     return 0
 }
 
+// TLS reads are allowed to return a partial HTTP request.  Unlike the
+// cleartext accept path, the TLS path used to parse one tls_read() result
+// immediately, which made larger or fragmented browser requests look like a
+// malformed request.  Keep reading until the headers and declared body are
+// complete, or until the frontend limit is exceeded.
+fn tls_read_http_request(conn: TlsConn, max_bytes: int) -> string {
+    let mut raw = ""
+    let mut reads = 0
+    while reads < 256 {
+        if raw_request_complete(raw, 0) == 1 {
+            return raw
+        }
+        if max_bytes > 0 {
+            if str_len(raw) > max_bytes {
+                return raw
+            }
+        }
+        let chunk = tls_read(conn, 16384)
+        if str_eq(chunk, "") {
+            return raw
+        }
+        let mut b = str_builder()
+        builder_write(b, raw)
+        builder_write(b, chunk)
+        raw = builder_string(b)
+        reads = reads + 1
+    }
+    return raw
+}
+
 fn proxy_traceparent(incoming: string, access_log: int) -> string {
     if traceparent_valid(incoming) == 1 {
         return incoming

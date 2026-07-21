@@ -24,6 +24,10 @@ fn cli_legacy_password_hash(pass: string, iterations: int) -> string {
     return builder_string(b)
 }
 
+fn cli_modern_password_hash(pass: string) -> string {
+    return argon2id_hash(pass)
+}
+
 fn cli_arg_or(idx: int, fallback: string) -> string {
     if argc() > idx {
         return arg_get(idx)
@@ -153,7 +157,10 @@ fn cli_admin_main() -> string {
             return cli_usage()
         }
         if crypto.password_hashing_ok() == 1 {
-            return crypto.password_hash(arg_get(3)) + "\n"
+            let mut hashed = str_builder()
+            builder_write(hashed, cli_modern_password_hash(arg_get(3)))
+            builder_write(hashed, "\n")
+            return builder_string(hashed)
         }
         let mut iter = 20000
         if argc() > 4 {

@@ -42,6 +42,13 @@ gh repo clone loreste/leba && cd leba && make build
 - Static file serving (`root /path/to/files`)
 - CORS preflight handling (auto 204 for OPTIONS)
 
+For a credentialed browser application, set `LEBA_CORS_ORIGIN` to the exact
+UI origin (for example `https://app.example.com`). Leba then returns
+credential-safe preflight headers and forwards the application headers used by
+CSRF-protected uploads, including `X-CSRF-Token`, `X-Attachment-Filename`, and
+`Content-Type`. Leave it unset for non-browser routes; the fallback is
+wildcard CORS without credentials.
+
 ### TLS & Security
 - TLS termination for HTTP frontends
 - mTLS with client certificate validation (`tls_client_ca`)

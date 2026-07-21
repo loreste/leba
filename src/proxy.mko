@@ -190,6 +190,11 @@ struct RawRequest {
     version: string = ""
     // Authorization header (for app-level HTTP Basic).
     authorization: string = ""
+    // Headers required by browser uploads and authenticated CORS requests.
+    content_type: string = ""
+    csrf_token: string = ""
+    attachment_filename: string = ""
+    origin: string = ""
 }
 
 fn raw_request_new(
@@ -205,7 +210,11 @@ fn raw_request_new(
     raw: string,
     connection: string,
     version: string,
-    authorization: string
+    authorization: string,
+    content_type: string,
+    csrf_token: string,
+    attachment_filename: string,
+    origin: string
 ) -> RawRequest {
     return RawRequest {
         ok: ok,
@@ -220,7 +229,11 @@ fn raw_request_new(
         raw: own_string(raw),
         connection: own_string(connection),
         version: own_string(version),
-        authorization: own_string(authorization)
+        authorization: own_string(authorization),
+        content_type: own_string(content_type),
+        csrf_token: own_string(csrf_token),
+        attachment_filename: own_string(attachment_filename),
+        origin: own_string(origin)
     }
 }
 
@@ -583,7 +596,7 @@ fn h2_header_value_ci(name: string) -> string {
     return ""
 }
 
-fn h2_raw_request(method: string, path: string, host: string, body: string, cookie: string, traceparent: string, authorization: string) -> RawRequest {
+fn h2_raw_request(method: string, path: string, host: string, body: string, cookie: string, traceparent: string, authorization: string, content_type: string, csrf_token: string, attachment_filename: string, origin: string) -> RawRequest {
     let mut m = method
     if str_eq(m, "") {
         m = "GET"
@@ -612,7 +625,11 @@ fn h2_raw_request(method: string, path: string, host: string, body: string, cook
         "",
         "",
         "",
-        authorization
+        authorization,
+        content_type,
+        csrf_token,
+        attachment_filename,
+        origin
     )
 }
 
@@ -620,7 +637,7 @@ fn h2_request_from_stream(stream: int) -> RawRequest {
     let block = http2_conn_header_block(stream)
     let n = hpack_decode_block(block)
     if n < 0 {
-        return h2_raw_request("", "", "", "", "", "", "")
+        return h2_raw_request("", "", "", "", "", "", "", "", "", "", "")
     }
     let method = h2_header_value(":method")
     let path = h2_header_value(":path")
@@ -631,8 +648,12 @@ fn h2_request_from_stream(stream: int) -> RawRequest {
     let cookie = h2_header_value_ci("cookie")
     let traceparent = h2_header_value_ci("traceparent")
     let authorization = h2_header_value_ci("authorization")
+    let content_type = h2_header_value_ci("content-type")
+    let csrf_token = h2_header_value_ci("x-csrf-token")
+    let attachment_filename = h2_header_value_ci("x-attachment-filename")
+    let origin = h2_header_value_ci("origin")
     let body = http2_stream_body(stream)
-    return h2_raw_request(method, path, host, body, cookie, traceparent, authorization)
+    return h2_raw_request(method, path, host, body, cookie, traceparent, authorization, content_type, csrf_token, attachment_filename, origin)
 }
 
 fn h2_stream_request_complete(stream: int) -> int {
@@ -971,7 +992,40 @@ fn merge_response_extras(pass_headers: string, rule_headers: string) -> string {
 }
 
 fn cors_headers() -> string {
-    return "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS, PATCH\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, traceparent\r\nAccess-Control-Max-Age: 86400\r\n"
+    let origin = env_get("LEBA_CORS_ORIGIN")
+    if not str_eq(origin, "") {
+        return f"Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS, PATCH\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, traceparent, X-CSRF-Token, X-Attachment-Filename\r\nAccess-Control-Expose-Headers: X-Request-Id, X-CSRF-Token\r\nAccess-Control-Max-Age: 86400\r\nVary: Origin\r\n"
+    }
+    return "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS, PATCH\r\nAccess-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, traceparent, X-CSRF-Token, X-Attachment-Filename\r\nAccess-Control-Max-Age: 86400\r\nVary: Origin\r\n"
+}
+
+// Preserve browser request headers needed by the application auth and upload
+// contracts. These are deliberately explicit instead of forwarding arbitrary
+// client headers through the edge proxy.
+fn request_header_extras(existing: string, content_type: string, csrf_token: string, attachment_filename: string, origin: string) -> string {
+    let mut b = str_builder()
+    builder_write(b, existing)
+    if not str_eq(content_type, "") {
+        builder_write(b, "Content-Type: ")
+        builder_write(b, content_type)
+        builder_write(b, "\r\n")
+    }
+    if not str_eq(csrf_token, "") {
+        builder_write(b, "X-CSRF-Token: ")
+        builder_write(b, csrf_token)
+        builder_write(b, "\r\n")
+    }
+    if not str_eq(attachment_filename, "") {
+        builder_write(b, "X-Attachment-Filename: ")
+        builder_write(b, attachment_filename)
+        builder_write(b, "\r\n")
+    }
+    if not str_eq(origin, "") {
+        builder_write(b, "Origin: ")
+        builder_write(b, origin)
+        builder_write(b, "\r\n")
+    }
+    return builder_string(b)
 }
 
 fn is_cors_preflight(method: string) -> int {
@@ -1017,6 +1071,30 @@ fn is_pass_header_name(name_lower: string) -> int {
         return 1
     }
     if str_eq(name_lower, "pragma") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-allow-origin") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-allow-credentials") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-allow-methods") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-allow-headers") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-expose-headers") {
+        return 1
+    }
+    if str_eq(name_lower, "access-control-max-age") {
+        return 1
+    }
+    if str_eq(name_lower, "x-csrf-token") {
+        return 1
+    }
+    if str_eq(name_lower, "x-request-id") {
         return 1
     }
     return 0
@@ -1362,6 +1440,22 @@ fn parse_raw_request(raw: string) -> RawRequest {
     if str_eq(authorization, "") {
         authorization = raw_header(raw, "Authorization")
     }
+    let mut content_type = http_parsed_header(parsed, "Content-Type")
+    if str_eq(content_type, "") {
+        content_type = raw_header(raw, "Content-Type")
+    }
+    let mut csrf_token = http_parsed_header(parsed, "X-CSRF-Token")
+    if str_eq(csrf_token, "") {
+        csrf_token = raw_header(raw, "X-CSRF-Token")
+    }
+    let mut attachment_filename = http_parsed_header(parsed, "X-Attachment-Filename")
+    if str_eq(attachment_filename, "") {
+        attachment_filename = raw_header(raw, "X-Attachment-Filename")
+    }
+    let mut origin = http_parsed_header(parsed, "Origin")
+    if str_eq(origin, "") {
+        origin = raw_header(raw, "Origin")
+    }
     let version = raw_request_part(first, 2)
     return raw_request_new(
         ok,
@@ -1376,7 +1470,11 @@ fn parse_raw_request(raw: string) -> RawRequest {
         raw,
         connection,
         version,
-        authorization
+        authorization,
+        content_type,
+        csrf_token,
+        attachment_filename,
+        origin
     )
 }
 
@@ -1630,12 +1728,17 @@ fn prepare_dispatch(
     let body = http_body(c)
     let traceparent = proxy_traceparent(http_header(c, "traceparent"), fe.access_log)
     let authorization = http_header(c, "Authorization")
+    let content_type = http_header(c, "Content-Type")
+    let csrf_token = http_header(c, "X-CSRF-Token")
+    let attachment_filename = http_header(c, "X-Attachment-Filename")
+    let origin = http_header(c, "Origin")
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(authorization, "") {
         req_extra = req_extra + "Authorization: " + authorization + "\r\n"
     }
+    req_extra = request_header_extras(req_extra, content_type, csrf_token, attachment_filename, origin)
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -1883,6 +1986,7 @@ fn prepare_raw_dispatch(
     if not str_eq(req.authorization, "") {
         req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
+    req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
     let client_ka = client_wants_keepalive(req.version, req.connection)
     let mut srv_list = servers
     let mut be_list = backends
@@ -2275,6 +2379,7 @@ fn handle_tls_proxy_request(
     if not str_eq(req.authorization, "") {
         req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
+    req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets
@@ -2673,6 +2778,7 @@ fn handle_h3_proxy_request(
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
+    req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
     let mut srv_list = servers
     let mut be_list = backends
     let mut rate_list = buckets

@@ -3,12 +3,14 @@
 Leba is a load balancer written in [Mako](https://github.com/loreste/mako),
 showcasing what the language can do in a real systems program.
 
-**Current release: [v0.14.1](https://github.com/loreste/leba/releases/tag/v0.14.1)** —
-NPM-style control plane + HAProxy-class data plane, soak-tested.
+**Current version: 0.15.0** — NPM-style control plane (Let's Encrypt, proxy hosts) +
+HAProxy-class data plane, full CI matrix (units / concurrent / adversarial / soak / peers).
+
+Binary releases: tag `v0.15.0` on GitHub when cut (see `docs/PRODUCTION.md`).
 
 ```bash
 # Binary (Linux amd64) + checksums (+ optional cosign bundle)
-gh release download v0.14.1 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
+gh release download v0.15.0 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
 sha256sum -c SHA256SUMS
 # cosign verify-blob --bundle leba-linux-amd64.cosign.bundle ...  # see docs/PRODUCTION.md
 chmod +x leba-linux-amd64 && sudo mv leba-linux-amd64 /usr/local/bin/leba
@@ -232,9 +234,9 @@ leba version                              Print version
 **Option A — published image (fastest):**
 
 ```bash
-docker pull ghcr.io/loreste/leba:0.14.1
+docker pull ghcr.io/loreste/leba:0.15.0
 # Use with your own leba.conf, or the compose file below with image override:
-LEBA_IMAGE=ghcr.io/loreste/leba:0.14.1 docker compose up
+LEBA_IMAGE=ghcr.io/loreste/leba:0.15.0 docker compose up
 ```
 
 **Option B — build from this repo:**
@@ -278,7 +280,7 @@ Linux packaging sketch: [`deploy/linux/`](deploy/linux/) · HA keepalived: [`dep
 ## Status
 
 Leba is working software with 170+ automated unit tests, concurrent/adversarial/soak harnesses, and dual-node
-peers smoke (**v0.14.1**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
+peers smoke (**v0.15.0**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
 stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, lego ACME,
 access lists) on a HAProxy-class data plane.
 

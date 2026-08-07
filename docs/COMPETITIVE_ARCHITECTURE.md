@@ -10,7 +10,7 @@
 | **Author** | TBD |
 | **Date** | 2026-07-17 (baseline; header updated 2026-08-06) |
 | **Status** | Historical design archive — use ROADMAP for current status |
-| **Baseline** | Original draft: 0.7.1; current product: **0.14.1** |
+| **Baseline** | Original draft: 0.7.1; current product: **0.15.0** |
 | **Audience** | Senior engineers shipping Leba as an open-core edge load balancer |
 
 ---

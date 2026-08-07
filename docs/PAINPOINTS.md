@@ -110,6 +110,7 @@ configured runtime state has eligible upstream capacity.
 - [x] Access list + app HTTP Basic CRUD API (`leba.access.conf`).
 - [x] App HTTP Basic (`auth_basic` / `auth_user`).
 - [x] ACME orchestrator via external lego (Admin UI issue/renew + `/admin/certificates/*`).
+- [x] Let's Encrypt official directories (production + staging) + Request SSL on proxy-host.
 - [x] Config reload + HTTP/TCP/UDP/H3/stats/peers rebind + OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
 - [x] Redirect hosts + dead hosts (`route … redirect|dead`).
 - [x] Local stick tables (`stick on src`) including HTTP/3 (XFF or cookie).

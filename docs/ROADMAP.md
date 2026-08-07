@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Baseline** | Leba **0.14.1** (2026-08) — production harden + perf |
+| **Baseline** | Leba **0.15.0** (2026-08) — Let's Encrypt + auto SSL + full CI matrix |
 | **North star** | HAProxy-class data plane + Nginx Proxy Manager (NPM) day-1 UX, open-core price |
 | **Status** | Living roadmap — update each release |
 | **Related** | [COMPETITIVE_ARCHITECTURE.md](COMPETITIVE_ARCHITECTURE.md) (design depth), [PAINPOINTS.md](PAINPOINTS.md) (ops workflows) |
@@ -99,12 +99,12 @@ make build
 |----|-----------|-------------|-----------|
 | **N1** | Install | **Met** (0.14) | Published binary + GHCR image + `docker compose` / `LEBA_IMAGE` docs |
 | **N2** | Proxy host CRUD | **Met** | GUI/API HTTPS host → upstream &lt; 5 min |
-| **N3** | Cert renew without restart | **Met** (TCP TLS) | lego + `tls_server_reload`; H3 may restart |
+| **N3** | Cert renew without restart | **Met** (TCP TLS) | lego + `tls_server_reload`; H3 may recreate |
 | **N3b** | Multi-host multi-cert | **Met** (SNI) | Per-domain cert in UI without process restart |
 | **N4** | Access list + Basic | **Met** (API/UI) | Per-frontend; polish per-host binding later |
 | **N5** | Beyond NPM | **Met** | least_conn, drain, doctor, real LB |
-| **N6** | Host editor parity | **Met** (0.12) | Force SSL, WS flag, custom path locations, enable/disable host |
-| **N7** | Cert lifecycle UX | **Met** (0.12; DNS-01 via lego) | Expiry display, renew timer, DNS-01 option |
+| **N6** | Host editor parity | **Met** (0.15) | Per-host Force SSL, Request SSL, WS, locations, enable/disable |
+| **N7** | Cert lifecycle UX | **Met** (0.15) | Official LE prod/staging, issue/renew UI, timer, DNS-01 |
 
 ### vs HAProxy Enterprise / NGINX Plus
 
@@ -181,27 +181,22 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 
 ---
 
-### 0.15 — Performance vs nginx (active)
+### 0.15 — NPM LE day-1 + perf harden ✅ *(0.15.0)*
 
-**Goal:** Credible “faster and lighter than nginx” on reverse-proxy workloads.
+**Goal:** Add a host, get a Let's Encrypt cert, force SSL — under five minutes; keep the hot path lean.
 
 | Work | Priority | Status |
 |------|----------|--------|
-| Dirty-flag adopt (rate/stick) — skip map/array copies when idle | P0 | ✅ cleartext + WS dispatch |
-| Stick pick fast-path without `pick_server_stick` map own | P0 | ✅ when no stick/cookie sticky |
-| Single `server_conn_delta` clone (no entry clone of all servers) | P0 | ✅ |
-| Faster `pick_server` (no `own_string`, single pass, 1-server short-circuit) | P0 | ✅ |
-| Skip retry-plan alternate scans when `retries 0` | P0 | ✅ |
-| Build upstream headers once per request (all hops) | P0 | ✅ |
-| Skip empty header-rule / browser-extra rendering | P0 | ✅ |
-| `bench_vs_nginx.sh` regression harness | P0 | ✅ |
-| TLS/H2/H3 path same dirty ownership (drop entry multi-clone) | P0 | ✅ lean TLS+H3; H2 session own; dirty adopt; no empty wipe |
-| Pending-client buffer free-alias under partial read | P0 | ✅ rebuild buffer via str_builder before requeue |
-| Map ownership transfer (preowned stick) | — | ❌ rejected: free-analysis double-free; always stick_table_own |
-| Leaner `extract_pass_headers` (colon scan, no value re-split) | P1 | ✅ |
-| PendingClient clone on every requeue (slots-full / not-ready / partial) | P0 | ✅ |
-| Accept-thread short circuit for static/ACME/CORS (no worker) | P0 | ✅ already; clones deferred until after short-circuit |
-| Publish CPU/RSS scorecard numbers per release | P1 | Open (`make bench-nginx`) |
+| Dirty-flag adopt / lean pick / retry / headers | P0 | ✅ |
+| TLS/H2/H3 free-analysis dirty adopt | P0 | ✅ |
+| Full CI matrix (units + concurrent + adversarial + soak + peers) | P0 | ✅ |
+| Per-host `force_ssl` + Request SSL on proxy-host | P0 | ✅ |
+| Let's Encrypt directories (prod/staging) via lego `--server` | P0 | ✅ |
+| Certificates admin tab + Linux ACME template + renew timer | P0 | ✅ |
+| `bench_vs_nginx.sh` harness | P0 | ✅ |
+| Publish CPU/RSS scorecard numbers per release | P1 | Open (run `make bench-nginx` on release hardware) |
+
+**Exit:** N6/N7 green with official LE; production template has ACME defaults.
 
 ### 0.16+ — Stretch / non-blocking
 
@@ -267,7 +262,8 @@ A and B can run in parallel after 0.11.x; C continuous.
 2. ~~**0.12** host parity~~ ✅
 3. ~~**0.13** enterprise ops~~ ✅
 4. ~~**0.14** platform quality~~ ✅
-5. **0.15+** — stretch (SAML, native ACME, open-core) only when demanded
+5. ~~**0.15** Let's Encrypt + auto SSL + full CI~~ ✅
+6. **0.16+** — stretch (SAML, native ACME JOSE, open-core) only when demanded
 
 That sequence maximizes “feels like NPM” first while keeping the HAProxy-class plane credible for the enterprise track.
 
@@ -295,3 +291,6 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-08-06 | Stick free-alias fix (no intermediate map assign); concurrent smoke ephemeral ports; pending buffer rebuild |
 | 2026-08-07 | Defer backend/rate clone + header render until after ACME/static/CORS short-circuit |
 | 2026-08-07 | **v0.14.1** production harden + performance: free-alias fixes, dirty adopt, lean hot path, bench harness |
+| 2026-08-07 | Full test matrix in CI; TCP/TLS free-alias fixes under adversarial |
+| 2026-08-07 | Auto SSL on proxy-host; per-host Force SSL; Certificates UI |
+| 2026-08-07 | **v0.15.0** first-class Let's Encrypt (prod/staging directories), Linux ACME defaults, doctor lego check |

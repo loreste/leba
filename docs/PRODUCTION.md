@@ -6,7 +6,7 @@ Use this checklist before calling Leba **production-ready** for a site.
 
 | Item | Check |
 |------|--------|
-| Version | `leba version` ≥ 0.14.1 |
+| Version | `leba version` ≥ 0.15.0 |
 | Doctor | `leba doctor /etc/leba/leba.conf` → 0 errors |
 | Auth | Hashed admin users; no demo passwords |
 | Session | `state_key` or `LEBA_SESSION_SECRET` set |
@@ -98,7 +98,7 @@ Release artifacts (when published via CI):
 Verify binary:
 
 ```bash
-gh release download v0.14.1 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
+gh release download v0.15.0 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
 sha256sum -c SHA256SUMS
 cosign verify-blob \
   --bundle leba-linux-amd64.cosign.bundle \
@@ -113,7 +113,7 @@ Verify container (example):
 cosign verify \
   --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/loreste/leba:0.14.1
+  ghcr.io/loreste/leba:0.15.0
 ```
 
 ## Do not claim yet

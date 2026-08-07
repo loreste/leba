@@ -59,7 +59,7 @@ fn main() {
     }
     if not str_eq(a1, "") {
         if str_eq(a1, "version") {
-            print("leba 0.14.1")
+            print("leba 0.15.0")
             print("concurrency: crew worker pool")
             return
         }

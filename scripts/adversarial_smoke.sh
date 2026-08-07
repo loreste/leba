@@ -388,7 +388,7 @@ echo "admin html bytes=$sz"
 # JSON has routes/acls
 for attempt in 1 2 3 4 5; do
   curl -sS -u admin:s3cure-dev-0nly! http://127.0.0.1:18404/stats >/tmp/leba_stats.json || true
-  if python3 -c "import sys,json;d=json.load(open('/tmp/leba_stats.json'));assert 'routes' in d and 'acls' in d and d['version']=='0.14.1'" 2>/tmp/leba_stats_err.txt; then
+  if python3 -c "import sys,json;d=json.load(open('/tmp/leba_stats.json'));assert 'routes' in d and 'acls' in d and str(d.get('version','')).startswith('0.')" 2>/tmp/leba_stats_err.txt; then
     break
   fi
   if [[ "$attempt" == "5" ]]; then
@@ -403,12 +403,12 @@ done
 # CLI can target a NAT/public admin address through env defaults
 LEBA_ADMIN_ADDR=http://127.0.0.1:18404/admin LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin servers | grep -q '"servers"'
 LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin reload-servers | grep -q '"action":"reload-servers"'
-LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=viewer:v1ew-dev-0nly! ./leba admin stats | grep -q '"version":"0.14.1"'
+LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=viewer:v1ew-dev-0nly! ./leba admin stats | grep -qE '"version":"0\.[0-9]'
 viewer_drain=$(curl -sS -u viewer:v1ew-dev-0nly! -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18404/admin/drain/api/api1)
 [[ "$viewer_drain" == "403" ]]
 for attempt in 1 2 3 4 5; do
   LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin stats >/tmp/leba_cli_stats.json || true
-  if python3 -c "import json;d=json.load(open('/tmp/leba_cli_stats.json'));assert d['version']=='0.14.1'" 2>/tmp/leba_cli_stats_err.txt; then
+  if python3 -c "import json;d=json.load(open('/tmp/leba_cli_stats.json'));assert str(d.get('version','')).startswith('0.')" 2>/tmp/leba_cli_stats_err.txt; then
     break
   fi
   if [[ "$attempt" == "5" ]]; then

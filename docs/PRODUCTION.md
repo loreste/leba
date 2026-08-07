@@ -15,7 +15,8 @@ Use this checklist before calling Leba **production-ready** for a site.
 | Unit + e2e gate | `make test-full` green (units, concurrent, adversarial, assets) |
 | Soak | `make test-soak` green in CI or pre-flight (`make test-ci` runs both) |
 | Concurrent | `make test-concurrent` green (GET/KA/POST/OPTIONS waves) |
-| Peers (if used) | `make test-ha-peers` green |
+| Peers (if used) | `make test-ha-peers` green; multi-hour VIP soak still site-specific |
+| Perf baseline | Optional: `make bench-nginx` → record in `docs/SCORECARD.md` |
 | Metrics | Scrape `/metrics` (auth required when configured) |
 | Browser apps | If SPA uses credentialed CORS, set `LEBA_CORS_ORIGIN` to the exact UI origin |
 

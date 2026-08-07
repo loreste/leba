@@ -194,9 +194,11 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 | Let's Encrypt directories (prod/staging) via lego `--server` | P0 | ✅ |
 | Certificates admin tab + Linux ACME template + renew timer | P0 | ✅ |
 | `bench_vs_nginx.sh` harness | P0 | ✅ |
-| Publish CPU/RSS scorecard numbers per release | P1 | Open (run `make bench-nginx` on release hardware) |
+| Publish CPU/RSS scorecard numbers per release | P1 | ✅ `docs/SCORECARD.md` (2026-08-07 laptop: nginx wins RPS; peers 3× PASS) |
 
 **Exit:** N6/N7 green with official LE; production template has ACME defaults.
+
+**Perf honesty (0.15.0 scorecard):** local Connection:close microbench still favors **nginx** on RPS/p50; Leba reliability (0 fails) and peers smoke are green. See `docs/SCORECARD.md`.
 
 ### 0.16+ — Stretch / non-blocking
 
@@ -294,3 +296,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-08-07 | Full test matrix in CI; TCP/TLS free-alias fixes under adversarial |
 | 2026-08-07 | Auto SSL on proxy-host; per-host Force SSL; Certificates UI |
 | 2026-08-07 | **v0.15.0** first-class Let's Encrypt (prod/staging directories), Linux ACME defaults, doctor lego check |
+| 2026-08-07 | Scorecard: bench harness ephemeral ports + RSS; published laptop medians vs nginx; HA peers ×3 PASS |

@@ -123,7 +123,7 @@ configured runtime state has eligible upstream capacity.
 - [x] Upstream forwarding of validated trace headers.
 - [x] Credentialed browser header path (LF/CRLF framing, CSRF/Origin/Content-Type forward, `LEBA_CORS_ORIGIN`).
 - [x] Hot-path ownership: rate/stick dirty-flag adopt; skip stick map own when unused; single server clone on reserve (`docs/ROADMAP.md` performance north star).
-- [ ] Beat nginx on RPS/p99/CPU/RSS (track with `make bench-nginx` / `scripts/bench_vs_nginx.sh`).
+- [ ] Beat nginx on RPS/p99/CPU/RSS (track with `make bench-nginx`; see `docs/SCORECARD.md` — nginx still ahead on laptop microbench).
 
 Product roadmap: [`ROADMAP.md`](ROADMAP.md).
 Full competitive design depth: [`COMPETITIVE_ARCHITECTURE.md`](COMPETITIVE_ARCHITECTURE.md).

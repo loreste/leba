@@ -58,10 +58,13 @@ test-docs:
 	test -f docs/ROADMAP.md
 	test -f docs/ADVERSARIAL_REVIEW.md
 	test -f docs/HA.md
+	test -f docs/SCORECARD.md
+	test -f docs/ACME.md
 	test -f scripts/ha_peers_smoke.sh
 	test -f scripts/concurrent_smoke.sh
 	test -f scripts/adversarial_smoke.sh
 	test -f scripts/soak.sh
+	test -f scripts/bench_vs_nginx.sh
 
 test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh

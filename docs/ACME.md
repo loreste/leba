@@ -1,49 +1,95 @@
-# ACME / Let's Encrypt with Leba
+# Let's Encrypt (ACME) with Leba
 
-Leba does **not** embed a pure-Mako ACME client (no JOSE account signing in Mako).
-It orchestrates **lego** (or certbot/acme.sh) and live-reloads TLS.
+Leba integrates **Let's Encrypt** through the [lego](https://go-acme.github.io/lego/)
+ACME client. Issue and renew hit the official ACME v2 directories, attach PEMs as
+SNI certificates, and live-reload TLS — no process restart.
 
-## NPM-style path (recommended)
+| Mode | Directory |
+|------|-----------|
+| **Production** (default) | `https://acme-v02.api.letsencrypt.org/directory` |
+| **Staging** (rate-limit safe) | `https://acme-staging-v02.api.letsencrypt.org/directory` |
 
-1. Configure `acme_webroot` (and optionally `acme_storage` / `acme_email`) or env:
-   - `LEBA_ACME_EMAIL` — registration email (**required** for issue)
-   - `LEBA_ACME_STORAGE` — lego `--path` (default `/var/lib/leba/lego`)
-   - `LEBA_ACME_WEBROOT` — HTTP-01 challenge dir (default `/var/lib/leba/acme`)
-   - `LEBA_ACME_HELPER` — binary name/path (default `lego`)
-2. Ensure the data-plane frontend serves HTTP-01 (port 80 publicly).
-3. **One-shot host + cert** (preferred): Admin UI **Proxy Hosts → + Add** with
-   **Request SSL**, or:
+Staging certs are **not trusted by browsers** — use them to validate HTTP-01 /
+DNS-01 before production.
 
-```bash
-curl -u admin:secret -X POST \
-  'http://127.0.0.1:8404/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=127.0.0.1:3000&ssl=1'
+## Requirements
+
+1. **Email** for LE registration: `acme_email` or `LEBA_ACME_EMAIL`
+2. **lego** on PATH (Docker image includes it) or `LEBA_ACME_HELPER=/path/to/lego`
+3. **HTTP-01**: public port 80 + `acme_webroot` served by Leba  
+   **or DNS-01**: `dns_provider` + provider env (e.g. `CF_DNS_API_TOKEN`)
+
+## Config
+
+```text
+defaults
+  acme_email ops@example.com
+  acme_webroot /var/lib/leba/acme
+  acme_storage /var/lib/leba/lego
+  acme_helper lego
+  # Optional:
+  # acme_staging on          # Let's Encrypt staging
+  # acme_server staging      # alias: production | staging | full https URL
+
+frontend web
+  bind 80
+  mode http
+  acme_webroot /var/lib/leba/acme
+  # optional: redirect https  (or per-host force_ssl)
+  route default -> app
 ```
 
-   Response includes `ssl_status` (`issued` | `existing` | `failed` | `provided` | `none`)
-   and `tls_reload:true` when SNI was attached. Host is still created if ACME fails
-   (`ssl_status=failed` + `ssl_error`).
+### Environment
 
-4. Or open **Admin UI → Certificates**, or call the issue API as an **admin** user:
+| Variable | Meaning |
+|----------|---------|
+| `LEBA_ACME_EMAIL` | Registration email (required to issue) |
+| `LEBA_ACME_WEBROOT` | HTTP-01 token directory |
+| `LEBA_ACME_STORAGE` | lego account + cert storage (`--path`) |
+| `LEBA_ACME_HELPER` | lego binary (default `lego`) |
+| `LEBA_ACME_STAGING=1` | Use LE staging directory |
+| `LEBA_ACME_SERVER` | Full ACME directory URL, or `staging` / `letsencrypt` |
+| `LEBA_ACME_DNS_PROVIDER` | Default DNS-01 provider name |
+
+## NPM-style: host + cert in one call
 
 ```bash
-# Issue + attach SNI cert + live tls_server_reload
+# Production Let's Encrypt + Force SSL + SNI attach + live reload
 curl -u admin:secret -X POST \
-  'http://127.0.0.1:8404/admin/certificates/issue?domain=app.example.com&frontend=web&email=ops@example.com'
+  'http://127.0.0.1:8404/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=127.0.0.1:3000&ssl=1&force_ssl=1'
 
-# Renew everything under acme_storage, then reload TLS
+# Staging first (no rate limits)
 curl -u admin:secret -X POST \
-  http://127.0.0.1:8404/admin/tls-reload   # after renew
-curl -u admin:secret -X POST \
-  http://127.0.0.1:8404/admin/certificates/renew
+  'http://127.0.0.1:8404/admin/certificates/issue?domain=app.example.com&frontend=web&staging=1&attach=1'
 ```
+
+Admin UI:
+
+- **Proxy Hosts → + Add** with **Request SSL**
+- **Certificates** (Let's Encrypt) tab: inventory, staging checkbox, issue, renew
+
+## API
 
 ```text
 GET  /admin/certificates
-POST /admin/certificates/issue?domain=&frontend=&email=&attach=1
+POST /admin/certificates/issue?domain=&frontend=&email=&attach=1&staging=0|1&server=&challenge=http|dns&dns_provider=
 POST /admin/certificates/renew
 ```
 
-Issued PEMs land at:
+`GET /admin/certificates` includes:
+
+```json
+"settings": {
+  "provider": "letsencrypt",
+  "ca": "letsencrypt",
+  "server": "https://acme-v02.api.letsencrypt.org/directory",
+  "staging": false,
+  "ready": true,
+  "issues": []
+}
+```
+
+Issued PEMs:
 
 ```text
 {acme_storage}/certificates/{domain}.crt
@@ -52,21 +98,6 @@ Issued PEMs land at:
 
 ## HTTP-01 challenge serving
 
-```text
-defaults
-  acme_webroot /var/lib/leba/acme
-  acme_storage /var/lib/leba/lego
-  acme_email ops@example.com
-  acme_helper lego
-
-frontend web
-  bind 80
-  mode http
-  acme_webroot /var/lib/leba/acme
-  redirect https
-  route default -> app
-```
-
 Leba serves:
 
 ```text
@@ -74,18 +105,55 @@ GET /.well-known/acme-challenge/<token>
   → file {acme_webroot}/<token>
 ```
 
-This path **bypasses** HTTPS redirect, rate limits, and ACLs. Token body is
-never written to access logs as content (only the path appears).
+This path **bypasses** HTTPS redirect (including per-host `force_ssl`), rate limits,
+and ACLs so Let's Encrypt can complete validation on port 80.
 
-## Manual lego + deploy hook
+## Renew
+
+Daily systemd timer (Linux package):
 
 ```bash
-lego --email ops@example.com --http --http.webroot /var/lib/leba/acme \
+systemctl enable --now leba-acme-renew.timer
+# uses LEBA_ADMIN_AUTH + LEBA_ADMIN_URL from /etc/leba/leba.env
+```
+
+Manual:
+
+```bash
+curl -u admin:secret -X POST http://127.0.0.1:8404/admin/certificates/renew
+# then TLS reload is triggered when the API returns tls_reload:true
+```
+
+## DNS-01
+
+```bash
+export CF_DNS_API_TOKEN=…
+curl -u admin:secret -X POST \
+  'http://127.0.0.1:8404/admin/certificates/issue?domain=*.example.com&frontend=web&challenge=dns&dns_provider=cloudflare&attach=1'
+```
+
+## Preflight errors
+
+| Code | Meaning |
+|------|---------|
+| `missing_helper` | Install lego or set `LEBA_ACME_HELPER` |
+| `missing_email` | Set `acme_email` / `LEBA_ACME_EMAIL` |
+| `invalid_domain` | Domain failed safety validation |
+| `invalid_webroot` / `invalid_storage` | Path empty or unsafe |
+| `missing_dns_provider` | DNS-01 without provider |
+| `no_certs` | Renew with empty storage |
+| `lego_failed` | Helper ran but PEMs missing |
+
+## Manual lego (same directories)
+
+```bash
+# Production
+lego --accept-tos --email ops@example.com \
+  --server https://acme-v02.api.letsencrypt.org/directory \
+  --http --http.webroot /var/lib/leba/acme \
   --path /var/lib/leba/lego --domains app.example.com run
 
 curl -u operator:secret -X POST http://127.0.0.1:8404/admin/tls-reload
-# or
-leba admin tls-reload 127.0.0.1:8404 operator:secret
 ```
 
 Sample hook: `deploy/docker/lego-deploy-hook.sh`.
@@ -93,38 +161,10 @@ Sample hook: `deploy/docker/lego-deploy-hook.sh`.
 ## Docker
 
 ```bash
-docker compose build
 LEBA_ADMIN_AUTH=admin:change-me LEBA_SESSION_SECRET=long-secret \
   LEBA_ACME_EMAIL=ops@example.com \
   docker compose up
 ```
 
 The image installs **lego** so Admin UI issue works when port 80 is reachable
-for HTTP-01. Optional profile `acme` runs a lego sidecar for CLI workflows.
-
-## Attach without ACME
-
-```bash
-curl -u operator:secret -X POST \
-  'http://127.0.0.1:8404/admin/vhost-cert?frontend=web&hostname=app.example.com&cert=/path/fullchain.pem&key=/path/privkey.pem'
-```
-
-## Preflight errors (0.11.1+)
-
-`POST /admin/certificates/issue` and `renew` validate before shelling out to lego.
-Failures return **HTTP 400** with:
-
-```json
-{"error":"human message","code":"missing_email"}
-```
-
-| Code | Meaning |
-|------|---------|
-| `missing_helper` | `lego` not on PATH; set `LEBA_ACME_HELPER` or use Docker image |
-| `missing_email` | Set `acme_email` / `LEBA_ACME_EMAIL` or query `email=` |
-| `invalid_domain` | Domain failed safety validation |
-| `invalid_webroot` / `invalid_storage` | Path empty or unsafe |
-| `no_certs` | Renew with empty storage |
-| `lego_failed` | Helper ran but PEMs missing (often 500) |
-
-`GET /admin/certificates` includes `settings.ready`, `settings.issues[]`, and per-cert `not_after` (via `openssl x509 -enddate` when available).
+for HTTP-01.

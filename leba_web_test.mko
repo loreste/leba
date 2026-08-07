@@ -771,3 +771,47 @@ fn TestDns01MissingProvider() {
     assert_eq(r.ok, 0)
     assert(str_has_prefix(r.error, "code=missing_dns_provider") or str_has_prefix(r.error, "code=missing_helper"))
 }
+
+fn TestLetsEncryptDirectoryAndStaging() {
+    // Official ACME v2 directories.
+    assert(str_contains(acme_le_production_directory(), "acme-v02.api.letsencrypt.org"))
+    assert(str_contains(acme_le_staging_directory(), "acme-staging-v02.api.letsencrypt.org"))
+    assert_eq(acme_server_ok("https://acme-v02.api.letsencrypt.org/directory"), 1)
+    assert_eq(acme_server_ok("http://evil"), 0)
+    assert_eq(acme_server_ok("https://x;rm"), 0)
+
+    let mut s = acme_settings_resolve("")
+    s.staging = 0
+    s.server = ""
+    assert_eq_str(acme_effective_server(s), acme_le_production_directory())
+    assert_eq_str(acme_ca_name(s), "letsencrypt")
+    s.staging = 1
+    assert_eq_str(acme_effective_server(s), acme_le_staging_directory())
+    assert_eq_str(acme_ca_name(s), "letsencrypt-staging")
+
+    let mut base = acme_settings_resolve("")
+    base.staging = 0
+    let st = acme_settings_apply_query(base, "1", "")
+    assert_eq(st.staging, 1)
+    assert_eq_str(acme_effective_server(st), acme_le_staging_directory())
+
+    // Config: acme_staging on + acme_server alias.
+    let raw = "defaults\n  acme_email ops@example.com\n  acme_staging on\n  acme_storage /tmp/le\nfrontend web\n  bind 80\n  mode http\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.defaults.acme_staging, 1)
+    let from_def = acme_settings_from_defaults(w.defaults, "")
+    assert_eq(from_def.staging, 1)
+    assert_eq_str(acme_ca_name(from_def), "letsencrypt-staging")
+
+    // List JSON advertises Let's Encrypt.
+    let mut fe = frontend_new("web")
+    fe.tls_cert = "/tmp/x.crt"
+    fe.tls_key = "/tmp/x.key"
+    let mut fes = make([]Frontend, 0, 1)
+    fes = append(fes, fe)
+    let j = acme_list_json(fes, from_def)
+    assert(str_contains(j, "\"provider\":\"letsencrypt\""))
+    assert(str_contains(j, "\"staging\":true"))
+    assert(str_contains(j, "letsencrypt.org"))
+}

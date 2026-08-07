@@ -1,12 +1,26 @@
-// External ACME helper (lego) orchestration for NPM-style cert UX.
-// Pure-Mako ACME is not possible without JOSE account signing — shell out to lego.
+// Let's Encrypt integration via lego (ACME client).
+// Pure-Mako ACME is not possible without JOSE account signing — shell out to lego
+// with the official Let's Encrypt ACME directories (production or staging).
 pack acme
+
+// Official Let's Encrypt ACME v2 directories (RFC 8555).
+fn acme_le_production_directory() -> string {
+    return "https://acme-v02.api.letsencrypt.org/directory"
+}
+
+fn acme_le_staging_directory() -> string {
+    return "https://acme-staging-v02.api.letsencrypt.org/directory"
+}
 
 struct AcmeSettings {
     webroot: string
     storage: string
     email: string
     helper: string
+    // ACME directory URL. Empty → Let's Encrypt production (lego default).
+    server: string
+    // 1 = use LE staging directory (rate-limit safe for testing).
+    staging: int
 }
 
 struct AcmeRunResult {
@@ -83,6 +97,106 @@ fn acme_email_ok(s: string) -> int {
     return 1
 }
 
+// ACME directory URLs: allow https://host/path only (no shell metacharacters).
+fn acme_server_ok(s: string) -> int {
+    if str_eq(s, "") {
+        return 1
+    }
+    if str_len(s) > 256 {
+        return 0
+    }
+    if not str_has_prefix(s, "https://") {
+        return 0
+    }
+    let data = bytes(s)
+    for _, d in range data {
+        let c = int(d)
+        let mut ok = 0
+        if c >= 48 {
+            if c <= 57 {
+                ok = 1
+            }
+        }
+        if c >= 65 {
+            if c <= 90 {
+                ok = 1
+            }
+        }
+        if c >= 97 {
+            if c <= 122 {
+                ok = 1
+            }
+        }
+        // : / . - _ ~
+        if c == 58 {
+            ok = 1
+        }
+        if c == 47 {
+            ok = 1
+        }
+        if c == 46 {
+            ok = 1
+        }
+        if c == 45 {
+            ok = 1
+        }
+        if c == 95 {
+            ok = 1
+        }
+        if c == 126 {
+            ok = 1
+        }
+        if ok == 0 {
+            return 0
+        }
+    }
+    return 1
+}
+
+// Resolve effective ACME directory URL for lego --server.
+fn acme_effective_server(settings: AcmeSettings) -> string {
+    if settings.staging == 1 {
+        return acme_le_staging_directory()
+    }
+    if not str_eq(settings.server, "") {
+        return settings.server
+    }
+    // Empty server → lego's default is Let's Encrypt production; return explicit URL for logs/API.
+    return acme_le_production_directory()
+}
+
+// Append " --server URL" when a directory is configured (always for LE branding).
+fn acme_append_server_flag(cmd: string, settings: AcmeSettings) -> string {
+    let server = acme_effective_server(settings)
+    if acme_server_ok(server) == 0 {
+        return cmd
+    }
+    let mut b = str_builder()
+    builder_write(b, cmd)
+    builder_write(b, " --server ")
+    builder_write(b, server)
+    return builder_string(b)
+}
+
+fn acme_ca_name(settings: AcmeSettings) -> string {
+    let server = acme_effective_server(settings)
+    if str_contains(server, "staging") {
+        return "letsencrypt-staging"
+    }
+    if str_contains(server, "letsencrypt.org") {
+        return "letsencrypt"
+    }
+    return "custom"
+}
+
+fn acme_bool_env(name: string) -> int {
+    let v = env_get(name)
+    if str_eq(v, "1") or str_eq(v, "true") or str_eq(v, "on") or str_eq(v, "yes") {
+        return 1
+    }
+    return 0
+}
+
 fn acme_kv_from_config(config_path: string, key: string) -> string {
     if str_eq(config_path, "") {
         return ""
@@ -140,11 +254,33 @@ fn acme_settings_resolve_path(webroot_hint: string, config_path: string) -> Acme
     if str_eq(helper, "") {
         helper = "lego"
     }
+    let mut server = env_get_or("LEBA_ACME_SERVER", "")
+    if str_eq(server, "") {
+        server = acme_kv_from_config(config_path, "acme_server")
+    }
+    let mut staging = acme_bool_env("LEBA_ACME_STAGING")
+    if staging == 0 {
+        let st = acme_kv_from_config(config_path, "acme_staging")
+        if str_eq(st, "on") or str_eq(st, "1") or str_eq(st, "true") or str_eq(st, "yes") {
+            staging = 1
+        }
+    }
+    // Convenience aliases for server.
+    if str_eq(server, "staging") or str_eq(server, "le-staging") or str_eq(server, "letsencrypt-staging") {
+        staging = 1
+        server = ""
+    }
+    if str_eq(server, "production") or str_eq(server, "le") or str_eq(server, "letsencrypt") {
+        staging = 0
+        server = ""
+    }
     return AcmeSettings {
         webroot: webroot,
         storage: storage,
         email: email,
-        helper: helper
+        helper: helper,
+        server: server,
+        staging: staging
     }
 }
 
@@ -164,6 +300,12 @@ fn acme_settings_from_defaults(d: Defaults, webroot_hint: string) -> AcmeSetting
     if not str_eq(d.acme_helper, "") {
         s.helper = d.acme_helper
     }
+    if not str_eq(d.acme_server, "") {
+        s.server = d.acme_server
+    }
+    if d.acme_staging == 1 {
+        s.staging = 1
+    }
     // Env still wins for operator overrides when set.
     let env_email = env_get("LEBA_ACME_EMAIL")
     if not str_eq(env_email, "") {
@@ -180,6 +322,31 @@ fn acme_settings_from_defaults(d: Defaults, webroot_hint: string) -> AcmeSetting
     let env_web = env_get("LEBA_ACME_WEBROOT")
     if not str_eq(env_web, "") {
         s.webroot = env_web
+    }
+    let env_server = env_get("LEBA_ACME_SERVER")
+    if not str_eq(env_server, "") {
+        s.server = env_server
+    }
+    if acme_bool_env("LEBA_ACME_STAGING") == 1 {
+        s.staging = 1
+    }
+    return s
+}
+
+// Apply query overrides (staging=1 / server=) for a single API call.
+fn acme_settings_apply_query(settings: AcmeSettings, staging_q: string, server_q: string) -> AcmeSettings {
+    let mut s = settings
+    if str_eq(staging_q, "1") or str_eq(staging_q, "true") or str_eq(staging_q, "on") {
+        s.staging = 1
+    }
+    if str_eq(staging_q, "0") or str_eq(staging_q, "false") or str_eq(staging_q, "off") {
+        s.staging = 0
+    }
+    if not str_eq(server_q, "") {
+        if acme_server_ok(server_q) == 1 {
+            s.server = server_q
+            s.staging = 0
+        }
     }
     return s
 }
@@ -399,26 +566,30 @@ fn acme_issue_challenge(
         builder_write(cmd, settings.storage)
         builder_write(cmd, " --domains ")
         builder_write(cmd, domain)
-        builder_write(cmd, " run 2>&1")
-        log_info_event("acme_issue_start", f"domain={domain} challenge=dns provider={prov}")
-        let out = exec_output(builder_string(cmd))
+        let with_server = acme_append_server_flag(builder_string(cmd), settings)
+        let full = with_server + " run 2>&1"
+        let ca = acme_ca_name(settings)
+        log_info_event("acme_issue_start", f"domain={domain} challenge=dns provider={prov} ca={ca} server={acme_effective_server(settings)}")
+        let out = exec_output(full)
         return acme_issue_finish(settings, domain, out, "dns")
     }
-    // HTTP-01 default
+    // HTTP-01 default → Let's Encrypt production (or staging / custom ACME directory)
     let _ = exec_run("mkdir -p " + settings.webroot + " " + settings.storage + " " + settings.storage + "/certificates")
-    let mut cmd = str_builder()
-    builder_write(cmd, settings.helper)
-    builder_write(cmd, " --accept-tos --email ")
-    builder_write(cmd, email)
-    builder_write(cmd, " --http --http.webroot ")
-    builder_write(cmd, settings.webroot)
-    builder_write(cmd, " --path ")
-    builder_write(cmd, settings.storage)
-    builder_write(cmd, " --domains ")
-    builder_write(cmd, domain)
-    builder_write(cmd, " run 2>&1")
-    log_info_event("acme_issue_start", f"domain={domain} helper={settings.helper} challenge=http")
-    let out = exec_output(builder_string(cmd))
+    let mut cmdh = str_builder()
+    builder_write(cmdh, settings.helper)
+    builder_write(cmdh, " --accept-tos --email ")
+    builder_write(cmdh, email)
+    builder_write(cmdh, " --http --http.webroot ")
+    builder_write(cmdh, settings.webroot)
+    builder_write(cmdh, " --path ")
+    builder_write(cmdh, settings.storage)
+    builder_write(cmdh, " --domains ")
+    builder_write(cmdh, domain)
+    let with_server_h = acme_append_server_flag(builder_string(cmdh), settings)
+    let full_h = with_server_h + " run 2>&1"
+    let ca_h = acme_ca_name(settings)
+    log_info_event("acme_issue_start", f"domain={domain} helper={settings.helper} challenge=http ca={ca_h} server={acme_effective_server(settings)}")
+    let out = exec_output(full_h)
     return acme_issue_finish(settings, domain, out, "http")
 }
 
@@ -449,9 +620,11 @@ fn acme_renew(settings: AcmeSettings) -> AcmeRunResult {
     builder_write(cmd, settings.helper)
     builder_write(cmd, " --path ")
     builder_write(cmd, settings.storage)
-    builder_write(cmd, " renew --no-random-sleep 2>&1")
-    log_info_event("acme_renew_start", f"storage={settings.storage}")
-    let out = exec_output(builder_string(cmd))
+    let with_server = acme_append_server_flag(builder_string(cmd), settings)
+    let full = with_server + " renew --no-random-sleep 2>&1"
+    let ca = acme_ca_name(settings)
+    log_info_event("acme_renew_start", f"storage={settings.storage} ca={ca} server={acme_effective_server(settings)}")
+    let out = exec_output(full)
     let certs_dir = settings.storage + "/certificates"
     if file_exists(certs_dir) {
         log_info_event("acme_renew_done", f"storage={settings.storage}")
@@ -541,7 +714,17 @@ fn acme_list_json(frontends: []Frontend, settings: AcmeSettings) -> string {
     }
     let helper_ok = acme_helper_available(settings.helper)
     let email_ok = acme_email_ok(settings.email)
-    builder_write(b, "],\"settings\":{\"webroot\":\"")
+    builder_write(b, "],\"settings\":{\"provider\":\"letsencrypt\",\"ca\":\"")
+    builder_write(b, json_escape(acme_ca_name(settings)))
+    builder_write(b, "\",\"server\":\"")
+    builder_write(b, json_escape(acme_effective_server(settings)))
+    builder_write(b, "\",\"staging\":")
+    if settings.staging == 1 {
+        builder_write(b, "true")
+    } else {
+        builder_write(b, "false")
+    }
+    builder_write(b, ",\"webroot\":\"")
     builder_write(b, json_escape(settings.webroot))
     builder_write(b, "\",\"storage\":\"")
     builder_write(b, json_escape(settings.storage))

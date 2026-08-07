@@ -292,6 +292,10 @@ struct Defaults {
     acme_email: string
     // ACME helper binary name or absolute path (default "lego", or LEBA_ACME_HELPER).
     acme_helper: string
+    // ACME directory URL (empty = Let's Encrypt production). Aliases: staging, letsencrypt.
+    acme_server: string
+    // 1 = Let's Encrypt staging directory (rate-limit safe).
+    acme_staging: int
 }
 
 struct LiveStats {
@@ -349,7 +353,9 @@ fn defaults_new() -> Defaults {
         acme_webroot: "",
         acme_storage: "",
         acme_email: "",
-        acme_helper: "lego"
+        acme_helper: "lego",
+        acme_server: "",
+        acme_staging: 0
     }
 }
 

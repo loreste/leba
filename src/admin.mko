@@ -2409,7 +2409,10 @@ fn handle_admin_state(
         }
         let challenge = query_value(full_path, "challenge")
         let dns_provider = query_value(full_path, "dns_provider")
-        let settings = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
+        let staging_q = query_value(full_path, "staging")
+        let server_q = query_value(full_path, "server")
+        let settings0 = acme_settings_resolve_path(acme_first_webroot(frontends), config_path)
+        let settings = acme_settings_apply_query(settings0, staging_q, server_q)
         let result = acme_issue_challenge(settings, domain, email, challenge, dns_provider)
         if result.ok == 0 {
             let st = acme_preflight_http_status(result.error)

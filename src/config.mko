@@ -28,6 +28,8 @@
 //     acme_storage PATH       # lego --path (defaults; env LEBA_ACME_STORAGE)
 //     acme_email ADDR         # ACME registration email (env LEBA_ACME_EMAIL)
 //     acme_helper PATH|NAME   # lego binary (default lego; env LEBA_ACME_HELPER)
+//     acme_server URL|alias   # Let's Encrypt directory (empty=production; staging|letsencrypt)
+//     acme_staging on|off     # Use LE staging directory (rate-limit safe)
 //     auth_basic REALM        # require HTTP Basic for proxied apps (non-ACME)
 //     auth_user USER PASS     # credential for auth_basic on this frontend
 //     waf detect|block|off    # local rules; optional remote inspect
@@ -150,6 +152,14 @@ fn apply_defaults_kv(d: Defaults, key: string, val: string) -> Defaults {
         "acme_storage" => { out.acme_storage = val },
         "acme_email" => { out.acme_email = val },
         "acme_helper" => { out.acme_helper = val },
+        "acme_server" => { out.acme_server = val },
+        "acme_staging" => {
+            if str_eq(val, "on") or str_eq(val, "1") or str_eq(val, "true") or str_eq(val, "yes") {
+                out.acme_staging = 1
+            } else {
+                out.acme_staging = 0
+            }
+        },
         _ => {}
     }
     return out

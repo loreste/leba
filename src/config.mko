@@ -910,6 +910,7 @@ fn parse_route_line(input_fields: []string, fe: string) -> Route {
     let mut backend = ""
     let mut host_match = ""
     let mut websocket = 1
+    let mut force_ssl = 0
     let mut i = 3
     while i < len(fields) {
         let token = own_string(fields[i])
@@ -939,6 +940,11 @@ fn parse_route_line(input_fields: []string, fe: string) -> Route {
                 continue
             }
         }
+        if str_eq(token, "force_ssl") or str_eq(token, "force-ssl") {
+            force_ssl = 1
+            i = i + 1
+            continue
+        }
         if str_eq(backend, "") {
             backend = token
         }
@@ -957,6 +963,7 @@ fn parse_route_line(input_fields: []string, fe: string) -> Route {
     let mut r = route_new(fe, kind, value, backend)
     r.host_match = own_string(host_match)
     r.websocket = websocket
+    r.force_ssl = force_ssl
     return r
 }
 

@@ -244,10 +244,10 @@ fn find_frontend_idx_admin(frontends: []Frontend, name: string) -> int {
 }
 
 fn upsert_host_route(routes: []Route, frontend: string, domain: string, backend: string) -> []Route {
-    return upsert_host_route_full(routes, frontend, domain, backend, "", "", 0, 1, 1)
+    return upsert_host_route_full(routes, frontend, domain, backend, "", "", 0, 1, 1, 0 - 1)
 }
 
-// action: "" | redirect | dead; enable 0/1; websocket 0/1
+// action: "" | redirect | dead; enable 0/1; websocket 0/1; force_ssl 0/1 (-1 = preserve)
 fn upsert_host_route_full(
     routes: []Route,
     frontend: string,
@@ -257,7 +257,8 @@ fn upsert_host_route_full(
     target: string,
     code: int,
     websocket: int,
-    enable: int
+    enable: int,
+    force_ssl: int
 ) -> []Route {
     let mut out = routes
     for i, rt in range out {
@@ -301,6 +302,9 @@ fn upsert_host_route_full(
                         }
                     }
                     r.websocket = websocket
+                    if force_ssl >= 0 {
+                        r.force_ssl = force_ssl
+                    }
                     out[i] = r
                     return out
                 }
@@ -320,6 +324,9 @@ fn upsert_host_route_full(
         }
     }
     nr.websocket = websocket
+    if force_ssl > 0 {
+        nr.force_ssl = 1
+    }
     return append(out, route_clone(nr))
 }
 
@@ -444,6 +451,40 @@ fn admin_vhosts_json(frontends: []Frontend, backends: []Backend, servers: []Serv
             builder_write(b, int_to_string(enabled))
             builder_write(b, ",\"websocket\":")
             builder_write(b, int_to_string(r.websocket))
+            builder_write(b, ",\"force_ssl\":")
+            builder_write(b, int_to_string(r.force_ssl))
+            // Attach SNI cert path for this domain when present on the frontend.
+            let mut sni_cert = ""
+            let mut sni_key = ""
+            for _, fe in range frontends {
+                if str_eq(fe.name, r.frontend) {
+                    for _, se in range fe.tls_sni {
+                        if str_eq(se.hostname, r.value) {
+                            sni_cert = se.cert
+                            sni_key = se.key
+                        }
+                    }
+                    if str_eq(sni_cert, "") {
+                        if str_eq(fe.tls_cert, "") {
+                            // no default either
+                        } else {
+                            // Default frontend cert may cover this host without SNI entry.
+                            sni_cert = fe.tls_cert
+                            sni_key = fe.tls_key
+                        }
+                    }
+                }
+            }
+            builder_write(b, ",\"cert\":\"")
+            builder_write(b, json_escape(sni_cert))
+            builder_write(b, "\",\"key\":\"")
+            builder_write(b, json_escape(sni_key))
+            builder_write(b, "\",\"has_cert\":")
+            if not str_eq(sni_cert, "") {
+                builder_write(b, "true")
+            } else {
+                builder_write(b, "false")
+            }
             builder_write(b, ",\"locations\":[")
             let mut lf = 1
             for _, loc in range routes {
@@ -561,6 +602,9 @@ fn render_route_line(rt: Route) -> string {
     builder_write(b, rt.backend)
     if rt.websocket == 0 {
         builder_write(b, " websocket off")
+    }
+    if rt.force_ssl == 1 {
+        builder_write(b, " force_ssl")
     }
     builder_write(b, "\n")
     return builder_string(b)
@@ -1931,6 +1975,10 @@ fn handle_admin_state(
         let cert = query_value(full_path, "cert")
         let key = query_value(full_path, "key")
         let force_ssl = query_value(full_path, "force_ssl")
+        // NPM-style: ssl=1 / request_ssl=1 / auto_ssl=1 → issue or attach ACME cert for domain.
+        let ssl_s = query_value(full_path, "ssl")
+        let request_ssl = query_value(full_path, "request_ssl")
+        let auto_ssl = query_value(full_path, "auto_ssl")
         let host_action = query_value(full_path, "action")
         let target = query_value(full_path, "target")
         let code_s = query_value(full_path, "code")
@@ -1946,8 +1994,9 @@ fn handle_admin_state(
         if str_eq(enable_s, "0") or str_eq(enable_s, "false") or str_eq(enable_s, "off") {
             enable = 0
         }
-        // Preserve existing websocket when not specified.
+        // Preserve existing websocket / force_ssl when not specified.
         let mut websocket = 1
+        let mut host_force = 0
         let mut host_exists = 0
         for _, rt in range routes {
             if str_eq(rt.frontend, frontend) {
@@ -1955,9 +2004,7 @@ fn handle_admin_state(
                     if str_eq(rt.value, domain) {
                         host_exists = 1
                         websocket = rt.websocket
-                        if str_eq(backend, "") {
-                            // keep
-                        }
+                        host_force = rt.force_ssl
                     }
                 }
             }
@@ -1967,6 +2014,32 @@ fn handle_admin_state(
         }
         if str_eq(ws_s, "1") or str_eq(ws_s, "on") or str_eq(ws_s, "true") {
             websocket = 1
+        }
+        let mut force_flag = 0 - 1
+        if str_eq(force_ssl, "1") or str_eq(force_ssl, "true") or str_eq(force_ssl, "on") {
+            force_flag = 1
+            host_force = 1
+        }
+        if str_eq(force_ssl, "0") or str_eq(force_ssl, "false") or str_eq(force_ssl, "off") {
+            force_flag = 0
+            host_force = 0
+        }
+        let mut want_ssl = 0
+        if str_eq(ssl_s, "1") or str_eq(ssl_s, "true") or str_eq(ssl_s, "on") {
+            want_ssl = 1
+        }
+        if str_eq(request_ssl, "1") or str_eq(request_ssl, "true") or str_eq(request_ssl, "on") {
+            want_ssl = 1
+        }
+        if str_eq(auto_ssl, "1") or str_eq(auto_ssl, "true") or str_eq(auto_ssl, "on") {
+            want_ssl = 1
+        }
+        // Auto-SSL implies Force SSL when force_ssl not explicitly off.
+        if want_ssl == 1 {
+            if force_flag < 0 {
+                force_flag = 1
+                host_force = 1
+            }
         }
         let mut code = to_int(code_s)
         // Upstream only when creating a new proxy host or explicitly providing server+addr.
@@ -2013,9 +2086,35 @@ fn handle_admin_state(
         }
         let mut out_frontends = frontend_array_clone(frontends)
         let mut fe = frontend_clone(out_frontends[fi])
-        let cert_own = own_string(cert)
-        let key_own = own_string(key)
+        let mut cert_own = own_string(cert)
+        let mut key_own = own_string(key)
         let domain_own = own_string(domain)
+        let mut ssl_status = "none"
+        let mut ssl_error = ""
+        // Automatic certificate: reuse existing ACME PEMs or issue via lego.
+        if want_ssl == 1 {
+            if str_eq(cert_own, "") or str_eq(key_own, "") {
+                let settings = acme_settings_resolve_path(acme_first_webroot(out_frontends), config_path)
+                let existing_cert, existing_key = acme_cert_paths(settings.storage, domain_own)
+                if acme_paths_exist(existing_cert, existing_key) == 1 {
+                    cert_own = existing_cert
+                    key_own = existing_key
+                    ssl_status = "existing"
+                } else {
+                    let result = acme_issue_challenge(settings, domain_own, "", "", "")
+                    if result.ok == 1 {
+                        cert_own = result.cert
+                        key_own = result.key
+                        ssl_status = "issued"
+                    } else {
+                        ssl_status = "failed"
+                        ssl_error = result.error
+                    }
+                }
+            } else {
+                ssl_status = "provided"
+            }
+        }
         if not str_eq(cert_own, "") {
             if not str_eq(key_own, "") {
                 fe = frontend_upsert_tls_sni(fe, domain_own, cert_own, key_own)
@@ -2025,19 +2124,14 @@ fn handle_admin_state(
                 }
             }
         }
-        if str_eq(force_ssl, "1") {
-            fe.redirect_https = 1
-            if fe.redirect_code == 0 {
-                fe.redirect_code = 301
-            }
-        }
-        if str_eq(force_ssl, "0") {
-            fe.redirect_https = 0
+        // Frontend-wide redirect remains available; prefer per-host force_ssl.
+        if force_flag == 1 {
+            // Do not force frontend-wide redirect (breaks multi-host mixed SSL).
         }
         out_frontends[fi] = fe
         let out_backends = admin_vhost_backends(need_upstream, backends, backend)
         let out_servers = admin_vhost_servers(need_upstream, servers, backend, server, addr)
-        let out_routes = upsert_host_route_full(routes, frontend, domain_own, backend, host_action, target, code, websocket, enable)
+        let out_routes = upsert_host_route_full(routes, frontend, domain_own, backend, host_action, target, code, websocket, enable, force_flag)
         if save_managed_vhosts(config_path, config_dir, out_frontends, out_backends, out_servers, out_routes) == 0 {
             return AdminStateResult { handled: 1, status: 500, body: "{\"error\":\"failed to save managed vhost config\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }
         }
@@ -2055,10 +2149,25 @@ fn handle_admin_state(
         builder_write(body, ",\"host_action\":\"")
         builder_write(body, json_escape(host_action))
         builder_write(body, "\",\"managed_file\":\"leba.vhosts.conf\",\"live\":true,\"force_ssl\":")
-        if fe.redirect_https == 1 {
+        if host_force == 1 {
             builder_write(body, "true")
         } else {
             builder_write(body, "false")
+        }
+        builder_write(body, ",\"ssl_status\":\"")
+        builder_write(body, json_escape(ssl_status))
+        builder_write(body, "\"")
+        if not str_eq(ssl_error, "") {
+            builder_write(body, ",\"ssl_error\":\"")
+            builder_write(body, json_escape(ssl_error))
+            builder_write(body, "\"")
+        }
+        if not str_eq(cert_own, "") {
+            builder_write(body, ",\"cert\":\"")
+            builder_write(body, json_escape(cert_own))
+            builder_write(body, "\",\"key\":\"")
+            builder_write(body, json_escape(key_own))
+            builder_write(body, "\"")
         }
         builder_write(body, ",\"tls_reload\":")
         if not str_eq(cert_own, "") {

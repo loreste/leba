@@ -98,9 +98,13 @@ fn TestWebadminHtmlComplete() {
     assert(str_contains(html, "reloadServers"))
     assert(str_contains(html, "/admin/reload-servers"))
     assert(str_contains(html, "nav('vhosts')"))
-    assert(str_contains(html, "/admin/vhost-create"))
+    assert(str_contains(html, "/admin/proxy-host"))
     assert(str_contains(html, "/admin/vhost-cert"))
     assert(str_contains(html, "saveVhost"))
+    assert(str_contains(html, "issueCert"))
+    assert(str_contains(html, "deleteHost"))
+    assert(str_contains(html, "Request SSL"))
+    assert(str_contains(html, "vhSsl"))
     assert(str_contains(html, "tlsReload"))
     assert(str_contains(html, "fullReload"))
     assert(str_contains(html, "/admin/tls-reload"))
@@ -586,8 +590,20 @@ fn TestCertificatesListAndForceSslProxyHost() {
         make([]Server, 0, 0), fes, make([]Backend, 0, 0), make([]Route, 0, 0), make([]AclRule, 0, 0), cfg, "/tmp"
     )
     assert_eq(ar2.status, 200)
-    assert_eq(ar2.frontends[0].redirect_https, 1)
+    // Force SSL is per-host (route.force_ssl), not frontend-wide redirect_https.
+    assert_eq(ar2.routes[0].force_ssl, 1)
+    assert_eq_str(ar2.routes[0].value, "ssl.example.com")
     assert(str_contains(ar2.body, "\"force_ssl\":true"))
+}
+
+fn TestProxyHostForceSslParseAndJson() {
+    let raw = "frontend web\n  bind 80\n  mode http\n  route host app.example.com -> app force_ssl\nbackend app\n  server a 127.0.0.1:1 weight 1 check\n"
+    let w = parse_config_text(raw)
+    assert_eq(w.ok, 1)
+    assert_eq(w.routes[0].force_ssl, 1)
+    let j = admin_vhosts_json(w.frontends, w.backends, w.servers, w.routes)
+    assert(str_contains(j, "\"force_ssl\":1"))
+    assert(str_contains(j, "app.example.com"))
 }
 
 fn TestAdminPathRolesForCertificatesAndAuth() {

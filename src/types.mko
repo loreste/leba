@@ -121,6 +121,8 @@ struct Route {
     host_match: string
     // 1 = allow WebSocket upgrade (default); 0 = 403 on Upgrade: websocket for this route.
     websocket: int
+    // 1 = cleartext requests for this host redirect to HTTPS (per-host Force SSL).
+    force_ssl: int
 }
 
 struct AclRule {
@@ -787,7 +789,8 @@ fn route_new(frontend: string, kind: string, value: string, backend: string) -> 
         target: "",
         code: 0,
         host_match: "",
-        websocket: 1
+        websocket: 1,
+        force_ssl: 0
     }
 }
 
@@ -801,7 +804,8 @@ fn route_location_new(frontend: string, host: string, path_prefix: string, backe
         target: "",
         code: 0,
         host_match: own_string(host),
-        websocket: 1
+        websocket: 1,
+        force_ssl: 0
     }
 }
 
@@ -819,7 +823,8 @@ fn route_redirect_new(frontend: string, kind: string, value: string, target: str
         target: own_string(target),
         code: c,
         host_match: "",
-        websocket: 1
+        websocket: 1,
+        force_ssl: 0
     }
 }
 
@@ -837,7 +842,8 @@ fn route_dead_new(frontend: string, kind: string, value: string, code: int) -> R
         target: "",
         code: c,
         host_match: "",
-        websocket: 1
+        websocket: 1,
+        force_ssl: 0
     }
 }
 
@@ -851,7 +857,8 @@ fn route_clone(src: Route) -> Route {
         target: own_string(src.target),
         code: src.code,
         host_match: own_string(src.host_match),
-        websocket: src.websocket
+        websocket: src.websocket,
+        force_ssl: src.force_ssl
     }
 }
 

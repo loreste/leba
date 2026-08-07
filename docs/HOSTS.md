@@ -10,7 +10,12 @@ Leba maps **proxy hosts** to `route host` lines (plus optional locations, ACLs, 
 | **Disabled** | `route host app.example.com dead 503` or `enable=0` | Immediate 503 |
 | **Dead** | `action=dead` | 404 (or custom code) |
 | **Redirect** | `action=redirect&target=URL` | 301/302 to target |
-| **Force SSL** | frontend `redirect https` / `force_ssl=1` | Cleartext → HTTPS |
+| **Force SSL** | `route host … force_ssl` or `force_ssl=1` | Cleartext for **this host** → HTTPS (ACME path exempt) |
+
+```text
+# Per-host Force SSL (preferred). Frontend-wide `redirect https` still works.
+route host app.example.com -> app force_ssl
+```
 
 ## WebSocket
 
@@ -60,9 +65,25 @@ API (admin, triggers full reload):
 POST /admin/host-http-auth?frontend=web&domain=app.example.com&user=alice&pass=s3cret
 ```
 
-## Certificates
+## Certificates (automatic)
 
-- HTTP-01: `challenge=http` (default)
+Create a proxy host **with SSL** in one call (NPM-style):
+
+```bash
+# Issue (or attach existing) ACME cert + SNI + Force SSL + live TLS reload
+curl -u admin:secret -X POST \
+  'http://127.0.0.1:8404/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=127.0.0.1:3000&ssl=1&force_ssl=1'
+```
+
+| Query | Effect |
+|-------|--------|
+| `ssl=1` / `request_ssl=1` / `auto_ssl=1` | Reuse PEMs under `acme_storage` or run lego HTTP-01, attach SNI |
+| `force_ssl=1` | Per-host HTTP→HTTPS (does **not** force every other host) |
+| `cert=` + `key=` | Use absolute PEM paths instead of ACME |
+
+UI: **Proxy Hosts → + Add** (Request SSL / Force SSL checked by default), or **Request SSL** on a host card.
+
+- HTTP-01: `challenge=http` (default) via `POST /admin/certificates/issue`
 - DNS-01: `challenge=dns&dns_provider=cloudflare` (+ lego env e.g. `CF_DNS_API_TOKEN`)
   or `LEBA_ACME_DNS_PROVIDER`
 

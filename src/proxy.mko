@@ -2140,25 +2140,44 @@ fn prepare_raw_dispatch(
         }
     }
 
-    // Force HTTPS: answer on the cleartext frontend with a scheme redirect.
-    // Exempt /.well-known/acme-challenge/ when webroot not configured (fall through).
-    if fe.redirect_https == 1 {
-        if str_has_prefix(path, "/.well-known/acme-challenge/") {
-            // Fall through to normal routing for ACME challenges without webroot.
+    // Force HTTPS: frontend-wide redirect_https, or per-host route force_ssl.
+    // Exempt ACME HTTP-01 so certificates can still be issued on :80.
+    if not str_has_prefix(path, "/.well-known/acme-challenge/") {
+        let mut do_https_redirect = 0
+        let mut redir_code = fe.redirect_code
+        if fe.redirect_https == 1 {
+            do_https_redirect = 1
         } else {
-        let _ = raw_http_redirect_https(c, method, host, path, fe.redirect_code)
-        let mut dr = empty
-        dr.err = 0
-        dr.bytes_out = 0
-        if fe.access_log == 1 {
-            let rid = make_req_id()
-            let mut code = fe.redirect_code
-            if code <= 0 {
-                code = 301
+            // Per-host Force SSL (NPM-style): match Host against host routes only.
+            for _, rfs in range routes {
+                if str_eq(rfs.frontend, fe.name) {
+                    if str_eq(rfs.kind, "host") {
+                        if rfs.force_ssl == 1 {
+                            if match_kind("host", rfs.value, path, host, method, "") == 1 {
+                                do_https_redirect = 1
+                                if redir_code <= 0 {
+                                    redir_code = 301
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            print(access_log_line(method, path, code, "https-redirect", "-", 0, 0, rid, "", ""))
         }
-        return dr
+        if do_https_redirect == 1 {
+            let _ = raw_http_redirect_https(c, method, host, path, redir_code)
+            let mut dr = empty
+            dr.err = 0
+            dr.bytes_out = 0
+            if fe.access_log == 1 {
+                let rid = make_req_id()
+                let mut code = redir_code
+                if code <= 0 {
+                    code = 301
+                }
+                print(access_log_line(method, path, code, "https-redirect", "-", 0, 0, rid, "", ""))
+            }
+            return dr
         }
     }
 

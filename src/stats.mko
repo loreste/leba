@@ -116,6 +116,8 @@ fn route_json(r: Route) -> string {
     builder_write(b, json_escape(r.host_match))
     builder_write(b, "\",\"websocket\":")
     builder_write(b, int_to_string(r.websocket))
+    builder_write(b, ",\"force_ssl\":")
+    builder_write(b, int_to_string(r.force_ssl))
     builder_write(b, "}")
     return builder_string(b)
 }

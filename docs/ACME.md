@@ -11,7 +11,19 @@ It orchestrates **lego** (or certbot/acme.sh) and live-reloads TLS.
    - `LEBA_ACME_WEBROOT` — HTTP-01 challenge dir (default `/var/lib/leba/acme`)
    - `LEBA_ACME_HELPER` — binary name/path (default `lego`)
 2. Ensure the data-plane frontend serves HTTP-01 (port 80 publicly).
-3. Open **Admin UI → Certificates**, or call the API as an **admin** user:
+3. **One-shot host + cert** (preferred): Admin UI **Proxy Hosts → + Add** with
+   **Request SSL**, or:
+
+```bash
+curl -u admin:secret -X POST \
+  'http://127.0.0.1:8404/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=127.0.0.1:3000&ssl=1'
+```
+
+   Response includes `ssl_status` (`issued` | `existing` | `failed` | `provided` | `none`)
+   and `tls_reload:true` when SNI was attached. Host is still created if ACME fails
+   (`ssl_status=failed` + `ssl_error`).
+
+4. Or open **Admin UI → Certificates**, or call the issue API as an **admin** user:
 
 ```bash
 # Issue + attach SNI cert + live tls_server_reload

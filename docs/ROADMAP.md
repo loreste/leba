@@ -40,11 +40,12 @@ make build
 
 1. **No full stick-table copy** unless stick/cookie sticky is active (`stick_dirty`).
 2. **No rate-bucket clone** unless the frontend has `rate_limit` (`rate_dirty`).
-3. **Servers cloned once** on conn reservation (`server_conn_delta`), not on every ACL/pick read.
+3. **No full `server_array_clone` on reserve/release** — `server_conn_delta` / `mark_server_req` deep-own **one slot** via ownership transfer (`servers = f(servers)`). Skip reserve entirely when no frontend/backend `maxconn` and balance ≠ `least_conn` (`plan.reserved=0`).
 4. Prefer **`http_forward_fd` + `tcp_pool_*`** over `http_forward_full` (pools already wired via `init_server_pools`).
 5. Accept thread does ACL/pick; workers only do upstream I/O (kick-safe).
+6. **Empty `Dispatch.servers` / `backends`** when not dirty — accept thread must not wipe live tables (main adopts only non-empty arrays).
 
-**Honest limits today:** buffered request model (see LIMITS.md); TLS client KA best-effort; free-analysis still forces owned returns on some TLS paths — cleartext hot path is the primary optimization track.
+**Honest limits today:** buffered request model (see LIMITS.md); TLS client KA best-effort; free-analysis still forces owned returns on some TLS paths — cleartext hot path is the primary optimization track. On laptop Connection:close microbench, **serial accept-thread work** (read/parse/prepare/kick) still dominates (~few ms/req); beating nginx needs further accept-path architecture work, not only clone skips.
 
 **Marketing gate (do not claim until checked):**
 
@@ -297,3 +298,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-08-07 | Auto SSL on proxy-host; per-host Force SSL; Certificates UI |
 | 2026-08-07 | **v0.15.0** first-class Let's Encrypt (prod/staging directories), Linux ACME defaults, doctor lego check |
 | 2026-08-07 | Scorecard: bench harness ephemeral ports + RSS; published laptop medians vs nginx; HA peers ×3 PASS |
+| 2026-08-07 | Hot path: single-slot `server_conn_delta`/`mark_server_req`; `plan.reserved` skip; empty Dispatch keep live tables; scorecard rebench (nginx still wins RPS) |

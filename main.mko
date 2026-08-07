@@ -876,8 +876,21 @@ fn main() {
                                                 completed = completed + 1
                                             }
                                         } else {
-                                            servers = dp.servers
-                                            backends = dp.backends
+                                            // Perf: empty arrays mean hot path skipped clones — keep live tables.
+                                            if len(dp.servers) > 0 {
+                                                servers = dp.servers
+                                            } else {
+                                                let _ = dp.servers
+                                            }
+                                            if len(dp.backends) > 0 {
+                                                backends = dp.backends
+                                            } else {
+                                                let _ = dp.backends
+                                            }
+                                            // Maxconn reserve on live accept-thread table (O(1) slot update).
+                                            if dp.retry_plan.reserved == 1 {
+                                                servers = server_conn_delta(servers, dp.server_idx, 1)
+                                            }
                                             if dp.rate_dirty == 1 {
                                                 buckets = dp.buckets
                                             } else {

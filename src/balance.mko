@@ -265,6 +265,8 @@ fn next_rr(be: Backend) -> Backend {
     return out
 }
 
+// Accept-thread only: ownership-transfer update of one server's counters.
+// Deep-owns one slot (not the whole array) for free-analysis safety.
 fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Server {
     if idx < 0 {
         return servers
@@ -272,7 +274,7 @@ fn mark_server_req(servers: []Server, idx: int, bytes: int, err: int) -> []Serve
     if idx >= len(servers) {
         return servers
     }
-    let mut out = server_array_clone(servers)
+    let mut out = servers
     let mut s = server_clone(out[idx])
     s.total_req = s.total_req + 1
     s.total_bytes = s.total_bytes + bytes
@@ -698,6 +700,8 @@ fn stick_client_key(fe: Frontend, peer_ip: string, xff_header: string) -> string
     return peer
 }
 
+// Accept-thread only: ownership transfer; deep-owns the one slot being updated.
+// Avoids full server_array_clone (O(n) string copies) on every reserve/release.
 fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
     if idx < 0 {
         return servers
@@ -705,13 +709,13 @@ fn server_conn_delta(servers: []Server, idx: int, delta: int) -> []Server {
     if idx >= len(servers) {
         return servers
     }
-    let mut out = server_array_clone(servers)
+    let mut out = servers
     let mut s = server_clone(out[idx])
     s.conns = s.conns + delta
     if s.conns < 0 {
         s.conns = 0
     }
-    out[idx] = server_clone(s)
+    out[idx] = s
     return out
 }
 
@@ -730,6 +734,8 @@ struct RetryPlan {
     h1: RetryHop
     h2: RetryHop
     h3: RetryHop
+    // 1 = hop0 holds maxconn reservation (accept thread must release via conn_si).
+    reserved: int
 }
 
 fn retry_hop_empty() -> RetryHop {
@@ -748,7 +754,8 @@ fn retry_plan_empty() -> RetryPlan {
         h0: z,
         h1: z,
         h2: z,
-        h3: z
+        h3: z,
+        reserved: 0
     }
 }
 
@@ -824,6 +831,8 @@ fn build_retry_plan(
     }
     plan = retry_plan_set_hop(plan, 0, retry_hop_from_server(servers[primary_si], primary_si))
     plan.n = 1
+    // Default: hop0 reserved (caller may clear reserved for no-maxconn hot path).
+    plan.reserved = 1
     let mut extra = max_retries
     if extra < 0 {
         extra = 0

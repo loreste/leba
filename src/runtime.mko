@@ -84,8 +84,9 @@ fn apply_done_servers_conn(conn_si: int, servers: []Server) -> []Server {
 }
 
 // Mark request/bytes/errors and passive health on the hop that answered (or last tried).
+// Ownership-transfer path only — no full array clone on the accept-thread hot path.
 fn apply_done_servers_health(err: int, status: int, served_si: int, bytes: int, servers: []Server) -> []Server {
-    let mut srv = server_array_clone(servers)
+    let mut srv = servers
     if served_si >= 0 {
         if err == 0 {
             srv = mark_server_req(srv, served_si, bytes, 0)
@@ -100,9 +101,11 @@ fn apply_done_servers_health(err: int, status: int, served_si: int, bytes: int, 
 }
 
 // Legacy single-si helper: conn release + health on the same index (pre-retry-plan paths).
+// Assign intermediate then return — do not `return f(srv)` (free-analysis can drop updates).
 fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Server) -> []Server {
     let mut srv = apply_done_servers_conn(si, servers)
-    return apply_done_servers_health(err, status, si, bytes, srv)
+    srv = apply_done_servers_health(err, status, si, bytes, srv)
+    return srv
 }
 
 fn frontend_bind_key(host: string, port: int) -> string {

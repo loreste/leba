@@ -927,7 +927,8 @@ fn apply_passive_health(servers: []Server, idx: int, status: int, fall: int) -> 
     if idx < 0 { return servers }
     if idx >= len(servers) { return servers }
     let mut out = servers
-    let mut s = out[idx]
+    // Deep-own one slot before mutate — shallow out[idx] free-aliases after prior server_clone writes.
+    let mut s = server_clone(out[idx])
     if status >= 500 {
         s.fails = s.fails + 1
         if s.alive == 1 {

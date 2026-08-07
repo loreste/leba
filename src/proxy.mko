@@ -2213,13 +2213,15 @@ fn prepare_raw_dispatch(
         return ds
     }
 
-    // --- Proxy path only below: clone LB state and render upstream headers ---
+    // --- Proxy path only below: render headers; clone LB state only when mutated ---
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     if not str_eq(req.authorization, "") {
         req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
     req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
-    let mut be_list = backend_array_clone(backends)
+    // Defer backend_array_clone until we know multi-server RR needs rr_idx write-back.
+    let mut be_list = make([]Backend, 0, 0)
+    let mut backends_dirty = 0
     let mut rate_list = make([]RateBucket, 0, 0)
     let mut rate_dirty = 0
     if fe.rate_limit > 0 {
@@ -2319,7 +2321,8 @@ fn prepare_raw_dispatch(
     }
 
     let be_name = select_backend(routes, fe.name, path, host, fe.backend)
-    let bi = find_backend(be_list, be_name)
+    // Read-only backend lookup first (avoid clone until multi-server RR write-back).
+    let bi = find_backend(backends, be_name)
     if bi < 0 {
         if str_eq(be_name, "") {
             if leba_should_welcome(path) == 1 {
@@ -2340,13 +2343,13 @@ fn prepare_raw_dispatch(
         return d
     }
 
-    let mut be = be_list[bi]
-    if backend_at_maxconn(servers, be) == 1 {
+    let be0 = backends[bi]
+    if backend_at_maxconn(servers, be0) == 1 {
         let mut detail2 = str_builder()
         builder_write(detail2, "status=503 backend=")
-        builder_write(detail2, be.name)
+        builder_write(detail2, be0.name)
         builder_write(detail2, " maxconn=")
-        builder_write(detail2, int_to_string(be.maxconn))
+        builder_write(detail2, int_to_string(be0.maxconn))
         log_proxy_reject("backend_maxconn", method, path, host, builder_string(detail2))
         let _ = raw_http_respond_method(c, method, 503, "backend maxconn reached\n")
         let mut d = empty
@@ -2359,17 +2362,17 @@ fn prepare_raw_dispatch(
     }
 
     let mut stick_key = ""
-    if str_eq(be.stick_on, "src") {
+    if str_eq(be0.stick_on, "src") {
         let xff = raw_header(req.raw, "X-Forwarded-For")
         let ck = stick_client_key(fe, client_ip, xff)
-        stick_key = stick_make_key(be.name, "src", ck)
+        stick_key = stick_make_key(be0.name, "src", ck)
     }
     // Fast path: no stick table and no cookie sticky → pick without map own/copy.
     let mut si = 0 - 1
     let mut stick = make(map[string]string)
     let mut peer_line = ""
     let mut need_stick = 0
-    if not str_eq(be.stick_on, "") {
+    if not str_eq(be0.stick_on, "") {
         need_stick = 1
     }
     if str_len(fe.sticky_cookie) > 0 {
@@ -2377,7 +2380,7 @@ fn prepare_raw_dispatch(
     }
     if need_stick == 1 {
         let si2, stick2, stick_n2, peer2 = pick_server_stick(
-            servers, be, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
+            servers, be0, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
         )
         si = si2
         stick = stick2
@@ -2385,17 +2388,12 @@ fn prepare_raw_dispatch(
         peer_line = peer2
         stick_dirty = 1
     } else {
-        si = pick_server(servers, be, host, fe.sticky_cookie, sticky_val)
+        si = pick_server(servers, be0, host, fe.sticky_cookie, sticky_val)
     }
-    be.rr_idx = be.rr_idx + 1
-    if be.rr_idx > 1000000000 {
-        be.rr_idx = 0
-    }
-    be_list[bi] = be
     if si < 0 {
         let mut detail3 = str_builder()
         builder_write(detail3, "status=502 backend=")
-        builder_write(detail3, be.name)
+        builder_write(detail3, be0.name)
         log_proxy_reject("no_server", method, path, host, builder_string(detail3))
         let _ = raw_http_respond_method(c, method, 502, "no server\n")
         let mut d = empty
@@ -2412,14 +2410,51 @@ fn prepare_raw_dispatch(
         return d
     }
 
+    // Count backend members: multi-server needs rr_idx write-back (backend clone).
+    let mut member_n = 0
+    let mut mi = 0
+    while mi < len(servers) {
+        if str_eq(servers[mi].backend, be0.name) {
+            member_n = member_n + 1
+        }
+        mi = mi + 1
+    }
+    // Maxconn reservation / least_conn: only then clone servers array.
+    let mut need_resv = 0
+    if fe.maxconn > 0 {
+        need_resv = 1
+    }
+    if be0.maxconn > 0 {
+        need_resv = 1
+    }
+    if str_eq(be0.balance, "least_conn") {
+        need_resv = 1
+    }
+    if member_n > 1 {
+        be_list = backend_array_clone(backends)
+        backends_dirty = 1
+        let mut be = be_list[bi]
+        be.rr_idx = be.rr_idx + 1
+        if be.rr_idx > 1000000000 {
+            be.rr_idx = 0
+        }
+        be_list[bi] = be
+    }
     let s = servers[si]
-    let mut timeout_ms = be.connect_timeout_ms
+    let mut timeout_ms = be0.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
     }
-    // Only hop0 holds maxconn reservation (D20). Single clone of servers here.
-    let srv_list = server_conn_delta(servers, si, 1)
-    let plan = build_retry_plan(srv_list, be, host, fe.sticky_cookie, sticky_val, si, be.retries)
+    // Never clone servers here. Accept thread applies maxconn +1 on the live
+    // table after prepare when plan.reserved == 1 (see main). Hot path sets
+    // reserved=0 so even that single-slot update is skipped.
+    let mut srv_list = make([]Server, 0, 0)
+    let mut plan = build_retry_plan(servers, be0, host, fe.sticky_cookie, sticky_val, si, be0.retries)
+    if need_resv == 1 {
+        plan.reserved = 1
+    } else {
+        plan.reserved = 0
+    }
 
     let mut ws = 0
     let mut ws_raw = ""
@@ -2428,6 +2463,7 @@ fn prepare_raw_dispatch(
         ws_raw = req.raw
     }
 
+    let _ = backends_dirty
     return Dispatch {
         need_worker: 1,
         c: c,
@@ -2439,11 +2475,11 @@ fn prepare_raw_dispatch(
         trace_id: trace_id,
         span_id: span_id,
         orig_host: host,
-        up_host: s.host,
+        up_host: own_string(s.host),
         up_port: s.port,
         up_pool: s.pool,
         timeout_ms: timeout_ms,
-        retries: be.retries,
+        retries: be0.retries,
         server_idx: si,
         access_log: fe.access_log,
         access_log_file: fe.access_log_file,
@@ -2467,7 +2503,7 @@ fn prepare_raw_dispatch(
         stick_dirty: stick_dirty,
         waf_blocked: 0,
         waf_detected: waf_det_flag,
-        // Owned once: servers from conn_delta, backends from entry clone, buckets if dirty.
+        // Empty when not dirty — main must not wipe live accept-thread arrays.
         servers: srv_list,
         backends: be_list,
         buckets: rate_list,
@@ -3361,7 +3397,11 @@ fn worker_raw_upstream(
     slots: chan[int],
     done: chan[(int, int, int, int, int, int, int, int, int, int)]
 ) -> int {
-    let conn_si = plan.h0.server_idx
+    // Only release maxconn when prepare reserved hop0 (hot path sets reserved=0).
+    let mut conn_si = 0 - 1
+    if plan.reserved == 1 {
+        conn_si = plan.h0.server_idx
+    }
     let mut res = FwdResult {}
     let mut served_si = 0 - 1
     let mut failed_hops = 0

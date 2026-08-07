@@ -2,10 +2,12 @@
 
 Use this checklist before calling Leba **production-ready** for a site.
 
-## Baseline (0.14+)
+## Baseline (0.15+)
 
 | Item | Check |
 |------|--------|
+| Mako | **≥ 0.5.1** (`make check-mako`); see [MAKO.md](MAKO.md) |
+| Build | `make build` → **release** binary; mimalloc linked when available |
 | Version | `leba version` ≥ 0.15.0 |
 | Doctor | `leba doctor /etc/leba/leba.conf` → 0 errors |
 | Auth | Hashed admin users; no demo passwords |

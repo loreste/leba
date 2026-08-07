@@ -76,11 +76,10 @@ Leba targets **bounded, ownership-correct** memory under Mako free-analysis:
 `stick_table_own`; success fast-path completions skip `servers[]` clone when
 no maxconn reservation (LiveStats still updated).
 
-**Allocator honesty:** Mako C free-analysis **does not return freed pages to the
-OS**. Process RSS after a load spike can stay high even when live objects drop.
-That is not an unbounded live leak of the data plane queues (those are capped
-above), but it **does** mean RSS is a poor steady-state gauge vs nginx. Prefer
-capping `workers` / body limits / pool size for a fixed connection budget.
+**Allocator:** Prefer production builds with **mimalloc** (`make build` auto-detects
+Homebrew `libmimalloc.a` — see [MAKO.md](MAKO.md)). System malloc under free-analysis
+can leave process RSS high after spikes even when live queues are empty. Live
+structures remain hard-capped above either way.
 
 Runtime logs: `event=memory_bounds pending_limit=… done_cap=… workers=…`.
 

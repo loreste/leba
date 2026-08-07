@@ -1,26 +1,84 @@
-# Prefer installed Mako (stable). Override with MAKO=/path/to/mako for local builds.
-# Note: in-tree target/release/mako can be ahead of the std install and may crash.
-# After upgrading Mako: `make clean-cache` then rebuild (object cache is not versioned by free-analysis).
+# Leba — production reverse proxy built with Mako.
 #
-# Backend: default to C. Mako's native/Cranelift path still lacks struct fields and
-# some HTTP builtins used by Leba; CI and production builds use --backend c.
+# Requires Mako ≥ 0.5.1 (ownership drops, --release, MAKO_ALLOCATOR, SAFE model).
+# Install: https://github.com/loreste/mako/releases (or build from source).
+#
+# Backend: C is required today. Mako 0.5+ defaults to native (Cranelift), but
+# native still rejects non-scalar struct fields (e.g. HostPort.host: string).
+# CI and production always use --backend c until that lands.
+#
+# After upgrading Mako: `make clean-cache` then rebuild (object cache is not
+# versioned across compiler revisions).
+#
+# Production build (default): --release (-O3 -flto) + mimalloc when available.
+# Debug / ASan: make build-debug   MAKO_RELEASE=0
+
 MAKO ?= $(shell command -v mako)
 MAKO_BACKEND ?= c
-# Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
-export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
-.PHONY: all build test check doctor doctor-linux explain smoke run clean \
+# Release by default so “make build” is the binary you ship.
+MAKO_RELEASE ?= 1
+ifeq ($(MAKO_RELEASE),1)
+MAKO_RELEASE_FLAG := --release
+else
+MAKO_RELEASE_FLAG :=
+endif
+
+# Optional production allocator (Mako 0.4.11+). Auto-detect Homebrew mimalloc.
+# Override: MAKO_ALLOCATOR=system | jemalloc | /path/to/libmimalloc.a
+# Disable:  MAKO_ALLOCATOR=system make build
+MIMALLOC_PREFIX ?= $(shell brew --prefix mimalloc 2>/dev/null)
+ifeq ($(origin MAKO_ALLOCATOR),undefined)
+  ifneq ($(wildcard $(MIMALLOC_PREFIX)/lib/libmimalloc.a),)
+    export MAKO_ALLOCATOR := $(MIMALLOC_PREFIX)/lib/libmimalloc.a
+  else ifneq ($(wildcard $(MIMALLOC_PREFIX)/lib/libmimalloc.dylib),)
+    export MAKO_ALLOCATOR := mimalloc
+    export MAKO_LDFLAGS := -L$(MIMALLOC_PREFIX)/lib
+  endif
+endif
+
+# Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
+export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; elif [ -f "$$HOME/mako/runtime/third_party/quiche/target/release/libquiche.a" ]; then echo "$$HOME/mako/runtime/third_party/quiche"; fi)
+
+.PHONY: all build build-debug build-release check-mako test check doctor doctor-linux \
+	explain smoke run clean clean-cache \
 	test-linux-assets test-ha-assets test-docs test-haproxy-compare \
 	test-soak test-ha-peers test-concurrent test-adversarial \
 	test-full test-ci test-all bench-nginx
 
 all: build
 
-build:
-	$(MAKO) build main.mko -o leba --backend $(MAKO_BACKEND)
+# Fail closed if Mako is missing or too old for Leba’s production path.
+check-mako:
+	@command -v "$(MAKO)" >/dev/null 2>&1 || { echo "mako not found in PATH — install ≥ 0.5.1 from https://github.com/loreste/mako/releases" >&2; exit 1; }
+	@"$(MAKO)" version >/dev/null
+	@v=$$("$(MAKO)" version 2>/dev/null | sed -n 's/.*mako\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1); \
+	if [ -z "$$v" ]; then echo "could not parse mako version from: $$("$(MAKO)" version 2>&1)" >&2; exit 1; fi; \
+	major=$$(echo "$$v" | cut -d. -f1); minor=$$(echo "$$v" | cut -d. -f2); patch=$$(echo "$$v" | cut -d. -f3); \
+	ok=0; \
+	if [ "$$major" -gt 0 ]; then ok=1; fi; \
+	if [ "$$major" -eq 0 ] && [ "$$minor" -gt 5 ]; then ok=1; fi; \
+	if [ "$$major" -eq 0 ] && [ "$$minor" -eq 5 ] && [ "$$patch" -ge 1 ]; then ok=1; fi; \
+	if [ "$$ok" -ne 1 ]; then \
+	  echo "Leba requires Mako ≥ 0.5.1 (found $$v). Upgrade: https://github.com/loreste/mako/releases" >&2; \
+	  exit 1; \
+	fi; \
+	echo "mako ok: $$("$(MAKO)" version 2>&1 | head -1) backend=$(MAKO_BACKEND) release=$(MAKO_RELEASE) allocator=$${MAKO_ALLOCATOR:-system}"
+
+build: check-mako
+	@echo "building leba: backend=$(MAKO_BACKEND) release=$(MAKO_RELEASE) allocator=$${MAKO_ALLOCATOR:-system}"
+	$(MAKO) build main.mko -o leba --backend $(MAKO_BACKEND) $(MAKO_RELEASE_FLAG)
+
+# Fast iterate without -O3 / LTO.
+build-debug:
+	$(MAKE) build MAKO_RELEASE=0 MAKO_ALLOCATOR=system
+
+# Explicit production binary (same as default when MAKO_RELEASE=1).
+build-release:
+	$(MAKE) build MAKO_RELEASE=1
 
 # Unit suites only (fast). Prefer these over `mako test .` (C redefinition).
-test:
+test: check-mako
 	$(MAKO) test leba_core1_test.mko --backend $(MAKO_BACKEND)
 	$(MAKO) test leba_core2_test.mko --backend $(MAKO_BACKEND)
 	$(MAKO) test leba_web_test.mko --backend $(MAKO_BACKEND)
@@ -60,6 +118,7 @@ test-docs:
 	test -f docs/HA.md
 	test -f docs/SCORECARD.md
 	test -f docs/ACME.md
+	test -f docs/MAKO.md
 	test -f scripts/ha_peers_smoke.sh
 	test -f scripts/concurrent_smoke.sh
 	test -f scripts/adversarial_smoke.sh
@@ -74,7 +133,7 @@ test-concurrent: build
 	chmod +x scripts/concurrent_smoke.sh
 	./scripts/concurrent_smoke.sh 200
 
-# Connection budget, keep-alive, body limit, reload under load (0.14 platform quality).
+# Connection budget, keep-alive, body limit, reload under load.
 test-soak: build
 	chmod +x scripts/soak.sh
 	./scripts/soak.sh 200 6
@@ -120,7 +179,7 @@ smoke: build
 	chmod +x scripts/smoke.sh
 	./scripts/smoke.sh
 
-# Wipe Mako object cache after upgrading the compiler (stale .mako/cache/c can free wrong names).
+# Wipe Mako object cache after upgrading the compiler.
 clean-cache:
 	rm -rf .mako/cache
 

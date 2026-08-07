@@ -122,7 +122,9 @@ wildcard CORS without credentials.
 gh repo clone loreste/leba
 cd leba
 make build
-make test
+make test          # unit suites (~170+)
+make test-full     # units + concurrent + adversarial (pre-push)
+# make test-ci     # full CI matrix including soak + peers
 ```
 
 ## Quick Start
@@ -275,7 +277,7 @@ Linux packaging sketch: [`deploy/linux/`](deploy/linux/) · HA keepalived: [`dep
 
 ## Status
 
-Leba is working software with 80+ automated tests, a soak harness, and dual-node
+Leba is working software with 170+ automated unit tests, concurrent/adversarial/soak harnesses, and dual-node
 peers smoke (**v0.14.1**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
 stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, lego ACME,
 access lists) on a HAProxy-class data plane.

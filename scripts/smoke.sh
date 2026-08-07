@@ -17,7 +17,10 @@ echo "== using $MAKO_BIN =="
 "$MAKO_BIN" version
 
 echo "== unit tests =="
-"$MAKO_BIN" test . -q || "$MAKO_BIN" test .
+# Split suites: `mako test .` can hit C redefinition / codegen panics.
+"$MAKO_BIN" test leba_core1_test.mko
+"$MAKO_BIN" test leba_core2_test.mko
+"$MAKO_BIN" test leba_web_test.mko
 
 echo "== config check =="
 "$MAKO_BIN" build main.mko -o /tmp/leba

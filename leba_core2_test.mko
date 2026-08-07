@@ -1425,3 +1425,205 @@ fn TestApplyDoneSplitConnVsHealth() {
     assert_eq(servers[1].total_req, 1)
     assert_eq(servers[0].total_req, 0)
 }
+
+// --- 0.14.1 free-analysis / framing / rate / retry coverage ---------------
+
+fn TestPendingClientCloneAndWithBuffer() {
+    let pc = PendingClient {
+        fd: 7,
+        kind: 1,
+        frontend_idx: 2,
+        deadline_ms: 9000,
+        buffer: "GET / HTTP/1.1\r\nHost: h\r\n\r\n",
+        ka_count: 3,
+        frontend_name: "web"
+    }
+    let c = pending_client_clone(pc)
+    assert_eq(c.fd, 7)
+    assert_eq(c.kind, 1)
+    assert_eq(c.frontend_idx, 2)
+    assert_eq(c.deadline_ms, 9000)
+    assert_eq(c.ka_count, 3)
+    assert_eq_str(c.frontend_name, "web")
+    assert_eq_str(c.buffer, "GET / HTTP/1.1\r\nHost: h\r\n\r\n")
+    // Second clone of the clone must still own an independent buffer.
+    let c2 = pending_client_clone(c)
+    assert_eq_str(c2.buffer, c.buffer)
+    assert_eq(c2.ka_count, 3)
+
+    let w = pending_client_with_buffer(pc, "partial\n")
+    assert_eq(w.fd, 7)
+    assert_eq_str(w.buffer, "partial\n")
+    assert_eq_str(w.frontend_name, "web")
+    assert_eq(w.ka_count, 3)
+    // Original-shaped fields preserved when only buffer changes.
+    assert_eq(w.frontend_idx, 2)
+    assert_eq(w.deadline_ms, 9000)
+}
+
+fn TestHttpHeadersEndCrLfAndLf() {
+    let crlf = "HTTP/1.1 200 OK\r\nHost: h\r\n\r\nbody"
+    assert(http_headers_end(crlf) >= 0)
+    assert_eq(http_headers_end_skip(crlf), 4)
+    let lf = "HTTP/1.1 200 OK\nHost: h\n\nbody"
+    assert(http_headers_end(lf) >= 0)
+    assert_eq(http_headers_end_skip(lf), 2)
+    // Incomplete: no blank line yet.
+    assert_eq(http_headers_end("GET / HTTP/1.1\r\nHost: h\r\n"), 0 - 1)
+    assert_eq(http_headers_end_skip("GET / HTTP/1.1\r\nHost: h\r\n"), 0)
+    // Prefer CRLF delimiter when present (even if an earlier LF blank exists).
+    let both = "A\n\nB\r\n\r\nC"
+    assert_eq(http_headers_end_skip(both), 4)
+}
+
+fn TestRateIndexCloneAndClientIp() {
+    let mut buckets = make([]RateBucket, 0, 2)
+    buckets = append(buckets, rate_new("web", 10))
+    buckets = append(buckets, rate_new("api", 5))
+    let idx = rate_build_index(buckets)
+    assert_eq(rate_find_indexed(idx, "web"), 0)
+    assert_eq(rate_find_indexed(idx, "api"), 1)
+    assert_eq(rate_find_indexed(idx, "missing"), 0 - 1)
+
+    let cloned = rate_bucket_array_clone(buckets)
+    assert_eq(len(cloned), 2)
+    assert_eq_str(cloned[0].frontend, "web")
+    assert_eq(cloned[0].tokens, buckets[0].tokens)
+
+    // Per-IP limiter: new IP creates bucket; repeated take drains tokens.
+    let empty = make([]RateBucket, 0, 0)
+    let b1 = client_rate_take_ip(empty, "10.0.0.1", 2)
+    assert_eq(len(b1), 1)
+    assert_eq_str(b1[0].frontend, "10.0.0.1")
+    assert_eq(client_rate_find(b1, "10.0.0.1"), 0)
+    assert_eq(client_rate_check(b1, "10.0.0.1", 2), 0)
+    // capacity 2, one take already → one token left; take twice more.
+    let b2 = client_rate_take_ip(b1, "10.0.0.1", 2)
+    let b3 = client_rate_take_ip(b2, "10.0.0.1", 2)
+    assert_eq(client_rate_check(b3, "10.0.0.1", 2), 1)
+    // Unknown IP is never denied.
+    assert_eq(client_rate_check(b3, "10.0.0.99", 2), 0)
+}
+
+fn TestStickTableOwnEmptyKeyAndCapacity() {
+    let mut table = make(map[string]string)
+    let t0, c0, exp0 = stick_table_set(table, "", "srv1", 60000, 2, 1000000, 0)
+    assert_eq(c0, 0)
+    assert_eq(exp0, 0)
+    assert_eq_str(stick_table_get(t0, "", 1000000), "")
+    let t1, c1, exp1 = stick_table_set(t0, "app|src|1.1.1.1", "", 60000, 2, 1000000, 0)
+    assert_eq(c1, 0)
+    assert_eq(exp1, 0)
+    let _ = t1
+
+    let t2, c2, exp2 = stick_table_set(table, "app|src|a", "s1", 60000, 2, 1000000, 0)
+    assert_eq(c2, 1)
+    assert(exp2 > 0)
+    let t3, c3, exp3 = stick_table_set(t2, "app|src|b", "s2", 60000, 2, 1000000, c2)
+    assert_eq(c3, 2)
+    assert(exp3 > 0)
+    // At capacity: refuse new key.
+    let t4, c4, exp4 = stick_table_set(t3, "app|src|c", "s3", 60000, 2, 1000000, c3)
+    assert_eq(c4, 2)
+    assert_eq(exp4, 0)
+    assert_eq_str(stick_table_get(t4, "app|src|c", 1000000), "")
+    // Existing key still refreshes.
+    let t5, c5, exp5 = stick_table_set(t4, "app|src|a", "s1-new", 60000, 2, 1000000, c4)
+    assert_eq(c5, 2)
+    assert(exp5 > 0)
+    assert_eq_str(stick_table_get(t5, "app|src|a", 1000000), "s1-new")
+
+    // Deep own drops empty keys/values and is independent of source.
+    let mut dirty = make(map[string]string)
+    dirty["keep"] = "srv|2000000"
+    dirty[""] = "x|1"
+    dirty["emptyval"] = ""
+    let owned = stick_table_own(dirty)
+    assert_eq_str(stick_table_get(owned, "keep", 1500000), "srv")
+    assert_eq_str(stick_table_get(owned, "emptyval", 1500000), "")
+    assert_eq_str(stick_table_get(owned, "", 1500000), "")
+}
+
+fn TestRetryPlanHelpersAndZeroRetries() {
+    let mut servers = make([]Server, 0, 3)
+    servers = append(servers, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    servers = append(servers, server_new("b", "127.0.0.1", 2, 100, 1, "api"))
+    servers = append(servers, server_new("c", "127.0.0.1", 3, 100, 1, "api"))
+    let be = backend_new("api")
+
+    // Negative primary → empty plan.
+    let empty = build_retry_plan(servers, be, "client", "", "", 0 - 1, 2)
+    assert_eq(empty.n, 0)
+
+    // Zero retries → single hop only.
+    let one = build_retry_plan(servers, be, "client", "", "", 0, 0)
+    assert_eq(one.n, 1)
+    assert_eq(one.h0.server_idx, 0)
+    assert_eq_str(one.h0.host, "127.0.0.1")
+    assert_eq(one.h0.port, 1)
+
+    // Hop helpers: contains / set / get.
+    let mut plan = retry_plan_empty()
+    plan = retry_plan_set_hop(plan, 0, retry_hop_from_server(servers[0], 0))
+    plan = retry_plan_set_hop(plan, 1, retry_hop_from_server(servers[1], 1))
+    plan.n = 2
+    assert_eq(retry_plan_contains(plan, 2, 0), 1)
+    assert_eq(retry_plan_contains(plan, 2, 1), 1)
+    assert_eq(retry_plan_contains(plan, 2, 2), 0)
+    assert_eq(retry_plan_hop(plan, 0).server_idx, 0)
+    assert_eq(retry_plan_hop(plan, 1).server_idx, 1)
+    assert_eq(retry_plan_hop(plan, 9).server_idx, 0 - 1)
+
+    // Cap extras at 3 (max hops 4).
+    let capped = build_retry_plan(servers, be, "client", "", "", 0, 99)
+    assert(capped.n >= 2)
+    assert(capped.n <= 4)
+}
+
+fn TestApplyDoneLiveStatsAndLegacy() {
+    let mut st = stats_new()
+    st.started_ms = 1000
+    st.total_req = 5
+    st.total_err = 1
+    st.total_bytes_out = 10
+    st.active_conns = 3
+    st.retries = 2
+    let servers = make([]Server, 0, 0)
+    let out = apply_done(0, 0, 100, 1, servers, st)
+    assert_eq(out.total_req, 6)
+    assert_eq(out.total_err, 1)
+    assert_eq(out.total_bytes_out, 110)
+    assert_eq(out.active_conns, 2)
+    assert_eq(out.retries, 3)
+    assert_eq(out.started_ms, 1000)
+
+    let err_out = apply_done(1, 0, 0, 0, servers, st)
+    assert_eq(err_out.total_err, 2)
+    assert_eq(err_out.active_conns, 2)
+
+    // Legacy single-si: conn release + health on same index.
+    let mut srv = make([]Server, 0, 1)
+    srv = append(srv, server_new("a", "127.0.0.1", 1, 100, 1, "api"))
+    srv = server_conn_delta(srv, 0, 1)
+    assert_eq(srv[0].conns, 1)
+    srv = apply_done_servers(0, 200, 0, 9, srv)
+    assert_eq(srv[0].conns, 0)
+    assert_eq(srv[0].total_req, 1)
+}
+
+fn TestExtractPassHeadersEmptyAndMixed() {
+    assert_eq_str(extract_pass_headers(""), "")
+    // Content-Type is not on the pass whitelist; Location/Set-Cookie/X-Request-Id are.
+    let pass = extract_pass_headers("Content-Type: text/plain\r\nLocation: /next\r\nX-Request-Id: abc\r\nSet-Cookie: a=1\r\n")
+    assert(str_contains(pass, "Location: /next"))
+    assert(str_contains(pass, "X-Request-Id: abc"))
+    assert(str_contains(pass, "Set-Cookie: a=1"))
+    assert(not str_contains(pass, "Content-Type"))
+}
+
+fn TestUdpBindHostDefaults() {
+    // game_udp_bind_addr rejects empty host; TCP-style `bind PORT` must map to 0.0.0.0.
+    assert_eq_str(udp_bind_host(""), "0.0.0.0")
+    assert_eq_str(udp_bind_host("127.0.0.1"), "127.0.0.1")
+    assert_eq_str(udp_bind_host("0.0.0.0"), "0.0.0.0")
+}

@@ -49,11 +49,24 @@ jobs:
         run: make test-linux-assets
 
       - name: HA package assets
+        run: make test-ha-assets
+
+      - name: Docs and harness presence
+        run: make test-docs
+
+      - name: Concurrent smoke
         run: |
-          test -f deploy/ha/README.md
-          test -f deploy/ha/keepalived.conf.example
-          test -f deploy/ha/docker-compose.ha.yml
-          test -f deploy/ha/leba-healthcheck.sh
+          set -euo pipefail
+          make build
+          chmod +x scripts/concurrent_smoke.sh
+          ./scripts/concurrent_smoke.sh 120
+
+      - name: Adversarial smoke
+        run: |
+          set -euo pipefail
+          chmod +x scripts/adversarial_smoke.sh
+          # Units already ran; script re-runs them — acceptable for isolation.
+          ./scripts/adversarial_smoke.sh
 
       - name: Soak harness
         env:
@@ -68,10 +81,3 @@ jobs:
 
       - name: HA peers smoke
         run: make test-ha-peers
-
-      - name: Docs presence
-        run: |
-          test -f docs/PRODUCTION.md
-          test -f docs/LIMITS.md
-          test -f docs/ROADMAP.md
-          test -f scripts/ha_peers_smoke.sh

@@ -578,8 +578,16 @@ fn find_udp_listener_idx(listeners: []UdpListener, name: string, host: string, p
     return 0 - 1
 }
 
+// Empty bind host means all interfaces (same as TCP listen defaults).
+fn udp_bind_host(host: string) -> string {
+    if str_eq(host, "") {
+        return "0.0.0.0"
+    }
+    return host
+}
+
 fn udp_listener_open(fe: Frontend) -> UdpListener {
-    let usock = game_udp_bind_addr(fe.bind_host, fe.bind_port)
+    let usock = game_udp_bind_addr(udp_bind_host(fe.bind_host), fe.bind_port)
     return UdpListener {
         frontend: fe,
         sock: usock,

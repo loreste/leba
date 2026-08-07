@@ -30,28 +30,48 @@ Findings from hostile self-review + automated tests.
 | **Medium** | Pending requeue free-aliased `PendingClient` (slots-full / not-ready / partial body) | `pending_client_clone` / `pending_client_with_buffer` on every requeue |
 | **Low** | `extract_pass_headers` re-split every value on `:` | Colon index + substr (hot upstream path) |
 | **Medium** | ACME/static/CORS still paid backend_array_clone cost before short-circuit | Clone + header render only after short-circuit returns |
+| **Critical** | TCP `prepare_tcp_dispatch` free-aliased servers/backends via prebuilt empty Dispatch (2nd TCP conn SIGABRT) | `tcp_dispatch_fail` single-handback; own hop host/body before `server_conn_delta` |
+| **High** | UDP `bind PORT` (empty host) failed `game_udp_bind_addr` | `udp_bind_host` defaults empty → `0.0.0.0` on open and main bind |
+| **Critical** | TLS H1 path always assigned `servers = dp.servers` on early reject (empty wipe → free-analysis abort) | Adopt servers/backends only when `need_worker == 1` (match plain HTTP) |
+| **Critical** | TLS accept stashed live `servers` into unused `ProxyResult tr` (H1 drop free-aliased accept state) | Only create `tr` from `handle_tls_h2_once` on H2 ALPN |
 
 ## Test inventory
 
-```bash
-make test                 # unit suites
-make test-adversarial     # units + e2e hostile smoke
-make test-haproxy-compare # behavior compare + serial req/s sample
-```
+| Target | What it covers |
+|--------|----------------|
+| `make test` | Unit suites (`leba_core1/2_test.mko`, `leba_web_test.mko`) — 170+ cases |
+| `make test-concurrent` | Parallel GET / keep-alive / POST / OPTIONS + browser header forward |
+| `make test-adversarial` | Units + doctor pass/fail, explain DENY, drain/empty pool, admin paths |
+| `make test-soak` | Connection budget, KA, body limit, reload under load |
+| `make test-ha-peers` | Dual-node HELLO, proxy, stick UPSERT sync, reconnect |
+| `make test-full` | Pre-push gate: units + assets + concurrent + adversarial |
+| `make test-ci` | Full CI matrix: test-full + soak + peers |
+| `make test-all` | test-ci + HAProxy behavior sample (needs `haproxy` in PATH) |
+| `make test-haproxy-compare` | Optional local behavior + serial req/s sample |
+| `make bench-nginx` | Optional RPS/latency vs nginx (needs `nginx` in PATH) |
 
-| File | Focus |
-|------|--------|
-| `leba_core1_test.mko` | util, config, ACL, LB, sticky, drain |
-| `leba_core2_test.mko` | rate, doctor, explain, admin API, health |
-| `leba_web_test.mko` | stats JSON shape, webadmin HTML completeness |
-| `scripts/adversarial_smoke.sh` | doctor pass/fail, explain DENY, drain, 502 when pool empty, admin HTML size |
-| `scripts/haproxy_compare.sh` | local behavior comparison plus a modest serial HTTP req/s sample |
+| File / script | Focus |
+|---------------|--------|
+| `leba_core1_test.mko` | util, config, ACL, LB, sticky, drain, maxconn |
+| `leba_core2_test.mko` | rate (incl. per-IP + index), doctor, explain, admin, health, framing, stick own/capacity, retry plan, pending clone, apply_done |
+| `leba_web_test.mko` | stats JSON/metrics, webadmin HTML, RBAC, OIDC, ACME, certificates, hosts |
+| `scripts/adversarial_smoke.sh` | doctor pass/fail, explain DENY, drain, 502 empty pool, admin HTML size |
+| `scripts/concurrent_smoke.sh` | multi-wave concurrent proxy traffic (ephemeral ports) |
+| `scripts/soak.sh` | platform quality under sustained load |
+| `scripts/ha_peers_smoke.sh` | stick-table peers dual-node |
+| `scripts/haproxy_compare.sh` | behavior compare + modest serial HTTP req/s sample |
+
+```bash
+make test-full   # before every push
+make test-ci     # before release (or trust CI)
+make test-all    # release + optional haproxy sample
+```
 
 ## Remaining risks (honest)
 
 - The compiler has struggled with some large/complex functions in this codebase;
   keep modules thin
-- Integration tests for concurrent accept / keep-alive not exhaustive
+- Concurrent / soak are strong signals but not multi-hour VIP soak for HA cutover
 - Web admin client-side explain can drift if server ACL semantics change (shared rules reduce risk)
 - The comparison req/s sample is serial and local; it is for regression signal,
   not capacity planning
@@ -59,6 +79,6 @@ make test-haproxy-compare # behavior compare + serial req/s sample
 ## Always run before release
 
 ```bash
-make test-adversarial
-make test-haproxy-compare
+make test-ci
+make test-haproxy-compare   # optional if haproxy available
 ```

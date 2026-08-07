@@ -9,13 +9,17 @@ MAKO_BACKEND ?= c
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
-.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-ha-peers test-concurrent test-adversarial bench-nginx
+.PHONY: all build test check doctor doctor-linux explain smoke run clean \
+	test-linux-assets test-ha-assets test-docs test-haproxy-compare \
+	test-soak test-ha-peers test-concurrent test-adversarial \
+	test-full test-ci test-all bench-nginx
 
 all: build
 
 build:
 	$(MAKO) build main.mko -o leba --backend $(MAKO_BACKEND)
 
+# Unit suites only (fast). Prefer these over `mako test .` (C redefinition).
 test:
 	$(MAKO) test leba_core1_test.mko --backend $(MAKO_BACKEND)
 	$(MAKO) test leba_core2_test.mko --backend $(MAKO_BACKEND)
@@ -36,6 +40,23 @@ test-linux-assets:
 	grep -q 'admin_users_file /etc/leba/admin-users.conf' deploy/linux/leba.conf
 	grep -q 'CHANGE_ME_KDF_ADMIN_PASSWORD' deploy/linux/admin-users.conf
 	grep -q '10.0.10.11:8080' deploy/linux/leba.conf
+
+test-ha-assets:
+	test -f deploy/ha/README.md
+	test -f deploy/ha/keepalived.conf.example
+	test -f deploy/ha/docker-compose.ha.yml
+	test -f deploy/ha/leba-healthcheck.sh
+
+test-docs:
+	test -f docs/PRODUCTION.md
+	test -f docs/LIMITS.md
+	test -f docs/ROADMAP.md
+	test -f docs/ADVERSARIAL_REVIEW.md
+	test -f docs/HA.md
+	test -f scripts/ha_peers_smoke.sh
+	test -f scripts/concurrent_smoke.sh
+	test -f scripts/adversarial_smoke.sh
+	test -f scripts/soak.sh
 
 test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh
@@ -59,6 +80,15 @@ test-haproxy-compare: build
 	chmod +x scripts/haproxy_compare.sh
 	./scripts/haproxy_compare.sh
 
+# Pre-push local gate: units + assets + concurrent + adversarial (no multi-min soak).
+test-full: test build test-linux-assets test-ha-assets test-docs test-concurrent test-adversarial
+
+# Matches .github/workflows/ci.yml (units, assets, soak, peers).
+test-ci: test build test-linux-assets test-ha-assets test-docs test-concurrent test-adversarial test-soak test-ha-peers
+
+# Full matrix including optional HAProxy behavior sample (needs haproxy in PATH).
+test-all: test-ci test-haproxy-compare
+
 # Directional RPS/latency vs local nginx (requires nginx in PATH).
 bench-nginx: build
 	chmod +x scripts/bench_vs_nginx.sh
@@ -79,6 +109,7 @@ run: build
 	./leba -f configs/leba.conf
 
 smoke: build
+	chmod +x scripts/smoke.sh
 	./scripts/smoke.sh
 
 # Wipe Mako object cache after upgrading the compiler (stale .mako/cache/c can free wrong names).

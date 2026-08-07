@@ -12,8 +12,10 @@ Use this checklist before calling Leba **production-ready** for a site.
 | Session | `state_key` or `LEBA_SESSION_SECRET` set |
 | Admin plane | Not on public VIP; private NIC / firewall |
 | TLS | Valid PEMs; ACME lego or external certs on both HA nodes |
-| Soak | `make test-soak` green in CI or pre-flight |
+| Unit + e2e gate | `make test-full` green (units, concurrent, adversarial, assets) |
+| Soak | `make test-soak` green in CI or pre-flight (`make test-ci` runs both) |
 | Concurrent | `make test-concurrent` green (GET/KA/POST/OPTIONS waves) |
+| Peers (if used) | `make test-ha-peers` green |
 | Metrics | Scrape `/metrics` (auth required when configured) |
 | Browser apps | If SPA uses credentialed CORS, set `LEBA_CORS_ORIGIN` to the exact UI origin |
 

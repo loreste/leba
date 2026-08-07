@@ -61,6 +61,7 @@ frontend web
 frontend stats
   bind 18504
   mode stats
+  auth admin:adversarial-pass:admin
 backend api
   balance round_robin
   servers_file /tmp/leba_servers_file.txt
@@ -104,6 +105,7 @@ frontend web
 frontend stats
   bind $TCP_STATS_PORT
   mode stats
+  auth admin:adversarial-pass:admin
 frontend db
   bind $TCP_DB_PORT
   mode tcp
@@ -178,6 +180,7 @@ cat > /tmp/leba_udp_sip.conf <<EOF
 frontend stats
   bind $TCP_STATS_PORT
   mode stats
+  auth admin:adversarial-pass:admin
 frontend sip_udp
   bind $UDP_SIP_PORT
   mode udp
@@ -207,6 +210,13 @@ wait "$UDP_SIP2_PID" 2>/dev/null || true
 grep -q "event=listener_bound frontend=sip_udp mode=udp bind=.*:$UDP_SIP_PORT" /tmp/leba_udp_sip.log
 
 echo "== tls http, h2, and optional h3 frontend =="
+# Prefer H3 only when this binary/doctor accepts it (quiche may exist on disk
+# without being linked into the installed mako/leba).
+TLS_CERT="${LEBA_DEV_TLS_CERT:-/Users/loreste/mako/runtime/certs/dev.crt}"
+TLS_KEY="${LEBA_DEV_TLS_KEY:-/Users/loreste/mako/runtime/certs/dev.key}"
+if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
+  echo "SKIP tls: missing dev certs at $TLS_CERT"
+else
 "$MAKO" build examples/demo_backend.mko -o /tmp/leba_tls_origin
 /tmp/leba_tls_origin "$TLS_ORIGIN_PORT" tlsapi >/tmp/leba_tls_origin.log 2>&1 &
 TLS_ORIGIN_PID=$!
@@ -214,19 +224,37 @@ sleep 0.2
 TLS_PROTOS="http/1.1,h2"
 if [[ -n "${MAKO_QUICHE_ROOT:-}" ]] || [[ -d /Users/loreste/mako/runtime/third_party/quiche/target/release ]]; then
   export MAKO_QUICHE_ROOT="${MAKO_QUICHE_ROOT:-/Users/loreste/mako/runtime/third_party/quiche}"
-  TLS_PROTOS="http/1.1,h2,h3"
+  cat > /tmp/leba_tls_probe.conf <<EOF
+frontend web
+  bind $TLS_HTTP_PORT
+  mode http
+  tls_cert $TLS_CERT
+  tls_key $TLS_KEY
+  protocols http/1.1,h2,h3
+  default_backend api
+frontend stats
+  bind $TLS_STATS_PORT
+  mode stats
+  auth admin:adversarial-pass:admin
+backend api
+  server api1 127.0.0.1:$TLS_ORIGIN_PORT weight 1 no_check
+EOF
+  if ./leba doctor /tmp/leba_tls_probe.conf 2>/dev/null | grep -q "Result: PASS"; then
+    TLS_PROTOS="http/1.1,h2,h3"
+  fi
 fi
 cat > /tmp/leba_tls.conf <<EOF
 frontend web
   bind $TLS_HTTP_PORT
   mode http
-  tls_cert /Users/loreste/mako/runtime/certs/dev.crt
-  tls_key /Users/loreste/mako/runtime/certs/dev.key
+  tls_cert $TLS_CERT
+  tls_key $TLS_KEY
   protocols $TLS_PROTOS
   default_backend api
 frontend stats
   bind $TLS_STATS_PORT
   mode stats
+  auth admin:adversarial-pass:admin
 backend api
   server api1 127.0.0.1:$TLS_ORIGIN_PORT weight 1 no_check
 EOF
@@ -271,10 +299,13 @@ H3EOF
     echo "tls h3 skipped (quiche client build failed)"
   fi
 fi
+# Do not wait for -n budget: H1/H2/H3 checks may use far fewer than TLS_MAX.
+kill "$TLS_LB_PID" 2>/dev/null || true
 wait "$TLS_LB_PID" 2>/dev/null || true
 kill "$TLS_ORIGIN_PID" 2>/dev/null || true
 wait "$TLS_ORIGIN_PID" 2>/dev/null || true
 grep -q "event=listener_bound frontend=web" /tmp/leba_tls.log
+fi  # TLS certs present
 
 echo "== tcp-only database frontend =="
 /tmp/leba_tcp_echo "$TCP_ORIGIN_PORT" db1 >/tmp/leba_tcp_only_db1.log 2>&1 &
@@ -284,6 +315,7 @@ cat > /tmp/leba_tcp_only.conf <<EOF
 frontend stats
   bind $TCP_STATS_PORT
   mode stats
+  auth admin:adversarial-pass:admin
 frontend db
   bind $TCP_DB_PORT
   mode tcp
@@ -347,14 +379,14 @@ unauth=$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18404/stats)
 [[ "$unauth" == "401" ]]
 unauth_html=$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18404/)
 [[ "$unauth_html" == "401" ]]
-sz=$(curl -sS -u admin:leba http://127.0.0.1:18404/ | wc -c | tr -d ' ')
+sz=$(curl -sS -u admin:s3cure-dev-0nly! http://127.0.0.1:18404/ | wc -c | tr -d ' ')
 echo "admin html bytes=$sz"
 [[ "$sz" -gt 5000 ]]
 
 # JSON has routes/acls
 for attempt in 1 2 3 4 5; do
-  curl -sS -u admin:leba http://127.0.0.1:18404/stats >/tmp/leba_stats.json || true
-  if python3 -c "import sys,json;d=json.load(open('/tmp/leba_stats.json'));assert 'routes' in d and 'acls' in d and d['version']=='0.4.0'" 2>/tmp/leba_stats_err.txt; then
+  curl -sS -u admin:s3cure-dev-0nly! http://127.0.0.1:18404/stats >/tmp/leba_stats.json || true
+  if python3 -c "import sys,json;d=json.load(open('/tmp/leba_stats.json'));assert 'routes' in d and 'acls' in d and d['version']=='0.14.1'" 2>/tmp/leba_stats_err.txt; then
     break
   fi
   if [[ "$attempt" == "5" ]]; then
@@ -367,14 +399,14 @@ for attempt in 1 2 3 4 5; do
 done
 
 # CLI can target a NAT/public admin address through env defaults
-LEBA_ADMIN_ADDR=http://127.0.0.1:18404/admin LEBA_ADMIN_AUTH=admin:leba ./leba admin servers | grep -q '"servers"'
-LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:leba ./leba admin reload-servers | grep -q '"action":"reload-servers"'
-LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=viewer:leba-view ./leba admin stats | grep -q '"version":"0.4.0"'
-viewer_drain=$(curl -sS -u viewer:leba-view -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18404/admin/drain/api/api1)
+LEBA_ADMIN_ADDR=http://127.0.0.1:18404/admin LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin servers | grep -q '"servers"'
+LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin reload-servers | grep -q '"action":"reload-servers"'
+LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=viewer:v1ew-dev-0nly! ./leba admin stats | grep -q '"version":"0.14.1"'
+viewer_drain=$(curl -sS -u viewer:v1ew-dev-0nly! -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18404/admin/drain/api/api1)
 [[ "$viewer_drain" == "403" ]]
 for attempt in 1 2 3 4 5; do
-  LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:leba ./leba admin stats >/tmp/leba_cli_stats.json || true
-  if python3 -c "import json;d=json.load(open('/tmp/leba_cli_stats.json'));assert d['version']=='0.4.0'" 2>/tmp/leba_cli_stats_err.txt; then
+  LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin stats >/tmp/leba_cli_stats.json || true
+  if python3 -c "import json;d=json.load(open('/tmp/leba_cli_stats.json'));assert d['version']=='0.14.1'" 2>/tmp/leba_cli_stats_err.txt; then
     break
   fi
   if [[ "$attempt" == "5" ]]; then
@@ -387,10 +419,10 @@ for attempt in 1 2 3 4 5; do
 done
 
 # Prometheus endpoint is scrapeable
-curl -sS -u admin:leba http://127.0.0.1:18404/metrics | grep -q '^leba_requests_total '
+curl -sS -u admin:s3cure-dev-0nly! http://127.0.0.1:18404/metrics | grep -q '^leba_requests_total '
 
 # State-changing admin actions require POST.
-get_mutation=$(curl -sS -u admin:leba -o /dev/null -w "%{http_code}" http://127.0.0.1:18404/admin/drain/api/api1)
+get_mutation=$(curl -sS -u admin:s3cure-dev-0nly! -o /dev/null -w "%{http_code}" http://127.0.0.1:18404/admin/drain/api/api1)
 [[ "$get_mutation" == "405" ]]
 sleep 0.1
 grep -q 'event=admin_audit .*user="viewer".*role="viewer".*status=403.*outcome=forbidden' /tmp/leba_adv.log
@@ -409,7 +441,7 @@ sleep 0.2
 grep -q "trace=${TRACE_ID}" /tmp/leba_adv.log
 
 # drain then traffic only to other server
-LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:leba ./leba admin drain api api1 >/dev/null
+LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin drain api api1 >/dev/null
 body=$(curl -sS http://127.0.0.1:18080/api/adv)
 echo "after drain: $body"
 echo "$body" | grep -q api2
@@ -424,7 +456,7 @@ grep -q 'event=request_rejected reason=acl_denied' /tmp/leba_adv.log
 curl -sS http://127.0.0.1:18404/readyz | grep -q '"ready":true'
 
 # drain all api servers → still may serve web; drain both api, hit api path → 502 possible
-LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:leba ./leba admin drain api api2 >/dev/null
+LEBA_ADMIN_ADDR=127.0.0.1:18404 LEBA_ADMIN_AUTH=admin:s3cure-dev-0nly! ./leba admin drain api api2 >/dev/null
 code2=$(curl -sS -o /tmp/leba_502.txt -w "%{http_code}" http://127.0.0.1:18080/api/gone || true)
 echo "both api drained status=$code2 body=$(cat /tmp/leba_502.txt)"
 # accept 502 bad gateway when no eligible upstream

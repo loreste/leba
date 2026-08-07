@@ -3651,7 +3651,10 @@ fn prepare_ws_dispatch(
         d.stick_peer_line = peer_line
         return d
     }
-    let s = servers[si]
+    // Own hop fields before maxconn reservation clones the server array.
+    let up_host = own_string(servers[si].host)
+    let up_port = servers[si].port
+    let up_pool = servers[si].pool
     let mut timeout_ms = be.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
@@ -3668,14 +3671,14 @@ fn prepare_ws_dispatch(
         trace_id: "",
         span_id: "",
         orig_host: host,
-        up_host: s.host,
-        up_port: s.port,
-        up_pool: s.pool,
+        up_host: up_host,
+        up_port: up_port,
+        up_pool: up_pool,
         timeout_ms: timeout_ms,
         retries: be.retries,
         server_idx: si,
         access_log: fe.access_log,
-        access_log_file: fe.access_log_file,
+        access_log_file: own_string(fe.access_log_file),
         err: 0,
         denied: 0,
         rate_limited: 0,
@@ -3939,16 +3942,15 @@ fn worker_ws_tls_upstream(
     return 0
 }
 
-fn prepare_tcp_dispatch(
+// Fail closed TCP dispatch: hand back owned clones once (never stash arrays
+// into a prebuilt empty Dispatch — free-analysis free-aliases that pattern).
+fn tcp_dispatch_fail(
     c: int,
     fe: Frontend,
-    backends: []Backend,
-    servers: []Server
+    srv_list: []Server,
+    be_list: []Backend
 ) -> Dispatch {
-    let mut srv_list = server_array_clone(servers)
-    let mut be_list = backend_array_clone(backends)
-    let rate_list = make([]RateBucket, 0, 0)
-    let empty = Dispatch {
+    return Dispatch {
         need_worker: 0,
         c: c,
         method: "TCP",
@@ -3961,12 +3963,12 @@ fn prepare_tcp_dispatch(
         orig_host: "",
         up_host: "",
         up_port: 0,
-        up_pool: -1,
+        up_pool: 0 - 1,
         timeout_ms: 30000,
         retries: 0,
-        server_idx: -1,
+        server_idx: 0 - 1,
         access_log: fe.access_log,
-        access_log_file: fe.access_log_file,
+        access_log_file: own_string(fe.access_log_file),
         err: 1,
         denied: 0,
         rate_limited: 0,
@@ -3974,18 +3976,26 @@ fn prepare_tcp_dispatch(
         bytes_in: 0,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list,
+        buckets: make([]RateBucket, 0, 0),
         stick_table: make(map[string]string),
-        stick_count: 0,
+        stick_count: 0
     }
+}
+
+fn prepare_tcp_dispatch(
+    c: int,
+    fe: Frontend,
+    backends: []Backend,
+    servers: []Server
+) -> Dispatch {
+    // Deep-own at entry; main always adopts td.servers / td.backends.
+    let mut srv_list = server_array_clone(servers)
+    let mut be_list = backend_array_clone(backends)
 
     if frontend_at_maxconn(srv_list, fe) == 1 {
         log_proxy_reject("frontend_maxconn", "TCP", "", "", "status=503")
         let _ = tcp_close(c)
-        let mut d0 = empty
-        d0.servers = srv_list
-        d0.backends = be_list
-        return d0
+        return tcp_dispatch_fail(c, fe, srv_list, be_list)
     }
 
     let bi = find_backend(be_list, fe.backend)
@@ -3995,13 +4005,10 @@ fn prepare_tcp_dispatch(
         builder_write(detail, fe.backend)
         log_proxy_reject("backend_missing", "TCP", "", "", builder_string(detail))
         let _ = tcp_close(c)
-        let mut d1 = empty
-        d1.servers = srv_list
-        d1.backends = be_list
-        return d1
+        return tcp_dispatch_fail(c, fe, srv_list, be_list)
     }
 
-    let mut be = be_list[bi]
+    let mut be = backend_clone(be_list[bi])
     if backend_at_maxconn(srv_list, be) == 1 {
         let mut detail2 = str_builder()
         builder_write(detail2, "status=503 backend=")
@@ -4010,10 +4017,7 @@ fn prepare_tcp_dispatch(
         builder_write(detail2, int_to_string(be.maxconn))
         log_proxy_reject("backend_maxconn", "TCP", "", "", builder_string(detail2))
         let _ = tcp_close(c)
-        let mut d2 = empty
-        d2.servers = srv_list
-        d2.backends = be_list
-        return d2
+        return tcp_dispatch_fail(c, fe, srv_list, be_list)
     }
 
     let mut initial_data = ""
@@ -4037,24 +4041,26 @@ fn prepare_tcp_dispatch(
     if be.rr_idx > 1000000000 {
         be.rr_idx = 0
     }
-    be_list[bi] = be
+    be_list[bi] = backend_clone(be)
     if si < 0 {
         let mut detail3 = str_builder()
         builder_write(detail3, "status=502 backend=")
         builder_write(detail3, be.name)
         log_proxy_reject("no_server", "TCP", "", "", builder_string(detail3))
         let _ = tcp_close(c)
-        let mut d3 = empty
-        d3.servers = srv_list
-        d3.backends = be_list
-        return d3
+        return tcp_dispatch_fail(c, fe, srv_list, be_list)
     }
 
-    let s = srv_list[si]
+    // Own hop fields before maxconn reservation clones the server array.
+    let up_host = own_string(srv_list[si].host)
+    let up_port = srv_list[si].port
+    let up_pool = srv_list[si].pool
     let mut idle_ms = be.connect_timeout_ms
     if idle_ms <= 0 {
         idle_ms = 30000
     }
+    let body_own = own_string(initial_data)
+    let body_len = str_len(body_own)
     srv_list = server_conn_delta(srv_list, si, 1)
 
     return Dispatch {
@@ -4062,30 +4068,30 @@ fn prepare_tcp_dispatch(
         c: c,
         method: "TCP",
         path: "",
-        body: initial_data,
+        body: body_own,
         cookie: "",
         traceparent: "",
         trace_id: "",
         span_id: "",
         orig_host: "",
-        up_host: s.host,
-        up_port: s.port,
-        up_pool: s.pool,
+        up_host: up_host,
+        up_port: up_port,
+        up_pool: up_pool,
         timeout_ms: idle_ms,
         retries: 0,
         server_idx: si,
         access_log: fe.access_log,
-        access_log_file: fe.access_log_file,
+        access_log_file: own_string(fe.access_log_file),
         err: 0,
         denied: 0,
         rate_limited: 0,
         bytes_out: 0,
-        bytes_in: str_len(initial_data),
+        bytes_in: body_len,
         servers: srv_list,
         backends: be_list,
-        buckets: rate_list,
+        buckets: make([]RateBucket, 0, 0),
         stick_table: make(map[string]string),
-        stick_count: 0,
+        stick_count: 0
     }
 }
 

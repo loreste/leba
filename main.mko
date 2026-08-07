@@ -316,7 +316,8 @@ fn main() {
     let mut udp_listeners = make([]UdpListener, 0, len(udp_fes))
     let mut ui_bind = 0
     while ui_bind < len(udp_fes) {
-        let usock = game_udp_bind_addr(udp_fes[ui_bind].bind_host, udp_fes[ui_bind].bind_port)
+        // Empty host → 0.0.0.0 (game_udp_bind_addr rejects empty strings).
+        let usock = game_udp_bind_addr(udp_bind_host(udp_fes[ui_bind].bind_host), udp_fes[ui_bind].bind_port)
         udp_listeners = append(udp_listeners, UdpListener {
             frontend: udp_fes[ui_bind],
             sock: usock,
@@ -1189,23 +1190,10 @@ fn main() {
                                     let tconn = tls_accept(h.tls_srv, c)
                                     let proto = tls_conn_alpn(tconn)
                                     let client_ip = tcp_peer_addr(tls_conn_fd(tconn))
-                                    let mut tr = ProxyResult {
-                                        err: 1,
-                                        bytes_out: 0,
-                                        denied: 0,
-                                        rate_limited: 0,
-                                        retries: 0,
-                                        server_idx: -1,
-                                        bytes_in: 0,
-                                        servers: servers,
-                                        backends: backends,
-                                        buckets: buckets,
-                                        stick_table: stick_table,
-                                        stick_count: stick_count,
-                                        stick_peer_line: ""
-                                    }
+                                    // Do NOT stash live servers/backends into a prebuilt ProxyResult —
+                                    // free-analysis frees them when the H1 path drops `tr` unused.
                                     if str_eq(proto, "h2") {
-                                        tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
+                                        let tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                         // Adversarial: only replace live arrays when dirty (never empty wipe).
                                         if tr.servers_dirty == 1 {
                                             servers = tr.servers
@@ -1263,30 +1251,31 @@ fn main() {
                                         // WSS: tunnel Upgrade: websocket off the accept thread
                                         if str_eq(raw_req.upgrade, "websocket") {
                                             let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
-                                            servers = dp.servers
-                                            backends = dp.backends
-                                            if dp.rate_dirty == 1 {
-                                                buckets = dp.buckets
-                                            } else {
-                                                let _ = dp.buckets
-                                            }
-                                            if dp.stick_dirty == 1 {
-                                                stick_table = stick_table_own(dp.stick_table)
-                                                stick_count = dp.stick_count
-                                            } else {
-                                                let _ = dp.stick_table
-                                            }
-                                            if not str_eq(dp.stick_peer_line, "") {
-                                                let nout_ws = peers_broadcast(peer_conns, dp.stick_peer_line)
-                                                st.peers_upserts_out = st.peers_upserts_out + nout_ws
-                                            }
-                                            if dp.waf_blocked == 1 {
-                                                st.waf_blocked = st.waf_blocked + 1
-                                            }
-                                            if dp.waf_detected == 1 {
-                                                st.waf_detected = st.waf_detected + 1
-                                            }
+                                            // Match plain HTTP: only adopt servers/backends when a worker hop reserved maxconn.
                                             if dp.need_worker == 0 {
+                                                let _ = dp.servers
+                                                let _ = dp.backends
+                                                if dp.rate_dirty == 1 {
+                                                    buckets = dp.buckets
+                                                } else {
+                                                    let _ = dp.buckets
+                                                }
+                                                if dp.stick_dirty == 1 {
+                                                    stick_table = stick_table_own(dp.stick_table)
+                                                    stick_count = dp.stick_count
+                                                } else {
+                                                    let _ = dp.stick_table
+                                                }
+                                                if not str_eq(dp.stick_peer_line, "") {
+                                                    let nout_ws = peers_broadcast(peer_conns, dp.stick_peer_line)
+                                                    st.peers_upserts_out = st.peers_upserts_out + nout_ws
+                                                }
+                                                if dp.waf_blocked == 1 {
+                                                    st.waf_blocked = st.waf_blocked + 1
+                                                }
+                                                if dp.waf_detected == 1 {
+                                                    st.waf_detected = st.waf_detected + 1
+                                                }
                                                 let mut code = 503
                                                 if raw_req.ok == 0 {
                                                     code = 400
@@ -1312,6 +1301,29 @@ fn main() {
                                                 st.last_req_ms = now_ms()
                                                 completed = completed + 1
                                             } else {
+                                                servers = dp.servers
+                                                backends = dp.backends
+                                                if dp.rate_dirty == 1 {
+                                                    buckets = dp.buckets
+                                                } else {
+                                                    let _ = dp.buckets
+                                                }
+                                                if dp.stick_dirty == 1 {
+                                                    stick_table = stick_table_own(dp.stick_table)
+                                                    stick_count = dp.stick_count
+                                                } else {
+                                                    let _ = dp.stick_table
+                                                }
+                                                if not str_eq(dp.stick_peer_line, "") {
+                                                    let nout_ws2 = peers_broadcast(peer_conns, dp.stick_peer_line)
+                                                    st.peers_upserts_out = st.peers_upserts_out + nout_ws2
+                                                }
+                                                if dp.waf_blocked == 1 {
+                                                    st.waf_blocked = st.waf_blocked + 1
+                                                }
+                                                if dp.waf_detected == 1 {
+                                                    st.waf_detected = st.waf_detected + 1
+                                                }
                                                 if chan_len(slots) <= 0 {
                                                     let _ = tls_http_respond_method(tconn, "GET", 503, "workers busy\n")
                                                     let _ = tls_conn_close(tconn)
@@ -1336,31 +1348,35 @@ fn main() {
                                         } else {
                                             // Dispatch TLS HTTP to worker (TlsConn ownership moves).
                                             let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
-                                            servers = dp_tls.servers
-                                            backends = dp_tls.backends
-                                            if dp_tls.rate_dirty == 1 {
-                                                buckets = dp_tls.buckets
-                                            } else {
-                                                let _ = dp_tls.buckets
-                                            }
-                                            if dp_tls.stick_dirty == 1 {
-                                                stick_table = stick_table_own(dp_tls.stick_table)
-                                                stick_count = dp_tls.stick_count
-                                            } else {
-                                                let _ = dp_tls.stick_table
-                                            }
-                                            if not str_eq(dp_tls.stick_peer_line, "") {
-                                                let nout_tls = peers_broadcast(peer_conns, dp_tls.stick_peer_line)
-                                                st.peers_upserts_out = st.peers_upserts_out + nout_tls
-                                            }
-                                            if dp_tls.waf_blocked == 1 {
-                                                st.waf_blocked = st.waf_blocked + 1
-                                            }
-                                            if dp_tls.waf_detected == 1 {
-                                                st.waf_detected = st.waf_detected + 1
-                                            }
                                             if dp_tls.need_worker == 0 {
+                                                // Early reject: empty servers must NOT wipe live accept-thread state.
+                                                let _ = dp_tls.servers
+                                                let _ = dp_tls.backends
+                                                if dp_tls.rate_dirty == 1 {
+                                                    buckets = dp_tls.buckets
+                                                } else {
+                                                    let _ = dp_tls.buckets
+                                                }
+                                                if dp_tls.stick_dirty == 1 {
+                                                    stick_table = stick_table_own(dp_tls.stick_table)
+                                                    stick_count = dp_tls.stick_count
+                                                } else {
+                                                    let _ = dp_tls.stick_table
+                                                }
+                                                if not str_eq(dp_tls.stick_peer_line, "") {
+                                                    let nout_tls0 = peers_broadcast(peer_conns, dp_tls.stick_peer_line)
+                                                    st.peers_upserts_out = st.peers_upserts_out + nout_tls0
+                                                }
+                                                if dp_tls.waf_blocked == 1 {
+                                                    st.waf_blocked = st.waf_blocked + 1
+                                                }
+                                                if dp_tls.waf_detected == 1 {
+                                                    st.waf_detected = st.waf_detected + 1
+                                                }
                                                 let mut tls_code = 503
+                                                if raw_req.ok == 0 {
+                                                    tls_code = 400
+                                                }
                                                 if dp_tls.denied == 1 {
                                                     tls_code = 403
                                                     st.denied = st.denied + 1
@@ -1376,6 +1392,29 @@ fn main() {
                                                 st.last_req_ms = now_ms()
                                                 completed = completed + 1
                                             } else {
+                                                servers = dp_tls.servers
+                                                backends = dp_tls.backends
+                                                if dp_tls.rate_dirty == 1 {
+                                                    buckets = dp_tls.buckets
+                                                } else {
+                                                    let _ = dp_tls.buckets
+                                                }
+                                                if dp_tls.stick_dirty == 1 {
+                                                    stick_table = stick_table_own(dp_tls.stick_table)
+                                                    stick_count = dp_tls.stick_count
+                                                } else {
+                                                    let _ = dp_tls.stick_table
+                                                }
+                                                if not str_eq(dp_tls.stick_peer_line, "") {
+                                                    let nout_tls = peers_broadcast(peer_conns, dp_tls.stick_peer_line)
+                                                    st.peers_upserts_out = st.peers_upserts_out + nout_tls
+                                                }
+                                                if dp_tls.waf_blocked == 1 {
+                                                    st.waf_blocked = st.waf_blocked + 1
+                                                }
+                                                if dp_tls.waf_detected == 1 {
+                                                    st.waf_detected = st.waf_detected + 1
+                                                }
                                                 if chan_len(slots) <= 0 {
                                                     let _ = tls_http_respond_method(tconn, raw_req.method, 503, "workers busy\n")
                                                     let _ = tls_conn_close(tconn)

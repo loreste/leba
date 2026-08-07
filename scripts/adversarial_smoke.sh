@@ -5,14 +5,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 MAKO="${MAKO_BIN:-/Users/loreste/mako/target/release/mako}"
 [[ -x "$MAKO" ]] || MAKO="$(command -v mako)"
+# Match Makefile/CI: native backend lacks HTTP builtins Leba needs.
+MAKO_BACKEND="${MAKO_BACKEND:-c}"
 
 echo "== unit tests =="
-"$MAKO" test leba_core1_test.mko
-"$MAKO" test leba_core2_test.mko
-"$MAKO" test leba_web_test.mko
+"$MAKO" test leba_core1_test.mko --backend "$MAKO_BACKEND"
+"$MAKO" test leba_core2_test.mko --backend "$MAKO_BACKEND"
+"$MAKO" test leba_web_test.mko --backend "$MAKO_BACKEND"
 
 echo "== build =="
-"$MAKO" build main.mko -o leba
+"$MAKO" build main.mko -o leba --backend "$MAKO_BACKEND"
 
 echo "== doctor sample must pass =="
 ./leba doctor configs/leba.conf | tee /tmp/leba_doc.txt
@@ -89,8 +91,8 @@ TLS_STATS_PORT=$((TCP_BASE + 15))
 for port in "$TCP_HTTP_PORT" "$TCP_STATS_PORT" "$TCP_DB_PORT" "$TCP_DB_RO_PORT" "$TCP_DB_ADMIN_PORT" "$TCP_ORIGIN_PORT" "$TCP_SIP_PORT" "$TCP_SIP_ORIGIN1_PORT" "$TCP_SIP_ORIGIN2_PORT" "$UDP_SIP_PORT" "$UDP_SIP_ORIGIN1_PORT" "$UDP_SIP_ORIGIN2_PORT" "$TLS_HTTP_PORT" "$TLS_ORIGIN_PORT" "$TLS_STATS_PORT"; do
   for p in $(lsof -ti :$port 2>/dev/null || true); do kill "$p" 2>/dev/null || true; done
 done
-"$MAKO" build examples/tcp_echo.mko -o /tmp/leba_tcp_echo
-"$MAKO" build examples/udp_echo.mko -o /tmp/leba_udp_echo
+"$MAKO" build examples/tcp_echo.mko -o /tmp/leba_tcp_echo --backend "$MAKO_BACKEND"
+"$MAKO" build examples/udp_echo.mko -o /tmp/leba_udp_echo --backend "$MAKO_BACKEND"
 /tmp/leba_tcp_echo "$TCP_ORIGIN_PORT" db1 >/tmp/leba_tcp_echo.log 2>&1 &
 TCP_ORIGIN_PID=$!
 /tmp/leba_tcp_echo "$TCP_SIP_ORIGIN1_PORT" sip1 >/tmp/leba_sip1.log 2>&1 &
@@ -217,7 +219,7 @@ TLS_KEY="${LEBA_DEV_TLS_KEY:-/Users/loreste/mako/runtime/certs/dev.key}"
 if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
   echo "SKIP tls: missing dev certs at $TLS_CERT"
 else
-"$MAKO" build examples/demo_backend.mko -o /tmp/leba_tls_origin
+"$MAKO" build examples/demo_backend.mko -o /tmp/leba_tls_origin --backend "$MAKO_BACKEND"
 /tmp/leba_tls_origin "$TLS_ORIGIN_PORT" tlsapi >/tmp/leba_tls_origin.log 2>&1 &
 TLS_ORIGIN_PID=$!
 sleep 0.2
@@ -290,7 +292,7 @@ fn main() {
 }
 H3EOF
   sed -i.bak "s/PORT/$TLS_HTTP_PORT/" /tmp/leba_h3_smoke_client.mko
-  if "$MAKO" build /tmp/leba_h3_smoke_client.mko -o /tmp/leba_h3_smoke_client >/tmp/leba_h3_build.log 2>&1; then
+  if "$MAKO" build /tmp/leba_h3_smoke_client.mko -o /tmp/leba_h3_smoke_client --backend "$MAKO_BACKEND" >/tmp/leba_h3_build.log 2>&1; then
     tls_h3_body=$(/tmp/leba_h3_smoke_client 2>/dev/null || true)
     echo "tls h3 body=$tls_h3_body"
     [[ "$tls_h3_body" == h3:200* ]]
@@ -346,7 +348,7 @@ for port in 18080 18404 19001 19002 19011 19012 19021; do
   for p in $(lsof -ti :$port 2>/dev/null || true); do kill "$p" 2>/dev/null || true; done
 done
 sleep 0.2
-"$MAKO" build examples/demo_backend.mko -o /tmp/leba_origin
+"$MAKO" build examples/demo_backend.mko -o /tmp/leba_origin --backend "$MAKO_BACKEND"
 /tmp/leba_origin 19001 api1 >/dev/null 2>&1 &
 /tmp/leba_origin 19002 api2 >/dev/null 2>&1 &
 /tmp/leba_origin 19011 web1 >/dev/null 2>&1 &

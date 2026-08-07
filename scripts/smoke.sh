@@ -13,21 +13,22 @@ if [[ -z "$MAKO_BIN" ]]; then
   fi
 fi
 
-echo "== using $MAKO_BIN =="
+MAKO_BACKEND="${MAKO_BACKEND:-c}"
+echo "== using $MAKO_BIN (backend=$MAKO_BACKEND) =="
 "$MAKO_BIN" version
 
 echo "== unit tests =="
 # Split suites: `mako test .` can hit C redefinition / codegen panics.
-"$MAKO_BIN" test leba_core1_test.mko
-"$MAKO_BIN" test leba_core2_test.mko
-"$MAKO_BIN" test leba_web_test.mko
+"$MAKO_BIN" test leba_core1_test.mko --backend "$MAKO_BACKEND"
+"$MAKO_BIN" test leba_core2_test.mko --backend "$MAKO_BACKEND"
+"$MAKO_BIN" test leba_web_test.mko --backend "$MAKO_BACKEND"
 
 echo "== config check =="
-"$MAKO_BIN" build main.mko -o /tmp/leba
+"$MAKO_BIN" build main.mko -o /tmp/leba --backend "$MAKO_BACKEND"
 /tmp/leba check configs/leba.conf
 
 echo "== start demo backends =="
-"$MAKO_BIN" build examples/demo_backend.mko -o /tmp/leba_origin
+"$MAKO_BIN" build examples/demo_backend.mko -o /tmp/leba_origin --backend "$MAKO_BACKEND"
 /tmp/leba_origin 19001 api1 &
 P1=$!
 /tmp/leba_origin 19002 api2 &

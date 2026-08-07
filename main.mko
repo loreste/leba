@@ -724,9 +724,28 @@ fn main() {
                 }
             }
             if len(pending_clients) > 0 {
+                // Concurrency: when no worker slots, do NOT rebuild/clone the whole
+                // pending array every tick (O(n) free-analysis clones → meltdown).
+                // Only process when we can kick, or when something may have timed out.
+                let nowp = now_ms()
+                let mut need_pending_scan = 0
+                if chan_len(slots) > 0 {
+                    need_pending_scan = 1
+                } else {
+                    // Cheap timeout probe: scan deadlines without cloning.
+                    let mut ti = 0
+                    while ti < len(pending_clients) {
+                        if nowp > pending_clients[ti].deadline_ms {
+                            need_pending_scan = 1
+                            ti = len(pending_clients)
+                        } else {
+                            ti = ti + 1
+                        }
+                    }
+                }
+                if need_pending_scan == 1 {
                 let mut next_pending = make([]PendingClient, 0, pending_limit)
                 let mut pi = 0
-                let nowp = now_ms()
                 while pi < len(pending_clients) {
                     let pc = pending_clients[pi]
                     if nowp > pc.deadline_ms {
@@ -735,8 +754,20 @@ fn main() {
                     } else {
                         if pc.kind == 2 {
                             if chan_len(slots) <= 0 {
-                                // Clone: pending array rebuild must not free-alias live slots.
-                                next_pending = append(next_pending, pending_client_clone(pc))
+                                // Move without deep-clone of buffer when possible (empty buffer common).
+                                if str_eq(pc.buffer, "") {
+                                    next_pending = append(next_pending, PendingClient {
+                                        fd: pc.fd,
+                                        kind: pc.kind,
+                                        frontend_idx: pc.frontend_idx,
+                                        deadline_ms: pc.deadline_ms,
+                                        buffer: "",
+                                        ka_count: pc.ka_count,
+                                        frontend_name: own_string(pc.frontend_name)
+                                    })
+                                } else {
+                                    next_pending = append(next_pending, pending_client_clone(pc))
+                                }
                                 pi = pi + 1
                                 continue
                             }
@@ -1073,6 +1104,7 @@ fn main() {
                     pi = pi + 1
                 }
                 pending_clients = next_pending
+                } // need_pending_scan
             }
             // Short poll when work is in flight — never 0ms (busy-spin starves crew workers).
             let mut wait_ms = 5
@@ -1660,11 +1692,18 @@ fn main() {
                                                 log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")
                                                 let _ = tcp_close(c)
                                             } else {
+                                                let mut pend_ms = d.timeout_client_ms
+                                                if pend_ms <= 0 {
+                                                    pend_ms = 30000
+                                                }
+                                                if pend_ms < 5000 {
+                                                    pend_ms = 5000
+                                                }
                                                 pending_clients = append(pending_clients, PendingClient {
                                                     fd: c,
                                                     kind: 2,
                                                     frontend_idx: hi_match,
-                                                    deadline_ms: now_ms() + 3000,
+                                                    deadline_ms: now_ms() + pend_ms,
                                                     buffer: "",
                                                     ka_count: 0,
                                                     frontend_name: h.frontend.name

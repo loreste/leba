@@ -3575,7 +3575,13 @@ fn worker_fast_http(
         let body = req.body
         let client_ka = client_wants_keepalive(req.version, req.connection)
         let traceparent = proxy_traceparent(req.traceparent, access_log)
-        let headers = build_upstream_headers(req.host, req.cookie, traceparent, "")
+        // Match full prepare path: forward browser upload / auth headers.
+        let mut req_extra = ""
+        if not str_eq(req.authorization, "") {
+            req_extra = "Authorization: " + req.authorization + "\r\n"
+        }
+        req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
+        let headers = build_upstream_headers(req.host, req.cookie, traceparent, req_extra)
         let mut hhb = str_builder()
         builder_write(hhb, up_host)
         let hop = RetryHop {
@@ -3586,7 +3592,7 @@ fn worker_fast_http(
         }
         let res = try_upstream_hop(
             method, path, body, hop, timeout_ms, headers, "",
-            req.cookie, traceparent, req.host, ""
+            req.cookie, traceparent, req.host, req_extra
         )
         total_retries = total_retries + res.retries
         let mut ka = 0

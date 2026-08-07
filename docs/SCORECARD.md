@@ -40,8 +40,11 @@ wrk -t4 -c40 -d5s --latency http://127.0.0.1:<nginx-proxy>/
 | **Keep-alive RPS** | ~24k | **~72k** | ~59k | ~48–62k | ~47k |
 | **Connection: close RPS** | ~14k | ~8–25k | lower* | lower* | — |
 
-\* Connection: close burns ephemeral ports / TIME_WAIT on localhost; prefer KA for concurrency claims.  
-At KA c=200 vs nginx (same host): Leba **~62k** vs nginx **~8k** (nginx showed many non-2xx under that burst).
+Connection: close also scales (workers 64, post pending-queue fix):
+
+| Mode | c=4 | c=40 | c=100 |
+|------|-----|------|-------|
+| **CL RPS** | ~14k | **~27k** | **~27k** |
 
 **Config for high concurrency:**
 

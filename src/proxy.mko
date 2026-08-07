@@ -3470,6 +3470,175 @@ fn worker_raw_upstream(
     return err
 }
 
+// Blocking-ish request reader for fast-path workers (socket has timeout set).
+fn raw_read_http_request(fd: int, max_bytes: int) -> string {
+    let mut b = str_builder()
+    let mut reads = 0
+    while reads < 128 {
+        let chunk = tcp_read(fd)
+        if str_eq(chunk, "") {
+            break
+        }
+        builder_write(b, chunk)
+        let raw = builder_string(b)
+        if max_bytes > 0 {
+            if str_len(raw) > max_bytes {
+                return raw
+            }
+        }
+        if raw_request_complete(raw, max_bytes) == 1 {
+            return raw
+        }
+        // Rebuild builder with owned partial (builder_string may share).
+        b = str_builder()
+        builder_write(b, raw)
+        reads = reads + 1
+    }
+    return builder_string(b)
+}
+
+// Fast path worker: accept handed fd + fixed upstream. Loops keep-alive on this
+// thread so KA requests never re-enter the accept loop (nginx-style).
+fn worker_fast_http(
+    c: int,
+    up_host: string,
+    up_port: int,
+    up_pool: int,
+    timeout_ms: int,
+    access_log: int,
+    access_log_file: string,
+    server_idx: int,
+    reserved: int,
+    frontend_idx: int,
+    ka_count: int,
+    initial_raw: string,
+    slots: chan[int],
+    done: chan[(int, int, int, int, int, int, int, int, int, int)]
+) -> int {
+    let mut conn_si = 0 - 1
+    if reserved == 1 {
+        conn_si = server_idx
+    }
+    let _ = io_set_nonblocking(c, 0)
+    if timeout_ms > 0 {
+        let _ = tcp_set_timeout(c, timeout_ms)
+    }
+    let mut total_err = 0
+    let mut last_st = 0
+    let mut total_bytes = 0
+    let mut total_retries = 0
+    let mut nreq = ka_count
+    let mut raw = initial_raw
+    let max_ka = 1000
+    while nreq < max_ka {
+        if raw_request_complete(raw, 1048576) == 0 {
+            let mut b = str_builder()
+            builder_write(b, raw)
+            let mut reads = 0
+            while reads < 256 {
+                if raw_request_complete(raw, 1048576) == 1 {
+                    break
+                }
+                let chunk = tcp_read(c)
+                if str_eq(chunk, "") {
+                    break
+                }
+                builder_write(b, chunk)
+                raw = builder_string(b)
+                b = str_builder()
+                builder_write(b, raw)
+                if str_len(raw) > 1048576 {
+                    break
+                }
+                reads = reads + 1
+            }
+        }
+        if str_eq(raw, "") {
+            break
+        }
+        if raw_request_complete(raw, 1048576) == 0 {
+            let _ = raw_http_respond_full_ka(c, "GET", 400, "text/plain; charset=utf-8", "", "bad request\n", 0)
+            total_err = 1
+            last_st = 400
+            break
+        }
+        let req = parse_raw_request(raw)
+        raw = ""
+        if req.ok == 0 {
+            let _ = raw_http_respond_full_ka(c, "GET", 400, "text/plain; charset=utf-8", "", "bad request\n", 0)
+            total_err = 1
+            last_st = 400
+            break
+        }
+        let method = req.method
+        let path = req.path
+        let body = req.body
+        let client_ka = client_wants_keepalive(req.version, req.connection)
+        let traceparent = proxy_traceparent(req.traceparent, access_log)
+        let headers = build_upstream_headers(req.host, req.cookie, traceparent, "")
+        let mut hhb = str_builder()
+        builder_write(hhb, up_host)
+        let hop = RetryHop {
+            host: builder_string(hhb),
+            port: up_port,
+            pool: up_pool,
+            server_idx: server_idx
+        }
+        let res = try_upstream_hop(
+            method, path, body, hop, timeout_ms, headers, "",
+            req.cookie, traceparent, req.host, ""
+        )
+        total_retries = total_retries + res.retries
+        let mut ka = 0
+        if res.ok == 1 {
+            let mut st = res.status
+            if st <= 0 {
+                st = 200
+            }
+            last_st = st
+            total_bytes = total_bytes + res.bytes
+            let mut ct = res.content_type
+            if str_eq(ct, "") {
+                ct = guess_content_type(res.body)
+            }
+            if client_ka == 1 {
+                if nreq + 1 < max_ka {
+                    ka = 1
+                }
+            }
+            let _ = raw_http_respond_full_ka(c, method, st, ct, res.extra_headers, res.body, ka)
+            if access_log == 1 {
+                let rid = make_req_id()
+                let tid = traceparent_trace_id(traceparent)
+                let sid = traceparent_span_id(traceparent)
+                let line = access_log_line(method, path, st, up_host, int_to_string(server_idx), 0, res.bytes, rid, tid, sid)
+                print(line)
+                if not str_eq(access_log_file, "") {
+                    let _ = append_file(access_log_file, f"{line}\n")
+                }
+            }
+            nreq = nreq + 1
+            if ka == 0 {
+                break
+            }
+            // Next request on this connection.
+            continue
+        }
+        // Upstream failed — one 502 and close.
+        total_err = 1
+        last_st = 502
+        log_upstream_failure(method, path, up_host, up_port, res.status, res.retries)
+        let _ = raw_http_respond_full_ka(c, method, 502, "text/plain; charset=utf-8", "", "bad gateway\n", 0)
+        break
+    }
+    // Worker closes client after KA series (accept still owns accounting via done).
+    // D21 exception for fast path: worker is sole closer when ka loop ends.
+    let _ = tcp_close(c)
+    let _ = done.send((total_err, last_st, conn_si, server_idx, total_bytes, total_retries, 0 - 1, 0, frontend_idx, nreq))
+    let _ = slots.send(1)
+    return total_err
+}
+
 // WebSocket route pick only — never writes to the client (safe for TLS and plain).
 // On need_worker=0: check denied / rate_limited / err and respond with the right protocol.
 // TLS HTTP worker: runs upstream I/O on a crew worker instead of the accept thread.

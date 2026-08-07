@@ -1077,7 +1077,14 @@ fn TestUdpH3RebindHelpers() {
         tls: 0,
         tls_srv: tls_server_new("", ""),
         h3: 0,
-        h3_handle: -1
+        h3_handle: -1,
+        fast: 0,
+        fast_host: "",
+        fast_port: 0,
+        fast_pool: 0 - 1,
+        fast_timeout_ms: 5000,
+        fast_server_idx: 0 - 1,
+        fast_reserved: 0
     })
     let mut h3s = make([]H3Listener, 0, 1)
     h3s = append(h3s, H3Listener { frontend: a, handle: 42, fd: 7, frontend_idx: 0 })
@@ -1107,7 +1114,14 @@ fn TestFindHttpListenerByNameAndBind() {
         tls: 0,
         tls_srv: tls_server_new("", ""),
         h3: 0,
-        h3_handle: 0 - 1
+        h3_handle: 0 - 1,
+        fast: 0,
+        fast_host: "",
+        fast_port: 0,
+        fast_pool: 0 - 1,
+        fast_timeout_ms: 5000,
+        fast_server_idx: 0 - 1,
+        fast_reserved: 0
     })
     listeners = append(listeners, HttpListener {
         frontend: b,
@@ -1115,7 +1129,14 @@ fn TestFindHttpListenerByNameAndBind() {
         tls: 0,
         tls_srv: tls_server_new("", ""),
         h3: 0,
-        h3_handle: 0 - 1
+        h3_handle: 0 - 1,
+        fast: 0,
+        fast_host: "",
+        fast_port: 0,
+        fast_pool: 0 - 1,
+        fast_timeout_ms: 5000,
+        fast_server_idx: 0 - 1,
+        fast_reserved: 0
     })
     assert_eq(find_http_listener_by_name(listeners, "api"), 1)
     assert_eq(find_http_listener_idx(listeners, "web", "127.0.0.1", 80), 0)

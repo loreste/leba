@@ -225,6 +225,16 @@ struct HttpListener {
     tls_srv: TlsServer
     h3: int
     h3_handle: int
+    // Fast path: single-server, no ACL/stick/rate — accept only kicks worker.
+    // Worker owns read/parse/proxy so crew scales instead of serial accept work.
+    fast: int
+    fast_host: string
+    fast_port: int
+    fast_pool: int
+    fast_timeout_ms: int
+    fast_server_idx: int
+    // 1 = accept thread must +1/−1 maxconn on this server_idx.
+    fast_reserved: int
 }
 
 struct H3Listener {

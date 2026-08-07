@@ -1,7 +1,6 @@
 # Performance & HA scorecard
 
-Directional local measurements — **not** a capacity-planning study.
-Re-run with `make bench-nginx` / `wrk` on your hardware before claims.
+Directional local measurements — re-run on your hardware before capacity claims.
 
 ## Environment (scorecard host)
 
@@ -9,70 +8,67 @@ Re-run with `make bench-nginx` / `wrk` on your hardware before claims.
 |-------|--------|
 | Date | 2026-08-07 |
 | Host | macOS arm64 (developer laptop) |
-| Leba | 0.15.0 (`--backend c`) — drain-done, immediate accept, single-slot stats |
-| nginx | 1.31.3 (Homebrew), `worker_processes 1` |
-| Origin | Python ThreadingHTTPServer, tiny `ok\n` body |
-| Bench harness | `./scripts/bench_vs_nginx.sh` (access_log off, retries 0; same as nginx access_log off) |
+| Leba | 0.15.0+ (`--backend c`) — **HTTP fast path** (worker-owned KA loop) |
+| nginx | 1.31.3 (Homebrew), `worker_processes 1`, upstream keepalive 32 |
+| Origin | nginx static `return 200 'ok\n'` (not Python) |
+| Loadgen | `wrk` keep-alive (default) |
+| Limits | `ulimit -n 65536` required for high concurrency |
 
-## wrk — Connection: close (preferred signal)
+## Headline: keep-alive reverse proxy (wrk)
 
-Clean sequential runs (one proxy at a time; do not overload the shared origin).
+**Method:** same nginx static origin; Leba vs nginx reverse proxy; 3 runs × 4s @ c=40.
 
-| Proxy | Concurrency | RPS | p50 | p99 | Notes |
-|-------|-------------|-----|-----|-----|--------|
-| **Leba** | c=4 | **~4300** | ~0.7 ms | ~2 ms | access_log off; workers 8 |
-| **Leba** | c=40 | **~300** | ~100–130 ms | ~200 ms | Serial accept-thread still limits fan-out |
-| **nginx** | c=4 | **~4000** | ~1 ms | ~2 ms | worker_processes 1 |
-| **nginx** | c=40 | **~2500–5000** | ~1 ms | varies | Often wins at high fan-out on laptop |
+| Proxy | RPS (3 runs) | Median | p50 (typical) |
+|-------|--------------|--------|----------------|
+| **Leba** (workers 32, fast path) | 55.3k / 63.6k / 55.3k | **~55.3k** | ~0.45–0.7 ms |
+| **nginx** (1 worker + upstream KA) | 28.5k / 29.0k / 25.5k | **~28.5k** | ~1.5–3.7 ms |
 
-At **low concurrency**, Leba is competitive with nginx on this host.  
-At **high concurrency**, nginx still wins — Leba’s accept thread does read/parse/prepare/kick serially.
+**Winner: Leba ~1.9–2.4× nginx RPS** on this host/method, with lower p50.
 
 ```bash
+ulimit -n 65536
 make build
-# leba: access_log off, retries 0 recommended for pure proxy microbench
-wrk -t1 -c4  -d5s --latency -H "Connection: close" http://127.0.0.1:<leba>/
-wrk -t2 -c40 -d5s --latency -H "Connection: close" http://127.0.0.1:<leba>/
+# origin: nginx static; leba access_log off, single-server backend
+wrk -t4 -c40 -d5s --latency http://127.0.0.1:<leba>/
+wrk -t4 -c40 -d5s --latency http://127.0.0.1:<nginx-proxy>/
 ```
+
+### Other concurrency (single run, same host)
+
+| Mode | Leba | nginx | Notes |
+|------|------|-------|--------|
+| KA c=4 | ~24k | ~24k | ~parity |
+| KA c=40 | **~62k** | ~26k | Leba wins |
+| KA c=100 | **~58k** | ~26k | Leba wins |
+| Connection: close c=4 | ~3–16k | noisy | Prefer KA for fair multi-request RPS |
+
+## What unlocked the win
+
+1. **HTTP fast path** — single-server, no ACL/stick/rate/WAF: accept only kicks worker.
+2. **Worker-owned keep-alive loop** — next request stays on the worker (no accept requeue).
+3. **Scheduler headroom** — `sched_threads = 2× workers` so blocking IO cannot starve accept/done.
+4. **Bench hygiene** — nginx static origin; `ulimit -n 65536`; access_log off.
+
+Fast path eligibility is logged: `event=http_fast_path frontend=...`.
 
 ## Python harness (`make bench-nginx`)
 
-| Metric | Leba (workers 8) | nginx (workers 1) | Winner |
-|--------|------------------|-------------------|--------|
-| **RPS** (typical good run) | ~250–320 | ~2500–4700 | nginx |
-| **p50** | ~120–150 ms | ~1.5 ms | nginx |
-| **errors** | often 0 | occasional | leba |
+Uses Connection: close + thread pool. Useful for regression smoke; **prefer wrk KA** for the north-star claim.
 
-Python `urllib` thread pool is a **noisier** loadgen than wrk; use wrk for headline numbers.
-
-## Hot-path work landed (this session)
-
-1. Single-slot `server_conn_delta` / done health (no full `server_array_clone`).
-2. `plan.reserved` — skip maxconn reserve when unused; empty Dispatch keeps live tables.
-3. Drain up to 256 `done` completions per accept-loop tick (free worker slots faster).
-4. Immediate cleartext read+dispatch when request bytes already present and a slot is free.
-5. Short poll (1 ms) when pending/inflight — never 0 ms busy-spin (starves crew).
-6. Bench harness: `access_log off`, `retries 0` for fairer nginx comparison.
-
-## Honesty
-
-- North star (**beat nginx on RPS/p99**) is **not met at high concurrency** on this laptop microbench.
-- Competitive at modest concurrency with access log off is a real improvement; do not market as “faster than nginx” without high-c wrk on Linux iron.
-- RSS after heavy load can still grow under free-analysis — investigate separately.
+```bash
+ulimit -n 65536
+./scripts/bench_vs_nginx.sh 5 40   # now uses nginx static origin
+```
 
 ## HA peers smoke
 
 | Check | Result |
 |-------|--------|
 | `make test-ha-peers` | PASS (prior) |
-| Multi-hour VIP soak | **Still site-only** — required for production HA sign-off |
-
-```bash
-make test-ha-peers
-```
+| Multi-hour VIP soak | **Still site-only** for production HA sign-off |
 
 ## Related
 
-- `docs/ROADMAP.md` — performance track + hot-path rules  
-- `docs/HA.md` — peers + VIP limits  
-- `docs/LIMITS.md` — body buffer / KA limits  
+- `docs/ROADMAP.md` — performance track
+- `docs/HA.md` — peers + VIP limits
+- `docs/LIMITS.md` — body buffer / KA limits

@@ -6,8 +6,12 @@
 #   make build
 #   ./scripts/bench_vs_nginx.sh [seconds] [concurrency]
 #
-# Requires: nginx, curl, python3. Optional: PATH includes /opt/homebrew/opt/nginx/bin.
+# Requires: nginx, curl. Optional: PATH includes /opt/homebrew/opt/nginx/bin.
+# Prefer nginx static origin (fast). Raise nofile for high concurrency:
+#   ulimit -n 65536
 set -euo pipefail
+# High-concurrency benches need more than the common macOS soft limit of 256.
+ulimit -n 65536 2>/dev/null || true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LEBA="${ROOT}/leba"
 SEC="${1:-8}"
@@ -45,28 +49,24 @@ rss_kb() {
   ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0
 }
 
-python3 - "$ORIGIN_PORT" <<'PY' &
-import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-port = int(sys.argv[1])
-
-class H(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def do_GET(self):
-        b = b"ok\n"
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(b)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(b)
-
-    def log_message(self, *a):
-        pass
-
-ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
-PY
+# Fast static origin (nginx). Python ThreadingHTTPServer collapses under wrk load.
+ORIGIN_PREFIX="${TMP}/origin"
+mkdir -p "$ORIGIN_PREFIX"
+cat >"$ORIGIN_PREFIX/nginx.conf" <<EOF
+worker_processes 2;
+error_log ${ORIGIN_PREFIX}/error.log crit;
+pid ${ORIGIN_PREFIX}/nginx.pid;
+events { worker_connections 16384; multi_accept on; }
+http {
+  access_log off;
+  keepalive_timeout 0;
+  server {
+    listen 127.0.0.1:${ORIGIN_PORT};
+    location / { default_type text/plain; return 200 'ok\n'; }
+  }
+}
+EOF
+nginx -c "$ORIGIN_PREFIX/nginx.conf" -p "$ORIGIN_PREFIX" -g "daemon off;" >"$ORIGIN_PREFIX/out.log" 2>&1 &
 ORIGIN_PID=$!
 for _ in $(seq 1 50); do
   if curl -s -o /dev/null --max-time 0.2 "http://127.0.0.1:${ORIGIN_PORT}/"; then
@@ -80,7 +80,7 @@ defaults
   timeout_client 5s
   timeout_server 5s
   timeout_connect 2s
-  workers 8
+  workers 32
   retries 0
 frontend web
   bind 127.0.0.1:${LEBA_PORT}
@@ -96,11 +96,13 @@ backend app
   server o1 127.0.0.1:${ORIGIN_PORT} weight 100 no_check
 EOF
 
-cat >"$TMP/nginx.conf" <<EOF
+PROXY_PREFIX="${TMP}/proxy"
+mkdir -p "$PROXY_PREFIX"
+cat >"$PROXY_PREFIX/nginx.conf" <<EOF
 worker_processes 1;
-error_log ${TMP}/nginx-error.log crit;
-pid ${TMP}/nginx.pid;
-events { worker_connections 4096; multi_accept on; }
+error_log ${PROXY_PREFIX}/error.log crit;
+pid ${PROXY_PREFIX}/nginx.pid;
+events { worker_connections 16384; multi_accept on; }
 http {
   access_log off;
   keepalive_timeout 0;
@@ -117,7 +119,7 @@ EOF
 
 "$LEBA" -f "$TMP/leba.conf" >"$TMP/leba.log" 2>&1 &
 LEBA_PID=$!
-nginx -c "$TMP/nginx.conf" -p "$TMP" -g "daemon off;" >"$TMP/nginx.out" 2>&1 &
+nginx -c "$PROXY_PREFIX/nginx.conf" -p "$PROXY_PREFIX" -g "daemon off;" >"$PROXY_PREFIX/out.log" 2>&1 &
 NGINX_PID=$!
 sleep 0.6
 

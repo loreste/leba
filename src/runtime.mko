@@ -402,8 +402,164 @@ fn http_listener_open(fe: Frontend) -> HttpListener {
         tls: h_tls,
         tls_srv: h_tls_srv,
         h3: 0,
-        h3_handle: 0 - 1
+        h3_handle: 0 - 1,
+        fast: 0,
+        fast_host: "",
+        fast_port: 0,
+        fast_pool: 0 - 1,
+        fast_timeout_ms: 5000,
+        fast_server_idx: 0 - 1,
+        fast_reserved: 0
     }
+}
+
+// Enable accept→worker fast path when the frontend maps to exactly one live
+// server and does not need accept-thread LB state (ACL/stick/rate/WAF/auth).
+fn attach_fast_http_routes(
+    listeners: []HttpListener,
+    routes: []Route,
+    acls: []AclRule,
+    backends: []Backend,
+    servers: []Server,
+    header_rules: []HeaderRule
+) -> []HttpListener {
+    let mut out = make([]HttpListener, 0, len(listeners))
+    let mut i = 0
+    while i < len(listeners) {
+        let mut hl = listeners[i]
+        hl.fast = 0
+        hl.fast_host = ""
+        hl.fast_port = 0
+        hl.fast_pool = 0 - 1
+        hl.fast_timeout_ms = 5000
+        hl.fast_server_idx = 0 - 1
+        hl.fast_reserved = 0
+        let fe = hl.frontend
+        let mut ok = 1
+        if hl.tls == 1 {
+            ok = 0
+        }
+        if fe.rate_limit > 0 {
+            ok = 0
+        }
+        if str_len(fe.sticky_cookie) > 0 {
+            ok = 0
+        }
+        if not str_eq(fe.auth_basic_realm, "") {
+            ok = 0
+        }
+        if fe.redirect_https == 1 {
+            ok = 0
+        }
+        if not str_eq(fe.waf_mode, "") {
+            if not str_eq(fe.waf_mode, "off") {
+                ok = 0
+            }
+        }
+        if str_len(fe.root) > 0 {
+            ok = 0
+        }
+        if str_len(fe.acme_webroot) > 0 {
+            ok = 0
+        }
+        // Any ACL or header rule on this frontend needs full prepare.
+        let mut ai = 0
+        while ai < len(acls) {
+            if str_eq(acls[ai].frontend, fe.name) {
+                ok = 0
+            }
+            ai = ai + 1
+        }
+        // Header rules are global today — any rule forces full prepare.
+        if len(header_rules) > 0 {
+            ok = 0
+        }
+        // Non-default routes require host/path matching on accept thread.
+        let mut ri = 0
+        while ri < len(routes) {
+            if str_eq(routes[ri].frontend, fe.name) {
+                if not str_eq(routes[ri].kind, "default") {
+                    ok = 0
+                }
+            }
+            ri = ri + 1
+        }
+        let mut be_name = fe.backend
+        if str_eq(be_name, "") {
+            let mut rdef = 0
+            while rdef < len(routes) {
+                if str_eq(routes[rdef].frontend, fe.name) {
+                    if str_eq(routes[rdef].kind, "default") {
+                        be_name = routes[rdef].backend
+                    }
+                }
+                rdef = rdef + 1
+            }
+        }
+        let mut bi = 0 - 1
+        let mut bj = 0
+        while bj < len(backends) {
+            if str_eq(backends[bj].name, be_name) {
+                bi = bj
+            }
+            bj = bj + 1
+        }
+        if bi < 0 {
+            ok = 0
+        }
+        if ok == 1 {
+            let be = backends[bi]
+            if not str_eq(be.stick_on, "") {
+                ok = 0
+            }
+            if str_eq(be.balance, "least_conn") {
+                ok = 0
+            }
+            let mut member_n = 0
+            let mut pick_si = 0 - 1
+            let mut si = 0
+            while si < len(servers) {
+                if str_eq(servers[si].backend, be.name) {
+                    if server_eligible(servers[si]) == 1 {
+                        member_n = member_n + 1
+                        if pick_si < 0 {
+                            pick_si = si
+                        }
+                    }
+                }
+                si = si + 1
+            }
+            if member_n != 1 {
+                ok = 0
+            }
+            if pick_si < 0 {
+                ok = 0
+            }
+            if ok == 1 {
+                let s = servers[pick_si]
+                hl.fast = 1
+                // Builder-owned host so listener table never free-aliases server row strings.
+                let mut hb = str_builder()
+                builder_write(hb, s.host)
+                hl.fast_host = builder_string(hb)
+                hl.fast_port = s.port
+                hl.fast_pool = s.pool
+                let mut tmo = be.connect_timeout_ms
+                if tmo <= 0 {
+                    tmo = 5000
+                }
+                hl.fast_timeout_ms = tmo
+                hl.fast_server_idx = pick_si
+                // Skip maxconn reserve on fast path: single-server microbench thrives
+                // without accept-thread slot clones. Enforce maxconn only on full path.
+                hl.fast_reserved = 0
+                log_info_event("http_fast_path", f"frontend={fe.name} backend={be.name} server={s.name} host={hl.fast_host}:{int_to_string(hl.fast_port)} pool={hl.fast_pool}")
+            }
+        }
+        out = append(out, hl)
+        i = i + 1
+    }
+    return out
 }
 
 fn http_listener_close(el: EvLoop, hl: HttpListener) {

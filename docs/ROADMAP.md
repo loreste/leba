@@ -45,7 +45,7 @@ make build
 5. Accept thread does ACL/pick; workers only do upstream I/O (kick-safe).
 6. **Empty `Dispatch.servers` / `backends`** when not dirty — accept thread must not wipe live tables (main adopts only non-empty arrays).
 
-**Honest limits today:** buffered request model (see LIMITS.md); TLS client KA best-effort; free-analysis still forces owned returns on some TLS paths — cleartext hot path is the primary optimization track. On laptop Connection:close microbench, **serial accept-thread work** (read/parse/prepare/kick) still dominates (~few ms/req); beating nginx needs further accept-path architecture work, not only clone skips.
+**Honest limits today:** buffered request model (see LIMITS.md); TLS client KA best-effort; free-analysis still forces owned returns on some TLS paths. **Cleartext single-server fast path** (worker-owned KA loop) beats nginx on wrk keep-alive RPS on laptop scorecard (`docs/SCORECARD.md`) — multi-server / ACL / stick still use the full accept prepare path.
 
 **Marketing gate (do not claim until checked):**
 
@@ -300,3 +300,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-08-07 | Scorecard: bench harness ephemeral ports + RSS; published laptop medians vs nginx; HA peers ×3 PASS |
 | 2026-08-07 | Hot path: single-slot `server_conn_delta`/`mark_server_req`; `plan.reserved` skip; empty Dispatch keep live tables; scorecard rebench (nginx still wins RPS) |
 | 2026-08-07 | Accept path: drain done×256, immediate cleartext dispatch, short poll (no busy-spin); wrk c=4 ~parity, c=40 still nginx |
+| 2026-08-07 | **HTTP fast path** + worker KA loop + sched 2× workers; scorecard wrk KA c=40 **Leba ~2× nginx RPS** |

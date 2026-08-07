@@ -287,6 +287,16 @@ fn raw_request_complete(raw: string, max_bytes: int) -> int {
     if cut < 0 {
         return 0
     }
+    // Speed: most GETs have no body — skip full http_parse when no CL/TE.
+    if not str_contains(raw, "Content-Length:") {
+        if not str_contains(raw, "content-length:") {
+            if not str_contains(raw, "Transfer-Encoding:") {
+                if not str_contains(raw, "transfer-encoding:") {
+                    return 1
+                }
+            }
+        }
+    }
     let skip = http_headers_end_skip(raw)
     let parsed = http_parse(raw)
     if http_parsed_chunked(parsed) == 1 {
@@ -544,6 +554,13 @@ fn raw_http_respond_full_ka(fd: int, method: string, status: int, content_type: 
 // Client wants keep-alive: HTTP/1.1 default yes unless Connection: close;
 // HTTP/1.0 default no unless Connection: keep-alive.
 fn client_wants_keepalive(version: string, connection: string) -> int {
+    // Speed: empty Connection is the common HTTP/1.1 case (wrk, most clients).
+    if str_eq(connection, "") {
+        if str_contains(version, "HTTP/1.0") {
+            return 0
+        }
+        return 1
+    }
     let conn_l = str_to_lower(connection)
     if str_contains(conn_l, "close") {
         return 0
@@ -861,17 +878,59 @@ fn raw_header(raw: string, name: string) -> string {
     return ""
 }
 
+// Direct "Content-Type:" value scan — no split/tolower of the whole block.
+fn content_type_scan(headers: string, needle: string) -> string {
+    let i = str_index(headers, needle)
+    if i < 0 {
+        return ""
+    }
+    let mut start = i + str_len(needle)
+    let mut sp = 0
+    while sp < 8 {
+        if start >= str_len(headers) {
+            break
+        }
+        let ch = substr(headers, start, start + 1)
+        if str_eq(ch, " ") {
+            start = start + 1
+            sp = sp + 1
+        } else {
+            if str_eq(ch, "\t") {
+                start = start + 1
+                sp = sp + 1
+            } else {
+                break
+            }
+        }
+    }
+    let rest = substr(headers, start, str_len(headers))
+    let cr = str_index(rest, "\r")
+    let lf = str_index(rest, "\n")
+    let mut end = str_len(rest)
+    if cr >= 0 {
+        end = cr
+        if lf >= 0 {
+            if lf < cr {
+                end = lf
+            }
+        }
+    } else {
+        if lf >= 0 {
+            end = lf
+        }
+    }
+    return own_string(substr(rest, 0, end))
+}
+
 fn content_type_from_header_block(headers: string) -> string {
     if str_eq(headers, "") {
         return ""
     }
-    let mut raw = str_builder()
-    builder_write(raw, "HTTP/1.1 200 OK\r\n")
-    builder_write(raw, headers)
-    if not str_contains(headers, "\r\n\r\n") {
-        builder_write(raw, "\r\n")
+    let ct = content_type_scan(headers, "Content-Type:")
+    if not str_eq(ct, "") {
+        return ct
     }
-    return raw_header(builder_string(raw), "Content-Type")
+    return content_type_scan(headers, "content-type:")
 }
 
 fn resolve_content_type(headers: string, body: string) -> string {
@@ -3350,13 +3409,43 @@ fn try_upstream_hop(
             let bdy = http_forward_body(fr)
             let uph = http_forward_headers(fr)
             let st = http_forward_status(fr)
+            // Speed: skip extract_pass_headers (split/tolower) when no Location/Set-Cookie/X-*.
+            let mut pass = ""
+            if not str_eq(uph, "") {
+                if str_contains(uph, "ocation:") {
+                    pass = extract_pass_headers(uph)
+                } else {
+                    if str_contains(uph, "et-Cookie:") {
+                        pass = extract_pass_headers(uph)
+                    } else {
+                        if str_contains(uph, "x-") {
+                            pass = extract_pass_headers(uph)
+                        } else {
+                            if str_contains(uph, "X-") {
+                                pass = extract_pass_headers(uph)
+                            }
+                        }
+                    }
+                }
+            }
+            if not str_eq(resp_extra_headers, "") {
+                pass = merge_response_extras(pass, resp_extra_headers)
+            }
+            let mut ct = ""
+            if str_contains(uph, "ontent-Type:") {
+                ct = content_type_from_header_block(uph)
+            } else {
+                if str_contains(uph, "ontent-type:") {
+                    ct = content_type_from_header_block(uph)
+                }
+            }
             res = FwdResult {
                 status: st,
                 body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
-                content_type: resolve_content_type(uph, bdy),
-                extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
+                content_type: ct,
+                extra_headers: pass
             }
             let reusable = upstream_connection_reusable(ok, st, uph)
             let _rel = tcp_pool_release(hop.pool, fd, reusable)
@@ -3582,10 +3671,9 @@ fn worker_fast_http(
         }
         req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
         let headers = build_upstream_headers(req.host, req.cookie, traceparent, req_extra)
-        let mut hhb = str_builder()
-        builder_write(hhb, up_host)
+        // up_host is stable for this worker job — no per-request clone.
         let hop = RetryHop {
-            host: builder_string(hhb),
+            host: up_host,
             port: up_port,
             pool: up_pool,
             server_idx: server_idx
@@ -3605,7 +3693,7 @@ fn worker_fast_http(
             total_bytes = total_bytes + res.bytes
             let mut ct = res.content_type
             if str_eq(ct, "") {
-                ct = guess_content_type(res.body)
+                ct = "text/plain; charset=utf-8"
             }
             if client_ka == 1 {
                 if nreq + 1 < max_ka {

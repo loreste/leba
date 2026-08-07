@@ -59,7 +59,9 @@ pid ${ORIGIN_PREFIX}/nginx.pid;
 events { worker_connections 16384; multi_accept on; }
 http {
   access_log off;
-  keepalive_timeout 0;
+  # Allow upstream KA from proxies (pool reuse). Timeout 0 kills fair reverse-proxy benches.
+  keepalive_timeout 65s;
+  keepalive_requests 10000;
   server {
     listen 127.0.0.1:${ORIGIN_PORT};
     location / { default_type text/plain; return 200 'ok\n'; }
@@ -80,6 +82,7 @@ defaults
   timeout_client 5s
   timeout_server 5s
   timeout_connect 2s
+  # KA holds one worker per client connection — size >= concurrency for low p99.
   workers 64
   retries 0
 frontend web
@@ -105,13 +108,16 @@ pid ${PROXY_PREFIX}/nginx.pid;
 events { worker_connections 16384; multi_accept on; }
 http {
   access_log off;
-  keepalive_timeout 0;
+  upstream origin {
+    server 127.0.0.1:${ORIGIN_PORT};
+    keepalive 64;
+  }
   server {
     listen 127.0.0.1:${NGINX_PORT};
     location / {
       proxy_http_version 1.1;
-      proxy_set_header Connection close;
-      proxy_pass http://127.0.0.1:${ORIGIN_PORT};
+      proxy_set_header Connection "";
+      proxy_pass http://origin;
     }
   }
 }

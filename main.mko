@@ -184,8 +184,9 @@ fn main() {
     if workers < 1 {
         workers = 4
     }
-    if workers > 64 {
-        workers = 64
+    // High concurrency: allow large crew (was hard-capped at 64).
+    if workers > 512 {
+        workers = 512
     }
     // Process-level Limits API reserved for maxconn hard cap when runtime enforces it.
     let _ = limits_new(0, 0, d.maxconn)
@@ -219,20 +220,22 @@ fn main() {
 
     let slots = chan_new(workers)
     // done: err, status, conn_si, served_si, bytes, retries, client_fd, keep_alive, frontend_idx, ka_count
-    let done = chan_open[(int, int, int, int, int, int, int, int, int, int)](workers * 2)
+    // Deep done buffer so workers never block on send under bursty completion.
+    let mut done_cap = workers * 8
+    if done_cap < 256 {
+        done_cap = 256
+    }
+    let done = chan_open[(int, int, int, int, int, int, int, int, int, int)](done_cap)
     fill_slots(slots, workers)
     // Mako crew: accept loop + kicked workers share the scheduler thread pool.
-    // Blocking upstream/client IO in workers must not exhaust every thread or
-    // the accept loop starves (no done drain → deadlock under high concurrency).
-    // Keep spare threads for accept/done/pending.
-    // At least 2x admission slots so blocking worker IO cannot pin every thread
-    // and starve the accept/done loop (observed deadlock signature: c=40 timeouts).
-    let mut sched_n = workers * 2
-    if sched_n < workers + 8 {
-        sched_n = workers + 8
+    // Blocking IO must not exhaust every thread or accept/done starves.
+    // 2× workers + 8 spare threads for accept/pending/peers under load.
+    let mut sched_n = workers * 2 + 8
+    if sched_n < 16 {
+        sched_n = 16
     }
     sched_set_workers(sched_n)
-    log_info_event("scheduler_configured", f"workers={workers} sched_threads={sched_n}")
+    log_info_event("scheduler_configured", f"workers={workers} sched_threads={sched_n} done_cap={done_cap}")
     let max_keepalive_requests = 1000
     let mut stats_fe = frontend_new("stats")
     let mut http_listeners = make([]HttpListener, 0, len(http_fes))
@@ -513,7 +516,15 @@ fn main() {
     let mut completed = 0
     let mut inflight = 0
     let mut udp_flows = make([]UdpFlow, 0, 64)
-    let pending_limit = workers * 64
+    // Pending holds accepted clients waiting for a worker slot (or partial read).
+    // Size for high concurrency: do not stop accept just because slots are full.
+    let mut pending_limit = workers * 128
+    if pending_limit < 1024 {
+        pending_limit = 1024
+    }
+    if pending_limit > 65536 {
+        pending_limit = 65536
+    }
     // This queue is explicitly bounded below. Keep its backing storage at the
     // limit so accepted clients never trigger a Mako array realloc while the
     // event loop is also moving client records between generations.
@@ -651,10 +662,10 @@ fn main() {
                 }
             }
             // Drain worker completions aggressively so slots free and new accepts kick.
-            // Cap per tick so accept/pending still get CPU under completion storms.
+            // Large cap under bursty high-concurrency completion storms.
             if inflight > 0 {
                 let mut drained = 0
-                while drained < 256 {
+                while drained < 1024 {
                     if inflight <= 0 {
                         break
                     }
@@ -1312,18 +1323,24 @@ fn main() {
                     if rfd == http_listeners[hi_match].fd {
                         let h = http_listeners[hi_match]
                         let mut http_accepts = 0
-                        let mut http_accept_limit = 64
+                        // Accept aggressively; queue to pending when workers are busy.
+                        let mut http_accept_limit = 256
                         if h.tls == 1 {
                             http_accept_limit = 1
                         }
                         while http_accepts < http_accept_limit {
-                            if chan_len(slots) <= 0 {
-                                http_accepts = http_accept_limit
-                            } else {
-                                let c = tcp_accept_nb(http_listeners[hi_match].fd)
-                                if c < 0 {
+                            // Accept while backlog has clients. Only stop when pending is full
+                            // AND no worker slots (cannot make progress). Otherwise queue to pending.
+                            if len(pending_clients) >= pending_limit {
+                                if chan_len(slots) <= 0 {
                                     http_accepts = http_accept_limit
-                                } else {
+                                }
+                            }
+                            if http_accepts < http_accept_limit {
+                                    let c = tcp_accept_nb(http_listeners[hi_match].fd)
+                                    if c < 0 {
+                                        http_accepts = http_accept_limit
+                                    } else {
                                     let _ = tcp_set_timeout(c, 1000)
                                     if h.tls == 1 {
                                     // accept_nb can leave the client fd nonblocking; SSL_accept needs blocking I/O.
@@ -1737,13 +1754,14 @@ fn main() {
                 while ti_match < len(tcp_fds) {
                     if rfd == tcp_fds[ti_match] {
                         let mut tcp_accepts = 0
-                        while tcp_accepts < 64 {
+                        while tcp_accepts < 128 {
+                            // TCP has no pending queue — only accept when a worker slot is free.
                             if chan_len(slots) <= 0 {
-                                tcp_accepts = 64
+                                tcp_accepts = 128
                             } else {
                                 let tc = tcp_accept_nb(tcp_fds[ti_match])
                                 if tc < 0 {
-                                    tcp_accepts = 64
+                                    tcp_accepts = 128
                                 } else {
                                 let _ = tcp_set_timeout(tc, 1000)
                                 let td = prepare_tcp_dispatch(tc, tcp_fes[ti_match], backends, servers)

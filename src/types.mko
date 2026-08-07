@@ -358,7 +358,7 @@ fn defaults_new() -> Defaults {
         timeout_connect_ms: 5000,
         maxconn: 10000,
         retries: 1,
-        workers: 32,
+        workers: 64,
         request_body_limit_bytes: 1048576,
         acme_webroot: "",
         acme_storage: "",

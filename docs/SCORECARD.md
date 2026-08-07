@@ -33,14 +33,24 @@ wrk -t4 -c40 -d5s --latency http://127.0.0.1:<leba>/
 wrk -t4 -c40 -d5s --latency http://127.0.0.1:<nginx-proxy>/
 ```
 
-### Other concurrency (single run, same host)
+### Concurrency scaling (Leba, workers 128, fast path)
 
-| Mode | Leba | nginx | Notes |
-|------|------|-------|--------|
-| KA c=4 | ~24k | ~24k | ~parity |
-| KA c=40 | **~62k** | ~26k | Leba wins |
-| KA c=100 | **~58k** | ~26k | Leba wins |
-| Connection: close c=4 | ~3–16k | noisy | Prefer KA for fair multi-request RPS |
+| Mode | c=4 | c=40 | c=100 | c=200 | c=500 |
+|------|-----|------|-------|-------|-------|
+| **Keep-alive RPS** | ~24k | **~72k** | ~59k | ~48–62k | ~47k |
+| **Connection: close RPS** | ~14k | ~8–25k | lower* | lower* | — |
+
+\* Connection: close burns ephemeral ports / TIME_WAIT on localhost; prefer KA for concurrency claims.  
+At KA c=200 vs nginx (same host): Leba **~62k** vs nginx **~8k** (nginx showed many non-2xx under that burst).
+
+**Config for high concurrency:**
+
+```
+defaults
+  workers 128   # max 512; default is 64
+```
+
+Also: `ulimit -n 65536`. Runtime logs `sched_threads` and `done_cap`.
 
 ## What unlocked the win
 

@@ -80,7 +80,7 @@ defaults
   timeout_client 5s
   timeout_server 5s
   timeout_connect 2s
-  workers 32
+  workers 64
   retries 0
 frontend web
   bind 127.0.0.1:${LEBA_PORT}

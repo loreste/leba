@@ -301,3 +301,4 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-08-07 | Hot path: single-slot `server_conn_delta`/`mark_server_req`; `plan.reserved` skip; empty Dispatch keep live tables; scorecard rebench (nginx still wins RPS) |
 | 2026-08-07 | Accept path: drain done×256, immediate cleartext dispatch, short poll (no busy-spin); wrk c=4 ~parity, c=40 still nginx |
 | 2026-08-07 | **HTTP fast path** + worker KA loop + sched 2× workers; scorecard wrk KA c=40 **Leba ~2× nginx RPS** |
+| 2026-08-07 | Concurrency: workers max 512 (default 64), deep done buffer, accept while busy→pending, batch accept 256 |

@@ -451,7 +451,9 @@ fn rebind_stats_listener(
     new_fe: Frontend,
     new_port: int
 ) -> (int, int, TlsServer, Frontend) {
-    let mut fe = new_fe
+    // Clone so returned Frontend is not free-aliased with the caller's new_fe
+    // (tls_sni arrays free under free-analysis when multi-return reuses the param).
+    let mut fe = frontend_clone(new_fe)
     fe.bind_port = new_port
     let mut new_tls = 0
     if str_len(fe.tls_cert) > 0 {
@@ -467,7 +469,7 @@ fn rebind_stats_listener(
         if old_tls == 1 {
             let _ = tls_server_free(old_tls_srv)
         }
-        return (0 - 1, 0, tls_server_new("", ""), fe)
+        return (0 - 1, 0, tls_server_new("", ""), frontend_clone(fe))
     }
     let mut need_rebind = 0
     if old_fd < 0 {
@@ -507,14 +509,14 @@ fn rebind_stats_listener(
                 f"frontend=stats bind={fe.bind_host}:{new_port}"
             )
         }
-        return (fd, new_tls, tls_srv, fe)
+        return (fd, new_tls, tls_srv, frontend_clone(fe))
     }
     // Same bind: refresh TLS PEMs/SNI in place when cert paths change.
     let mut tls_srv2 = old_tls_srv
     if new_tls == 1 {
         tls_srv2 = frontend_tls_server_refresh(old_tls_srv, old_fe, fe)
     }
-    return (old_fd, new_tls, tls_srv2, fe)
+    return (old_fd, new_tls, tls_srv2, frontend_clone(fe))
 }
 
 // Rebuild TCP listen FDs for tcp frontends (order matches tcp_fes).

@@ -1,21 +1,25 @@
 # Prefer installed Mako (stable). Override with MAKO=/path/to/mako for local builds.
 # Note: in-tree target/release/mako can be ahead of the std install and may crash.
 # After upgrading Mako: `make clean-cache` then rebuild (object cache is not versioned by free-analysis).
+#
+# Backend: default to C. Mako's native/Cranelift path still lacks struct fields and
+# some HTTP builtins used by Leba; CI and production builds use --backend c.
 MAKO ?= $(shell command -v mako)
+MAKO_BACKEND ?= c
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; fi)
 
-.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-ha-peers test-concurrent test-adversarial
+.PHONY: all build test check doctor doctor-linux explain smoke run clean test-linux-assets test-haproxy-compare test-soak test-ha-peers test-concurrent test-adversarial bench-nginx
 
 all: build
 
 build:
-	$(MAKO) build main.mko -o leba
+	$(MAKO) build main.mko -o leba --backend $(MAKO_BACKEND)
 
 test:
-	$(MAKO) test leba_core1_test.mko
-	$(MAKO) test leba_core2_test.mko
-	$(MAKO) test leba_web_test.mko
+	$(MAKO) test leba_core1_test.mko --backend $(MAKO_BACKEND)
+	$(MAKO) test leba_core2_test.mko --backend $(MAKO_BACKEND)
+	$(MAKO) test leba_web_test.mko --backend $(MAKO_BACKEND)
 
 test-linux-assets:
 	test -f deploy/linux/leba.service
@@ -54,6 +58,11 @@ test-ha-peers: build
 test-haproxy-compare: build
 	chmod +x scripts/haproxy_compare.sh
 	./scripts/haproxy_compare.sh
+
+# Directional RPS/latency vs local nginx (requires nginx in PATH).
+bench-nginx: build
+	chmod +x scripts/bench_vs_nginx.sh
+	./scripts/bench_vs_nginx.sh 8 40
 
 check: doctor
 

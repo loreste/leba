@@ -623,6 +623,73 @@ fn TestRawRequestParserBodyAndMalformedEdges() {
     assert_eq(parse_raw_request("GET /missing-version\r\nHost: h\r\n\r\n").ok, 0)
 }
 
+// TLS stacks may normalize request framing to LF-only. Headers and body must
+// still parse so credentialed browser headers reach the app.
+fn TestRawRequestParserAcceptsLfOnlyFraming() {
+    let raw = "POST /upload HTTP/1.1\nHost: app.example.com\nContent-Type: multipart/form-data; boundary=x\nX-CSRF-Token: tok-1\nX-Attachment-Filename: a.pdf\nOrigin: https://ui.example.com\nAuthorization: Bearer abc\nContent-Length: 4\n\ndata"
+    let r = parse_raw_request(raw)
+    assert_eq(r.ok, 1)
+    assert_eq_str(r.method, "POST")
+    assert_eq_str(r.path, "/upload")
+    assert_eq_str(r.host, "app.example.com")
+    assert_eq_str(r.content_type, "multipart/form-data; boundary=x")
+    assert_eq_str(r.csrf_token, "tok-1")
+    assert_eq_str(r.attachment_filename, "a.pdf")
+    assert_eq_str(r.origin, "https://ui.example.com")
+    assert_eq_str(r.authorization, "Bearer abc")
+    assert_eq_str(r.body, "data")
+    assert_eq(raw_request_complete(raw, 0), 1)
+    assert_eq(raw_request_complete("GET /x HTTP/1.1\nHost: h\n", 0), 0)
+}
+
+fn TestRawHeaderCaseInsensitiveCrLfAndLf() {
+    let crlf = "GET / HTTP/1.1\r\nX-CSRF-Token: A\r\nOrigin: https://a.test\r\n\r\n"
+    assert_eq_str(raw_header(crlf, "X-CSRF-Token"), "A")
+    assert_eq_str(raw_header(crlf, "origin"), "https://a.test")
+    let lf = "GET / HTTP/1.1\nX-CSRF-Token: B\nOrigin: https://b.test\n\n"
+    assert_eq_str(raw_header(lf, "X-CSRF-Token"), "B")
+    assert_eq_str(raw_header(lf, "Origin"), "https://b.test")
+}
+
+fn TestRequestHeaderExtrasForwardsBrowserUploadHeaders() {
+    let out = request_header_extras(
+        "Authorization: Bearer t\r\n",
+        "application/json",
+        "csrf-9",
+        "report.csv",
+        "https://app.example.com"
+    )
+    assert(str_contains(out, "Authorization: Bearer t\r\n"))
+    assert(str_contains(out, "Content-Type: application/json\r\n"))
+    assert(str_contains(out, "X-CSRF-Token: csrf-9\r\n"))
+    assert(str_contains(out, "X-Attachment-Filename: report.csv\r\n"))
+    assert(str_contains(out, "Origin: https://app.example.com\r\n"))
+}
+
+fn TestCorsHeadersCredentialSafeWhenOriginSet() {
+    // Default (no LEBA_CORS_ORIGIN): wildcard without credentials.
+    let wild = cors_headers()
+    assert(str_contains(wild, "Access-Control-Allow-Origin: *"))
+    assert(str_contains(wild, "X-CSRF-Token"))
+    assert(not str_contains(wild, "Access-Control-Allow-Credentials: true"))
+}
+
+fn TestExtractPassHeadersAcceptsLfBlocks() {
+    let pass = extract_pass_headers("Location: /next\nAccess-Control-Allow-Origin: https://ui.test\nX-Request-Id: r1\n")
+    assert(str_contains(pass, "Location: /next"))
+    assert(str_contains(pass, "Access-Control-Allow-Origin: https://ui.test"))
+    assert(str_contains(pass, "X-Request-Id: r1"))
+}
+
+fn TestRawResponseParsingAcceptsLfOnly() {
+    let raw = "HTTP/1.1 204 No Content\nContent-Type: text/plain\n\n"
+    assert_eq(raw_response_status(raw), 204)
+    assert_eq_str(raw_response_body(raw), "")
+    let with_body = "HTTP/1.0 200 OK\nContent-Type: text/plain\n\nhello"
+    assert_eq(raw_response_status(with_body), 200)
+    assert_eq_str(raw_response_body(with_body), "hello")
+}
+
 fn TestWelcomePageShape() {
     let html = leba_welcome_html()
     assert(str_contains(html, "<title>LEBA</title>"))
@@ -940,7 +1007,7 @@ fn TestStatsListenerRebind() {
     assert_eq(fe2.bind_port, base)
     assert_eq(fd2, fd1)
     // Port change: new listen succeeds; old port is freed (fd numbers may recycle)
-    let fe3 = fe1
+    let fe3 = frontend_clone(fe1)
     let port2 = base + 17
     let fd3, tls3, srv3, fe_out = rebind_stats_listener(el, fd2, 0, srv2, fe2, base, fe3, port2)
     assert(fd3 >= 0)
@@ -951,13 +1018,14 @@ fn TestStatsListenerRebind() {
     assert(c >= 0)
     let _ = tcp_close(c)
     // Old port should be free enough to re-bind
-    let mut fe_old = fe1
+    let mut fe_old = frontend_clone(fe1)
     fe_old.bind_port = base
     let fd_old = frontend_tcp_listen(fe_old)
     assert(fd_old >= 0)
     let _ = tcp_close(fd_old)
-    // Port 0: tear down
-    let fd4, tls4, srv4, fe4 = rebind_stats_listener(el, fd3, 0, srv3, fe_out, port2, fe_out, 0)
+    // Port 0: tear down — clone fe_out so multi-return does not free-alias live FE
+    let fe_teardown = frontend_clone(fe_out)
+    let fd4, tls4, srv4, fe4 = rebind_stats_listener(el, fd3, 0, srv3, fe_out, port2, fe_teardown, 0)
     assert_eq(fd4, 0 - 1)
     assert_eq(tls4, 0)
     let _ = srv4
@@ -1215,14 +1283,18 @@ fn TestPeersConfigAndProtocol() {
     let bad = peers_apply_line("HELLO leba-b edge deadbeef", w.peers, table, 0, 1000000, "", 0)
     assert_eq(bad.close, 1)
 
-    // Upsert after hello.
+    // Upsert after hello. Own the map before any later call reuses it —
+    // free-analysis free-aliases PeersApplyResult.table across sequential applies.
     let ar2 = peers_apply_line("UPSERT app|src|1.2.3.4 srv1 2000000", w.peers, table, 0, 1000000, "leba-b", 1)
-    assert_eq_str(stick_table_get(ar2.table, "app|src|1.2.3.4", 1500000), "srv1")
-    assert_eq(ar2.count, 1)
+    let tab2 = stick_table_own(ar2.table)
+    let count2 = ar2.count
+    assert_eq_str(stick_table_get(tab2, "app|src|1.2.3.4", 1500000), "srv1")
+    assert_eq(count2, 1)
 
     // Expired upsert ignored.
-    let ar3 = peers_apply_line("UPSERT app|src|9.9.9.9 old 500", w.peers, ar2.table, ar2.count, 1000000, "leba-b", 1)
-    assert_eq_str(stick_table_get(ar3.table, "app|src|9.9.9.9", 1000000), "")
+    let ar3 = peers_apply_line("UPSERT app|src|9.9.9.9 old 500", w.peers, tab2, count2, 1000000, "leba-b", 1)
+    let tab3 = stick_table_own(ar3.table)
+    assert_eq_str(stick_table_get(tab3, "app|src|9.9.9.9", 1000000), "")
 
     let line = peers_encode_upsert("app|src|1.2.3.4", "srv1", 2000000)
     assert(str_has_prefix(line, "UPSERT "))

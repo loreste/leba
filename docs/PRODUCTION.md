@@ -6,14 +6,16 @@ Use this checklist before calling Leba **production-ready** for a site.
 
 | Item | Check |
 |------|--------|
-| Version | `leba version` ≥ 0.14.0 |
+| Version | `leba version` ≥ 0.14.1 |
 | Doctor | `leba doctor /etc/leba/leba.conf` → 0 errors |
 | Auth | Hashed admin users; no demo passwords |
 | Session | `state_key` or `LEBA_SESSION_SECRET` set |
 | Admin plane | Not on public VIP; private NIC / firewall |
 | TLS | Valid PEMs; ACME lego or external certs on both HA nodes |
 | Soak | `make test-soak` green in CI or pre-flight |
+| Concurrent | `make test-concurrent` green (GET/KA/POST/OPTIONS waves) |
 | Metrics | Scrape `/metrics` (auth required when configured) |
+| Browser apps | If SPA uses credentialed CORS, set `LEBA_CORS_ORIGIN` to the exact UI origin |
 
 **Note:** Prefer process supervisor (`systemd` Restart=) and practice reload on the
 backup node before VIP move. Re-run `make test-soak` on your Mako toolchain before
@@ -79,7 +81,7 @@ Release artifacts (when published via CI):
 Verify binary:
 
 ```bash
-gh release download v0.14.0 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
+gh release download v0.14.1 -p 'leba-linux-amd64' -p 'SHA256SUMS' -p 'leba-linux-amd64.cosign.bundle'
 sha256sum -c SHA256SUMS
 cosign verify-blob \
   --bundle leba-linux-amd64.cosign.bundle \
@@ -94,7 +96,7 @@ Verify container (example):
 cosign verify \
   --certificate-identity-regexp 'https://github.com/loreste/leba/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/loreste/leba:0.14.0
+  ghcr.io/loreste/leba:0.14.1
 ```
 
 ## Do not claim yet

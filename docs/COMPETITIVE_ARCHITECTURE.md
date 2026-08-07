@@ -1,12 +1,16 @@
 # Leba Competitive Product Architecture: Beat NPM + HAProxy Enterprise
 
+> **Status note (2026-08-06):** This document is **historical design depth** from the 0.7→0.14 build-out.
+> **Source of truth for shipped status** is [`ROADMAP.md`](ROADMAP.md) + [`PAINPOINTS.md`](PAINPOINTS.md) + [`PRODUCTION.md`](PRODUCTION.md).
+> Many “gap” rows below (full reload, pools, header rules, ACME, Docker, peers smoke) are **already shipped** in 0.12–0.14; do not treat this table as current product truth.
+
 | Field | Value |
 |-------|-------|
 | **Document** | Competitive Product Architecture |
 | **Author** | TBD |
-| **Date** | 2026-07-17 |
-| **Status** | Draft (revision 3 — residual re-review issues addressed) |
-| **Baseline** | Leba 0.7.1 (`main.mko` prints `leba 0.7.1`; `mako.toml` still says `0.1.0`) |
+| **Date** | 2026-07-17 (baseline; header updated 2026-08-06) |
+| **Status** | Historical design archive — use ROADMAP for current status |
+| **Baseline** | Original draft: 0.7.1; current product: **0.14.1** |
 | **Audience** | Senior engineers shipping Leba as an open-core edge load balancer |
 
 ---

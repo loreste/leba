@@ -244,6 +244,35 @@ struct PendingClient {
     frontend_name: string
 }
 
+// Deep-own buffer string so requeue into next_pending never free-aliases.
+fn pending_client_clone(pc: PendingClient) -> PendingClient {
+    let mut nb = str_builder()
+    builder_write(nb, pc.buffer)
+    return PendingClient {
+        fd: pc.fd,
+        kind: pc.kind,
+        frontend_idx: pc.frontend_idx,
+        deadline_ms: pc.deadline_ms,
+        buffer: builder_string(nb),
+        ka_count: pc.ka_count,
+        frontend_name: own_string(pc.frontend_name)
+    }
+}
+
+fn pending_client_with_buffer(pc: PendingClient, buffer: string) -> PendingClient {
+    let mut nb = str_builder()
+    builder_write(nb, buffer)
+    return PendingClient {
+        fd: pc.fd,
+        kind: pc.kind,
+        frontend_idx: pc.frontend_idx,
+        deadline_ms: pc.deadline_ms,
+        buffer: builder_string(nb),
+        ka_count: pc.ka_count,
+        frontend_name: own_string(pc.frontend_name)
+    }
+}
+
 // --- global defaults & live stats ------------------------------------------
 
 struct Defaults {

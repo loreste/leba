@@ -4,7 +4,7 @@
 #   make build && docker compose up --build
 #
 #   # Or published release image (no local Mako needed):
-#   LEBA_IMAGE=ghcr.io/loreste/leba:0.14.0 docker compose up
+#   LEBA_IMAGE=ghcr.io/loreste/leba:0.14.1 docker compose up
 #
 #   open http://localhost:8404/   (admin / change-me)
 #   curl http://localhost/        → demo origin via Leba

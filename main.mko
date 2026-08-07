@@ -59,7 +59,7 @@ fn main() {
     }
     if not str_eq(a1, "") {
         if str_eq(a1, "version") {
-            print("leba 0.14.0")
+            print("leba 0.14.1")
             print("concurrency: crew worker pool")
             return
         }
@@ -187,7 +187,8 @@ fn main() {
     if workers > 64 {
         workers = 64
     }
-    let conn_limits = limits_new(0, 0, d.maxconn)
+    // Process-level Limits API reserved for maxconn hard cap when runtime enforces it.
+    let _ = limits_new(0, 0, d.maxconn)
     let stats_idx = frontend_mode_index(frontends, "stats", 0)
     let mut http_fes = make([]Frontend, 0, 8)
     let mut tcp_fes = make([]Frontend, 0, 8)
@@ -696,7 +697,8 @@ fn main() {
                     } else {
                         if pc.kind == 2 {
                             if chan_len(slots) <= 0 {
-                                next_pending = append(next_pending, pc)
+                                // Clone: pending array rebuild must not free-alias live slots.
+                                next_pending = append(next_pending, pending_client_clone(pc))
                                 pi = pi + 1
                                 continue
                             }
@@ -723,9 +725,10 @@ fn main() {
                                     log_warn_event("client_rejected", "stage=request_read reason=request_too_large")
                                     let _ = tcp_close(pc.fd)
                                 } else {
-                                    let mut keep_pc = pc
-                                    keep_pc.buffer = raw_pending
-                                    next_pending = append(next_pending, keep_pc)
+                                    next_pending = append(
+                                        next_pending,
+                                        pending_client_with_buffer(pc, raw_pending)
+                                    )
                                 }
                                 pi = pi + 1
                                 continue
@@ -843,11 +846,24 @@ fn main() {
                                         let raw_reqp = parse_raw_request(raw_pending)
                                         let dp = prepare_raw_dispatch(pc.fd, raw_reqp, ph.frontend, routes, acls, backends, servers, buckets, header_rules, app_auth_users, pc.frontend_idx, pc.ka_count, stick_table, stick_count)
                                         if dp.need_worker == 0 {
-                                            // Deny/static paths: do not adopt table aliases (would free live arrays).
+                                            // Deny/static: only adopt dirty rate/stick (429 may have consumed tokens).
                                             let _ = dp.servers
                                             let _ = dp.backends
-                                            let _ = dp.buckets
-                                            let _ = dp.stick_table
+                                            if dp.rate_dirty == 1 {
+                                                buckets = dp.buckets
+                                            } else {
+                                                let _ = dp.buckets
+                                            }
+                                            if dp.stick_dirty == 1 {
+                                                stick_table = stick_table_own(dp.stick_table)
+                                                stick_count = dp.stick_count
+                                            } else {
+                                                let _ = dp.stick_table
+                                            }
+                                            if not str_eq(dp.stick_peer_line, "") {
+                                                let nout0 = peers_broadcast(peer_conns, dp.stick_peer_line)
+                                                st.peers_upserts_out = st.peers_upserts_out + nout0
+                                            }
                                             if dp.waf_blocked == 1 {
                                                 st.waf_blocked = st.waf_blocked + 1
                                             }
@@ -861,9 +877,17 @@ fn main() {
                                         } else {
                                             servers = dp.servers
                                             backends = dp.backends
-                                            buckets = dp.buckets
-                                            stick_table = stick_table_own(dp.stick_table)
-                                            stick_count = dp.stick_count
+                                            if dp.rate_dirty == 1 {
+                                                buckets = dp.buckets
+                                            } else {
+                                                let _ = dp.buckets
+                                            }
+                                            if dp.stick_dirty == 1 {
+                                                stick_table = stick_table_own(dp.stick_table)
+                                                stick_count = dp.stick_count
+                                            } else {
+                                                let _ = dp.stick_table
+                                            }
                                             if not str_eq(dp.stick_peer_line, "") {
                                                 let nout = peers_broadcast(peer_conns, dp.stick_peer_line)
                                                 st.peers_upserts_out = st.peers_upserts_out + nout
@@ -899,7 +923,8 @@ fn main() {
                                 }
                             }
                         } else {
-                            next_pending = append(next_pending, pc)
+                            // Not readable yet — requeue with owned buffer.
+                            next_pending = append(next_pending, pending_client_clone(pc))
                         }
                     }
                     pi = pi + 1
@@ -1181,11 +1206,28 @@ fn main() {
                                     }
                                     if str_eq(proto, "h2") {
                                         tr = handle_tls_h2_once(tconn, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
-                                        servers = tr.servers
-                                        backends = tr.backends
-                                        buckets = tr.buckets
-                                        stick_table = stick_table_own(tr.stick_table)
-                                        stick_count = tr.stick_count
+                                        // Adversarial: only replace live arrays when dirty (never empty wipe).
+                                        if tr.servers_dirty == 1 {
+                                            servers = tr.servers
+                                        } else {
+                                            let _ = tr.servers
+                                        }
+                                        if tr.backends_dirty == 1 {
+                                            backends = tr.backends
+                                        } else {
+                                            let _ = tr.backends
+                                        }
+                                        if tr.rate_dirty == 1 {
+                                            buckets = tr.buckets
+                                        } else {
+                                            let _ = tr.buckets
+                                        }
+                                        if tr.stick_dirty == 1 {
+                                            stick_table = stick_table_own(tr.stick_table)
+                                            stick_count = tr.stick_count
+                                        } else {
+                                            let _ = tr.stick_table
+                                        }
                                         if not str_eq(tr.stick_peer_line, "") {
                                             let nout_h2 = peers_broadcast(peer_conns, tr.stick_peer_line)
                                             st.peers_upserts_out = st.peers_upserts_out + nout_h2
@@ -1223,9 +1265,17 @@ fn main() {
                                             let dp = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                             servers = dp.servers
                                             backends = dp.backends
-                                            buckets = dp.buckets
-                                            stick_table = stick_table_own(dp.stick_table)
-                                            stick_count = dp.stick_count
+                                            if dp.rate_dirty == 1 {
+                                                buckets = dp.buckets
+                                            } else {
+                                                let _ = dp.buckets
+                                            }
+                                            if dp.stick_dirty == 1 {
+                                                stick_table = stick_table_own(dp.stick_table)
+                                                stick_count = dp.stick_count
+                                            } else {
+                                                let _ = dp.stick_table
+                                            }
                                             if not str_eq(dp.stick_peer_line, "") {
                                                 let nout_ws = peers_broadcast(peer_conns, dp.stick_peer_line)
                                                 st.peers_upserts_out = st.peers_upserts_out + nout_ws
@@ -1288,9 +1338,17 @@ fn main() {
                                             let dp_tls = prepare_ws_dispatch(raw_req, h.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count, client_ip)
                                             servers = dp_tls.servers
                                             backends = dp_tls.backends
-                                            buckets = dp_tls.buckets
-                                            stick_table = stick_table_own(dp_tls.stick_table)
-                                            stick_count = dp_tls.stick_count
+                                            if dp_tls.rate_dirty == 1 {
+                                                buckets = dp_tls.buckets
+                                            } else {
+                                                let _ = dp_tls.buckets
+                                            }
+                                            if dp_tls.stick_dirty == 1 {
+                                                stick_table = stick_table_own(dp_tls.stick_table)
+                                                stick_count = dp_tls.stick_count
+                                            } else {
+                                                let _ = dp_tls.stick_table
+                                            }
                                             if not str_eq(dp_tls.stick_peer_line, "") {
                                                 let nout_tls = peers_broadcast(peer_conns, dp_tls.stick_peer_line)
                                                 st.peers_upserts_out = st.peers_upserts_out + nout_tls
@@ -1386,11 +1444,27 @@ fn main() {
                                 let tr = handle_h3_proxy_request(
                                     h3l.handle, sid, req, h3l.frontend, routes, acls, backends, servers, buckets, header_rules, stick_table, stick_count
                                 )
-                                servers = tr.servers
-                                backends = tr.backends
-                                buckets = tr.buckets
-                                stick_table = stick_table_own(tr.stick_table)
-                                stick_count = tr.stick_count
+                                if tr.servers_dirty == 1 {
+                                    servers = tr.servers
+                                } else {
+                                    let _ = tr.servers
+                                }
+                                if tr.backends_dirty == 1 {
+                                    backends = tr.backends
+                                } else {
+                                    let _ = tr.backends
+                                }
+                                if tr.rate_dirty == 1 {
+                                    buckets = tr.buckets
+                                } else {
+                                    let _ = tr.buckets
+                                }
+                                if tr.stick_dirty == 1 {
+                                    stick_table = stick_table_own(tr.stick_table)
+                                    stick_count = tr.stick_count
+                                } else {
+                                    let _ = tr.stick_table
+                                }
                                 if not str_eq(tr.stick_peer_line, "") {
                                     let nout_h3 = peers_broadcast(peer_conns, tr.stick_peer_line)
                                     st.peers_upserts_out = st.peers_upserts_out + nout_h3

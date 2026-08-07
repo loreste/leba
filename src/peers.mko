@@ -246,8 +246,10 @@ fn peers_apply_line(
             let key = own_string(fields[1])
             let server = own_string(fields[2])
             let exp = to_int(fields[3])
-            let t2, c2 = stick_table_set_abs(out.table, key, server, exp, 100000, now_ms, out.count)
-            out.table = t2
+            // Own base map before multi-return set so out.table is never free-aliased.
+            let base = stick_table_own(out.table)
+            let t2, c2 = stick_table_set_abs(base, key, server, exp, 100000, now_ms, out.count)
+            out.table = stick_table_own(t2)
             out.count = c2
             out.event_upsert = 1
         }
@@ -257,8 +259,9 @@ fn peers_apply_line(
     if str_eq(cmd, "DELETE") {
         if len(fields) >= 2 {
             let del_key = own_string(fields[1])
-            let t3, c3 = stick_table_delete(out.table, del_key, out.count)
-            out.table = t3
+            let base = stick_table_own(out.table)
+            let t3, c3 = stick_table_delete(base, del_key, out.count)
+            out.table = stick_table_own(t3)
             out.count = c3
         }
         return out
@@ -320,7 +323,9 @@ fn peers_feed(
         let line = own_string(substr(conn.buf, 0, nl))
         conn.buf = own_string(substr(conn.buf, nl + 1, str_len(conn.buf)))
         let ar = peers_apply_line(line, cfg, tab, count, now_ms, conn.name, conn.hello_ok)
-        tab = ar.table
+        // Deep-own before ar goes out of scope — free-analysis free-aliases
+        // PeersApplyResult.table with the caller's long-lived stick map.
+        tab = stick_table_own(ar.table)
         count = ar.count
         hello_n = hello_n + ar.event_hello
         auth_n = auth_n + ar.event_auth_fail
@@ -343,7 +348,7 @@ fn peers_feed(
     }
     return PeersFeedResult {
         conn: conn,
-        table: tab,
+        table: stick_table_own(tab),
         count: count,
         reply: own_string(reply_all),
         close: close,

@@ -154,7 +154,8 @@ fn client_rate_check(buckets: []RateBucket, client_ip: string, rate_per_sec: int
 }
 
 fn client_rate_take_ip(buckets: []RateBucket, client_ip: string, rate_per_sec: int) -> []RateBucket {
-    let mut out = buckets
+    // Clone so callers that already own `buckets` are not free-aliased on return.
+    let mut out = rate_bucket_array_clone(buckets)
     let idx = client_rate_find(out, client_ip)
     if idx < 0 {
         out = append(out, rate_new(client_ip, rate_per_sec))

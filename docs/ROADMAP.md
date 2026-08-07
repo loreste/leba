@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Baseline** | Leba **0.14.0** (2026-07) — platform quality |
+| **Baseline** | Leba **0.14.1** (2026-08) — production harden + perf |
 | **North star** | HAProxy-class data plane + Nginx Proxy Manager (NPM) day-1 UX, open-core price |
 | **Status** | Living roadmap — update each release |
 | **Related** | [COMPETITIVE_ARCHITECTURE.md](COMPETITIVE_ARCHITECTURE.md) (design depth), [PAINPOINTS.md](PAINPOINTS.md) (ops workflows) |
@@ -16,6 +16,35 @@
 | **Homelab / SMB (NPM users)** | Add a reverse-proxy host, get TLS, open the UI — under 5 minutes |
 | **Edge / platform (HAProxy users)** | Real LB algorithms, drain, stick tables, hitless reload, Prometheus, doctor/explain |
 | **Both** | Single binary, plain config as source of truth, no separate DB + nginx process pair |
+| **Performance** | **Beat nginx on reverse-proxy efficiency** — higher RPS and lower CPU/RSS for the same edge workload |
+
+### Performance north star (vs nginx)
+
+Leba’s data plane goal is not feature parity with every nginx module. It is to be a **tighter reverse proxy / LB**:
+
+| Metric | Target |
+|--------|--------|
+| **RPS** (small GET, local origin, Connection: close) | ≥ nginx under same concurrency / same machine |
+| **p99 latency** | ≤ nginx on the same bench |
+| **CPU** | Lower %CPU at equal RPS (crew workers + upstream pools, no per-request process model) |
+| **RSS** | Lower steady-state memory for a fixed connection budget |
+
+**How we measure (local):**
+
+```bash
+make build
+./scripts/bench_vs_nginx.sh 10 50   # seconds, concurrency
+```
+
+**Hot-path rules (do not regress):**
+
+1. **No full stick-table copy** unless stick/cookie sticky is active (`stick_dirty`).
+2. **No rate-bucket clone** unless the frontend has `rate_limit` (`rate_dirty`).
+3. **Servers cloned once** on conn reservation (`server_conn_delta`), not on every ACL/pick read.
+4. Prefer **`http_forward_fd` + `tcp_pool_*`** over `http_forward_full` (pools already wired via `init_server_pools`).
+5. Accept thread does ACL/pick; workers only do upstream I/O (kick-safe).
+
+**Honest limits today:** buffered request model (see LIMITS.md); TLS client KA best-effort; free-analysis still forces owned returns on some TLS paths — cleartext hot path is the primary optimization track.
 
 **Marketing gate (do not claim until checked):**
 
@@ -74,18 +103,18 @@
 | **N3b** | Multi-host multi-cert | **Met** (SNI) | Per-domain cert in UI without process restart |
 | **N4** | Access list + Basic | **Met** (API/UI) | Per-frontend; polish per-host binding later |
 | **N5** | Beyond NPM | **Met** | least_conn, drain, doctor, real LB |
-| **N6** | Host editor parity | Partial | Force SSL, WS flag, custom path locations, enable/disable host |
-| **N7** | Cert lifecycle UX | Partial | Expiry display, renew reminders, DNS-01 option |
+| **N6** | Host editor parity | **Met** (0.12) | Force SSL, WS flag, custom path locations, enable/disable host |
+| **N7** | Cert lifecycle UX | **Met** (0.12; DNS-01 via lego) | Expiry display, renew timer, DNS-01 option |
 
 ### vs HAProxy Enterprise / NGINX Plus
 
-| ID | Criterion | 0.11 status | Done when |
+| ID | Criterion | 0.14 status | Done when |
 |----|-----------|-------------|-----------|
 | **H1** | Hitless full reload | **Met** (with documented limits) | Soak tests; workers change = restart |
 | **H2** | Stick tables local | **Met** (~100k design) | Runtime dump/clear API + UI |
-| **H3** | HA pair | Partial | Docs + keepalived examples; **peers production** optional |
-| **H4** | WAF path | Partial | Adapter shipped; rule packs + UI + metrics productized |
-| **H5** | Runtime object API | Partial | Servers/hosts live; full object CRUD later |
+| **H3** | HA pair | Partial | Docs + keepalived + dual-node peers smoke; **site VIP multi-hour soak** still required for “peers production” |
+| **H4** | WAF path | **Met** (adapter + UI + metrics; rule packs open-core later) | Adapter shipped; mode toggle + blocked counters productized |
+| **H5** | Runtime object API | Partial | Servers/hosts/stick live; full object CRUD later |
 | **H6** | SSO | Partial | OIDC admin yes; SAML later if demanded |
 | **P1** | Observability | Strong | Trace + Prometheus + analytics; dashboards templates |
 
@@ -152,7 +181,29 @@ Shipped: ACME preflight UX, cert expiry, compose demo, doctor hardening, tests.
 
 ---
 
-### 0.15+ — Stretch / non-blocking
+### 0.15 — Performance vs nginx (active)
+
+**Goal:** Credible “faster and lighter than nginx” on reverse-proxy workloads.
+
+| Work | Priority | Status |
+|------|----------|--------|
+| Dirty-flag adopt (rate/stick) — skip map/array copies when idle | P0 | ✅ cleartext + WS dispatch |
+| Stick pick fast-path without `pick_server_stick` map own | P0 | ✅ when no stick/cookie sticky |
+| Single `server_conn_delta` clone (no entry clone of all servers) | P0 | ✅ |
+| Faster `pick_server` (no `own_string`, single pass, 1-server short-circuit) | P0 | ✅ |
+| Skip retry-plan alternate scans when `retries 0` | P0 | ✅ |
+| Build upstream headers once per request (all hops) | P0 | ✅ |
+| Skip empty header-rule / browser-extra rendering | P0 | ✅ |
+| `bench_vs_nginx.sh` regression harness | P0 | ✅ |
+| TLS/H2/H3 path same dirty ownership (drop entry multi-clone) | P0 | ✅ lean TLS+H3; H2 session own; dirty adopt; no empty wipe |
+| Pending-client buffer free-alias under partial read | P0 | ✅ rebuild buffer via str_builder before requeue |
+| Map ownership transfer (preowned stick) | — | ❌ rejected: free-analysis double-free; always stick_table_own |
+| Leaner `extract_pass_headers` (colon scan, no value re-split) | P1 | ✅ |
+| PendingClient clone on every requeue (slots-full / not-ready / partial) | P0 | ✅ |
+| Accept-thread short circuit for static/ACME/CORS (no worker) | P0 | ✅ already; clones deferred until after short-circuit |
+| Publish CPU/RSS scorecard numbers per release | P1 | Open (`make bench-nginx`) |
+
+### 0.16+ — Stretch / non-blocking
 
 | Item | Notes |
 |------|--------|
@@ -236,3 +287,11 @@ That sequence maximizes “feels like NPM” first while keeping the HAProxy-cla
 | 2026-07-19 | Peers free-alias fix: proxy + stick UPSERT + reconnect stable (`stick_table_own`) |
 | 2026-07-19 | Stick table residual ownership (`stick_table_clear` + all accept-thread adoptions) |
 | 2026-07-19 | CI installs Mako (clone+path), runs unit/build/soak/`test-ha-peers` honestly |
+| 2026-08-06 | Production hardening: LF/CRLF HTTP framing, browser header path tests, expanded concurrent smoke; scorecard N6/N7/H4 marked Met |
+| 2026-08-06 | Free-alias production fixes: config frontend clone, peers stick own, dispatch deep-own of rate/server arrays (proxy no longer aborts under free-analysis) |
+| 2026-08-06 | Perf track: dirty-flag rate/stick adopt, skip stick map own when unused, single server clone; `bench_vs_nginx.sh`; roadmap 0.15 performance north star |
+| 2026-08-06 | Faster pick/retry/header path: single-pass pick_server, retries-0 plan, one header build per request, empty-rule skip |
+| 2026-08-06 | Lean TLS/H2/H3: dirty servers/backends/rate/stick; adversarial no empty-wipe; H2 session-own once |
+| 2026-08-06 | Stick free-alias fix (no intermediate map assign); concurrent smoke ephemeral ports; pending buffer rebuild |
+| 2026-08-07 | Defer backend/rate clone + header render until after ACME/static/CORS short-circuit |
+| 2026-08-07 | **v0.14.1** production harden + performance: free-alias fixes, dirty adopt, lean hot path, bench harness |

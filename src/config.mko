@@ -1075,7 +1075,8 @@ fn parse_config_text(raw: string) -> World {
             if fi < 0 {
                 continue
             }
-            let mut fe = w.frontends[fi]
+            // Clone element before mutation so string fields are not free-aliased.
+            let mut fe = frontend_clone(w.frontends[fi])
             if str_eq(head, "bind") {
                 if len(fields) >= 2 {
                     // bind :8080 or bind 8080 or bind 127.0.0.1:8080
@@ -1452,7 +1453,8 @@ fn parse_config_text(raw: string) -> World {
             }
             }
             }
-            let mut fes = w.frontends
+            // Clone array so store-back does not free-alias live frontend strings.
+            let mut fes = frontend_array_clone(w.frontends)
             fes[fi] = fe
             w.frontends = fes
             continue
@@ -1716,9 +1718,10 @@ fn parse_config_text(raw: string) -> World {
         }
     }
 
-    // Inherit default timeouts onto backends that still have zeros handled at runtime
+    // Inherit default timeouts onto backends that still have zeros handled at runtime.
+    // Clone arrays before store-back — free-analysis aborts on free-aliased []Frontend/[]Backend.
     if w.defaults.retries > 0 {
-        let mut bes = w.backends
+        let mut bes = backend_array_clone(w.backends)
         for bi, be in range bes {
             let mut b = be
             if b.retries <= 0 {
@@ -1732,8 +1735,8 @@ fn parse_config_text(raw: string) -> World {
         w.backends = bes
     }
 
-    // stats frontend without explicit stats_port
-    let mut fes2 = w.frontends
+    // stats frontend without explicit stats_port; inherit maxconn / body limit / acme_webroot
+    let mut fes2 = frontend_array_clone(w.frontends)
     for fi, fe2 in range fes2 {
         let mut f = fe2
         if f.maxconn <= 0 {

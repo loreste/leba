@@ -57,16 +57,51 @@ struct ProxyResult {
     stick_table: map[string]string
     stick_count: int = 0
     stick_peer_line: string = ""
+    // Perf: only adopt into accept-thread state when dirty.
+    // Adversarial: early TLS rejects must leave servers_dirty=0 so main/H2
+    // does not replace the live server list with an empty array.
+    rate_dirty: int = 0
+    stick_dirty: int = 0
+    servers_dirty: int = 0
+    backends_dirty: int = 0
     waf_blocked: int = 0
     waf_detected: int = 0
 }
 
-fn raw_response_status(raw: string) -> int {
-    let lines = str_split(raw, "\r\n")
-    if len(lines) <= 0 {
-        return 0
+// HTTP wire framing helpers: prefer CRLF, accept LF-only (TLS/stack normalization).
+// Returns the index of the blank line that ends headers, or -1 if incomplete.
+fn http_headers_end(raw: string) -> int {
+    let crlf = str_index(raw, "\r\n\r\n")
+    if crlf >= 0 {
+        return crlf
     }
-    let parts = str_split(str_trim_space(lines[0]), " ")
+    return str_index(raw, "\n\n")
+}
+
+// Bytes from headers_end index to the first body byte (4 for CRLF, 2 for LF).
+fn http_headers_end_skip(raw: string) -> int {
+    if str_index(raw, "\r\n\r\n") >= 0 {
+        return 4
+    }
+    if str_index(raw, "\n\n") >= 0 {
+        return 2
+    }
+    return 0
+}
+
+fn raw_response_status(raw: string) -> int {
+    // First status line may end with CRLF or LF.
+    let mut first = raw
+    let crlf = str_index(raw, "\r\n")
+    if crlf >= 0 {
+        first = substr(raw, 0, crlf)
+    } else {
+        let lf = str_index(raw, "\n")
+        if lf >= 0 {
+            first = substr(raw, 0, lf)
+        }
+    }
+    let parts = str_split(str_trim_space(first), " ")
     let mut seen = 0
     let mut i = 0
     while i < len(parts) {
@@ -83,11 +118,12 @@ fn raw_response_status(raw: string) -> int {
 }
 
 fn raw_response_body(raw: string) -> string {
-    let cut = str_index(raw, "\r\n\r\n")
+    let cut = http_headers_end(raw)
     if cut < 0 {
         return raw
     }
-    return substr(raw, cut + 4, str_len(raw))
+    let skip = http_headers_end_skip(raw)
+    return substr(raw, cut + skip, str_len(raw))
 }
 
 fn upstream_http_request_text(method: string, path: string, body: string, host: string, port: int, traceparent: string) -> string {
@@ -166,6 +202,10 @@ struct Dispatch {
     stick_count: int = 0
     // Peers UPSERT line when this request wrote stick (broadcast on accept thread).
     stick_peer_line: string = ""
+    // Adopt flags (perf): only replace accept-thread arrays/maps when dirty.
+    // 1 = caller must replace buckets / stick_table from this Dispatch.
+    rate_dirty: int = 0
+    stick_dirty: int = 0
     waf_blocked: int = 0
     waf_detected: int = 0
     servers: []Server
@@ -243,13 +283,18 @@ fn raw_request_complete(raw: string, max_bytes: int) -> int {
             return 1
         }
     }
-    let cut = str_index(raw, "\r\n\r\n")
+    let cut = http_headers_end(raw)
     if cut < 0 {
         return 0
     }
+    let skip = http_headers_end_skip(raw)
     let parsed = http_parse(raw)
     if http_parsed_chunked(parsed) == 1 {
         if str_contains(raw, "\r\n0\r\n\r\n") {
+            return 1
+        }
+        // LF-normalized chunked trailer (rare but possible after stack normalize).
+        if str_contains(raw, "\n0\n\n") {
             return 1
         }
         return 0
@@ -258,7 +303,7 @@ fn raw_request_complete(raw: string, max_bytes: int) -> int {
     if cl <= 0 {
         return 1
     }
-    if str_len(raw) >= cut + 4 + cl {
+    if str_len(raw) >= cut + skip + cl {
         return 1
     }
     return 0
@@ -794,7 +839,10 @@ fn h2_write_chunked_response_full(conn: TlsConn, stream_id: int, status: int, co
 }
 
 fn raw_header(raw: string, name: string) -> string {
-    let lines = str_split(raw, "\r\n")
+    // Split on LF so both CRLF and LF-only framing work. Remaining CR is
+    // stripped by str_trim_space. TLS/stacks that normalize line endings
+    // otherwise drop Origin/CSRF and other critical browser headers.
+    let lines = str_split(raw, "\n")
     let mut i = 1
     let mut pb = str_builder()
     builder_write(pb, name)
@@ -978,6 +1026,9 @@ fn apply_response_headers(rules: []HeaderRule) -> string {
 
 // Pre-render request/response header extras once per request (accept thread).
 fn render_header_extras(rules: []HeaderRule) -> (string, string) {
+    if len(rules) == 0 {
+        return ("", "")
+    }
     return (apply_request_headers(rules, ""), apply_response_headers(rules))
 }
 
@@ -1003,6 +1054,16 @@ fn cors_headers() -> string {
 // contracts. These are deliberately explicit instead of forwarding arbitrary
 // client headers through the edge proxy.
 fn request_header_extras(existing: string, content_type: string, csrf_token: string, attachment_filename: string, origin: string) -> string {
+    // Fast path: nothing to append (common API GET without CORS extras).
+    if str_eq(content_type, "") {
+        if str_eq(csrf_token, "") {
+            if str_eq(attachment_filename, "") {
+                if str_eq(origin, "") {
+                    return existing
+                }
+            }
+        }
+    }
     let mut b = str_builder()
     builder_write(b, existing)
     if not str_eq(content_type, "") {
@@ -1101,41 +1162,29 @@ fn is_pass_header_name(name_lower: string) -> int {
 }
 
 // Extract pass-through headers as "\r\nName: value" lines (H1-ready).
+// Hot path: one colon scan per line (no str_split on ':'), LF or CRLF blocks.
 fn extract_pass_headers(headers: string) -> string {
     if str_eq(headers, "") {
         return ""
     }
-    let lines = str_split(headers, "\r\n")
+    let lines = str_split(headers, "\n")
     let mut out = str_builder()
     let mut i = 0
     while i < len(lines) {
         let line = str_trim_space(lines[i])
         if not str_eq(line, "") {
-            let lower = str_to_lower(line)
-            let parts = str_split(line, ":")
-            if len(parts) >= 2 {
-                let name = str_trim_space(parts[0])
+            let cut = str_index(line, ":")
+            if cut > 0 {
+                let name = str_trim_space(substr(line, 0, cut))
                 let name_l = str_to_lower(name)
                 if is_pass_header_name(name_l) == 1 {
-                    // Rejoin value in case it contained ':'
-                    let mut vb = str_builder()
-                    let mut pi = 1
-                    while pi < len(parts) {
-                        if pi > 1 {
-                            builder_write(vb, ":")
-                        }
-                        builder_write(vb, parts[pi])
-                        pi = pi + 1
-                    }
-                    let val = str_trim_space(builder_string(vb))
+                    let val = str_trim_space(substr(line, cut + 1, str_len(line)))
                     builder_write(out, "\r\n")
                     builder_write(out, name)
                     builder_write(out, ": ")
                     builder_write(out, val)
                 }
             }
-            // silence unused
-            let _ = lower
         }
         i = i + 1
     }
@@ -1147,8 +1196,8 @@ fn h2_encode_pass_headers(extra_headers: string) -> string {
     if str_eq(extra_headers, "") {
         return ""
     }
-    // extra_headers is "\r\nName: value\r\nName: value"
-    let lines = str_split(extra_headers, "\r\n")
+    // extra_headers is "\r\nName: value\r\nName: value" (or LF variants)
+    let lines = str_split(extra_headers, "\n")
     let mut out = str_builder()
     let mut i = 0
     while i < len(lines) {
@@ -1193,7 +1242,7 @@ fn upstream_header_value(headers: string, name: string) -> string {
     if str_eq(want, "") {
         return ""
     }
-    let lines = str_split(headers, "\r\n")
+    let lines = str_split(headers, "\n")
     for _, line in range lines {
         let t = str_trim_space(line)
         let cut = str_index(t, ":")
@@ -1384,12 +1433,17 @@ fn raw_request_first_line(raw: string) -> string {
     if line_end >= 0 {
         return substr(raw, 0, line_end)
     }
+    let lf = str_index(raw, "\n")
+    if lf >= 0 {
+        return substr(raw, 0, lf)
+    }
     return own_string(raw)
 }
 
 fn parse_raw_request(raw: string) -> RawRequest {
     let parsed = http_parse(raw)
-    let cut = str_index(raw, "\r\n\r\n")
+    let cut = http_headers_end(raw)
+    let skip = http_headers_end_skip(raw)
     let first = raw_request_first_line(raw)
     let mut method = http_parsed_method(parsed)
     let mut path = normalize_request_target(http_parsed_path(parsed))
@@ -1403,7 +1457,7 @@ fn parse_raw_request(raw: string) -> RawRequest {
         path = normalize_request_target(raw_request_part(first, 1))
         body = ""
         if cut >= 0 {
-            body = substr(raw, cut + 4, str_len(raw))
+            body = substr(raw, cut + skip, str_len(raw))
         }
         host = raw_header(raw, "Host")
         cookie = raw_header(raw, "Cookie")
@@ -1739,9 +1793,10 @@ fn prepare_dispatch(
         req_extra = req_extra + "Authorization: " + authorization + "\r\n"
     }
     req_extra = request_header_extras(req_extra, content_type, csrf_token, attachment_filename, origin)
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
+    // Deep-own accept-thread state at entry (see prepare_raw_dispatch).
+    let mut srv_list = server_array_clone(servers)
+    let mut be_list = backend_array_clone(backends)
+    let mut rate_list = rate_bucket_array_clone(buckets)
     let empty = Dispatch {
         need_worker: 0,
         c: c,
@@ -1982,17 +2037,11 @@ fn prepare_raw_dispatch(
     let trace_id = traceparent_trace_id(traceparent)
     let span_id = traceparent_span_id(traceparent)
     let client_ip = tcp_peer_addr(c)
-    let mut req_extra, resp_extra = render_header_extras(header_rules)
-    if not str_eq(req.authorization, "") {
-        req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
-    }
-    req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
     let client_ka = client_wants_keepalive(req.version, req.connection)
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
-    let mut stick = stick_table
+    // Defer backend/rate clones and header-rule render until after short-circuit
+    // paths (ACME, CORS, static). Those never mutate LB state.
     let mut stick_n = stick_count
+    let mut stick_dirty = 0
     let empty = Dispatch {
         need_worker: 0,
         c: c,
@@ -2017,8 +2066,8 @@ fn prepare_raw_dispatch(
         rate_limited: 0,
         bytes_out: 0,
         bytes_in: req.bytes_in,
-        req_extra_headers: req_extra,
-        resp_extra_headers: resp_extra,
+        req_extra_headers: "",
+        resp_extra_headers: "",
         client_ka: client_ka,
         retry_plan: retry_plan_empty(),
         frontend_idx: frontend_idx,
@@ -2026,6 +2075,8 @@ fn prepare_raw_dispatch(
         stick_table: make(map[string]string),
         stick_count: stick_n,
         stick_peer_line: "",
+        rate_dirty: 0,
+        stick_dirty: 0,
         waf_blocked: 0,
         waf_detected: 0,
         servers: make([]Server, 0, 0),
@@ -2040,6 +2091,7 @@ fn prepare_raw_dispatch(
     }
 
     // ACME HTTP-01 first: bypass redirect, rate limit, ACL, auth, and proxy (design §1.2).
+    // No backend/rate clones yet.
     if serve_acme_challenge(c, method, path, fe.acme_webroot) == 1 {
         let mut da = empty
         da.err = 0
@@ -2142,6 +2194,20 @@ fn prepare_raw_dispatch(
         return ds
     }
 
+    // --- Proxy path only below: clone LB state and render upstream headers ---
+    let mut req_extra, resp_extra = render_header_extras(header_rules)
+    if not str_eq(req.authorization, "") {
+        req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
+    }
+    req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
+    let mut be_list = backend_array_clone(backends)
+    let mut rate_list = make([]RateBucket, 0, 0)
+    let mut rate_dirty = 0
+    if fe.rate_limit > 0 {
+        rate_list = rate_bucket_array_clone(buckets)
+        rate_dirty = 1
+    }
+
     if fe.rate_limit > 0 {
         let ri = rate_find(rate_list, fe.name)
         if ri >= 0 {
@@ -2150,6 +2216,9 @@ fn prepare_raw_dispatch(
                 let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
                 let mut d = empty
                 d.rate_limited = 1
+                // Still adopt rate state so deny path does not free-alias caller.
+                d.rate_dirty = 1
+                d.buckets = rate_list
                 return d
             }
             rate_list[ri] = rate_take(rate_list[ri])
@@ -2161,13 +2230,15 @@ fn prepare_raw_dispatch(
                 let _ = raw_http_respond_method(c, method, 429, "rate limited\n")
                 let mut d = empty
                 d.rate_limited = 1
+                d.rate_dirty = 1
+                d.buckets = rate_list
                 return d
             }
             rate_list = client_rate_take_ip(rate_list, client_ip, fe.rate_limit)
         }
     }
 
-    if frontend_at_maxconn(srv_list, fe) == 1 {
+    if frontend_at_maxconn(servers, fe) == 1 {
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
         let _ = raw_http_respond_method(c, method, 503, "frontend maxconn reached\n")
         let mut d = empty
@@ -2251,7 +2322,7 @@ fn prepare_raw_dispatch(
     }
 
     let mut be = be_list[bi]
-    if backend_at_maxconn(srv_list, be) == 1 {
+    if backend_at_maxconn(servers, be) == 1 {
         let mut detail2 = str_builder()
         builder_write(detail2, "status=503 backend=")
         builder_write(detail2, be.name)
@@ -2274,9 +2345,29 @@ fn prepare_raw_dispatch(
         let ck = stick_client_key(fe, client_ip, xff)
         stick_key = stick_make_key(be.name, "src", ck)
     }
-    let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
-    stick = stick2
-    stick_n = stick_n2
+    // Fast path: no stick table and no cookie sticky → pick without map own/copy.
+    let mut si = 0 - 1
+    let mut stick = make(map[string]string)
+    let mut peer_line = ""
+    let mut need_stick = 0
+    if not str_eq(be.stick_on, "") {
+        need_stick = 1
+    }
+    if str_len(fe.sticky_cookie) > 0 {
+        need_stick = 1
+    }
+    if need_stick == 1 {
+        let si2, stick2, stick_n2, peer2 = pick_server_stick(
+            servers, be, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
+        )
+        si = si2
+        stick = stick2
+        stick_n = stick_n2
+        peer_line = peer2
+        stick_dirty = 1
+    } else {
+        si = pick_server(servers, be, host, fe.sticky_cookie, sticky_val)
+    }
     be.rr_idx = be.rr_idx + 1
     if be.rr_idx > 1000000000 {
         be.rr_idx = 0
@@ -2290,16 +2381,25 @@ fn prepare_raw_dispatch(
         let _ = raw_http_respond_method(c, method, 502, "no server\n")
         let mut d = empty
         d.stick_peer_line = peer_line
+        if stick_dirty == 1 {
+            d.stick_dirty = 1
+            d.stick_table = stick
+            d.stick_count = stick_n
+        }
+        if rate_dirty == 1 {
+            d.rate_dirty = 1
+            d.buckets = rate_list
+        }
         return d
     }
 
-    let s = srv_list[si]
+    let s = servers[si]
     let mut timeout_ms = be.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
     }
-    // Only hop0 holds maxconn reservation (D20).
-    srv_list = server_conn_delta(srv_list, si, 1)
+    // Only hop0 holds maxconn reservation (D20). Single clone of servers here.
+    let srv_list = server_conn_delta(servers, si, 1)
     let plan = build_retry_plan(srv_list, be, host, fe.sticky_cookie, sticky_val, si, be.retries)
 
     let mut ws = 0
@@ -2344,15 +2444,58 @@ fn prepare_raw_dispatch(
         stick_table: stick,
         stick_count: stick_n,
         stick_peer_line: peer_line,
+        rate_dirty: rate_dirty,
+        stick_dirty: stick_dirty,
         waf_blocked: 0,
         waf_detected: waf_det_flag,
-        // servers already owned after server_conn_delta; backends/buckets must not alias caller.
+        // Owned once: servers from conn_delta, backends from entry clone, buckets if dirty.
         servers: srv_list,
-        backends: backend_array_clone(be_list),
-        buckets: rate_bucket_array_clone(rate_list),
+        backends: be_list,
+        buckets: rate_list,
     }
 }
 
+fn tls_client_respond(conn: TlsConn, h2_stream: int, method: string, status: int, body: string) {
+    if h2_stream > 0 {
+        let _ = h2_write_chunked_response(conn, h2_stream, status, body)
+    } else {
+        let _ = tls_http_respond_method(conn, method, status, body)
+    }
+}
+
+// Attach dirty rate/stick (and backends when rr advanced) for early TLS exits.
+fn proxy_result_handback(
+    out: ProxyResult,
+    backends_dirty: int,
+    be_list: []Backend,
+    rate_dirty: int,
+    rate_list: []RateBucket,
+    stick_dirty: int,
+    stick: map[string]string,
+    stick_n: int,
+    peer_line: string
+) -> ProxyResult {
+    let mut o = out
+    if backends_dirty == 1 {
+        o.backends = be_list
+        o.backends_dirty = 1
+    }
+    if rate_dirty == 1 {
+        o.rate_dirty = 1
+        o.buckets = rate_list
+    }
+    if stick_dirty == 1 {
+        o.stick_dirty = 1
+        o.stick_table = stick
+        o.stick_count = stick_n
+    }
+    o.stick_peer_line = peer_line
+    return o
+}
+
+// Lean TLS/H2 stream handler. Always deep-own backends (free-analysis cannot transfer
+// []Backend safely). Rate only if limited; stick only if sticky. Dirty flags prevent
+// main from wiping live tables on early reject.
 fn handle_tls_proxy_request(
     conn: TlsConn,
     req: RawRequest,
@@ -2380,42 +2523,43 @@ fn handle_tls_proxy_request(
         req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
     req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
-    let mut stick = stick_table
+    let mut be_list = backend_array_clone(backends)
+    let mut rate_list = make([]RateBucket, 0, 0)
+    let mut rate_dirty = 0
+    if fe.rate_limit > 0 {
+        rate_list = rate_bucket_array_clone(buckets)
+        rate_dirty = 1
+    }
     let mut stick_n = stick_count
+    let mut stick_dirty = 0
+    let mut stick_session = make(map[string]string)
     let mut peer_line = ""
     let mut out = ProxyResult {
         err: 1,
         bytes_in: req.bytes_in,
-        servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
-        stick_table: stick,
+        servers: make([]Server, 0, 0),
+        backends: make([]Backend, 0, 0),
+        buckets: make([]RateBucket, 0, 0),
+        stick_table: make(map[string]string),
         stick_count: stick_n,
-        stick_peer_line: ""
+        stick_peer_line: "",
+        rate_dirty: 0,
+        stick_dirty: 0,
+        servers_dirty: 0,
+        backends_dirty: 0
     }
 
     if req.ok == 0 {
         log_proxy_reject("malformed_request", method, path, host, "status=400")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 400, "bad request\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 400, "bad request\n")
-        }
-        return out
+        tls_client_respond(conn, h2_stream, method, 400, "bad request\n")
+        return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
     }
 
     if fe.request_body_limit_bytes > 0 {
         if req.bytes_in > fe.request_body_limit_bytes {
             log_proxy_reject("request_too_large", method, path, host, "status=413")
-            if h2_stream > 0 {
-                let _ = h2_write_chunked_response(conn, h2_stream, 413, "request too large\n")
-            } else {
-                let _ = tls_http_respond_method(conn, method, 413, "request too large\n")
-            }
-            return out
+            tls_client_respond(conn, h2_stream, method, 413, "request too large\n")
+            return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
         }
     }
 
@@ -2424,38 +2568,25 @@ fn handle_tls_proxy_request(
         if ri >= 0 {
             if rate_would_deny(rate_list[ri]) == 1 {
                 log_proxy_reject("rate_limited", method, path, host, "status=429")
-                if h2_stream > 0 {
-                    let _ = h2_write_chunked_response(conn, h2_stream, 429, "rate limited\n")
-                } else {
-                    let _ = tls_http_respond_method(conn, method, 429, "rate limited\n")
-                }
+                tls_client_respond(conn, h2_stream, method, 429, "rate limited\n")
                 out.rate_limited = 1
-                return out
+                return proxy_result_handback(out, 0, be_list, 1, rate_list, stick_dirty, stick_session, stick_n, peer_line)
             }
             rate_list[ri] = rate_take(rate_list[ri])
         }
     }
 
-    if frontend_at_maxconn(srv_list, fe) == 1 {
+    if frontend_at_maxconn(servers, fe) == 1 {
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 503, "frontend maxconn reached\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 503, "frontend maxconn reached\n")
-        }
-        return out
+        tls_client_respond(conn, h2_stream, method, 503, "frontend maxconn reached\n")
+        return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
     }
 
     if acl_decide(acls, fe.name, path, host, method) == 1 {
         log_proxy_reject("acl_denied", method, path, host, "status=403")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 403, "forbidden\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 403, "forbidden\n")
-        }
+        tls_client_respond(conn, h2_stream, method, 403, "forbidden\n")
         out.denied = 1
-        out.buckets = rate_list
-        return out
+        return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
     }
 
     let be_name = select_backend(routes, fe.name, path, host, fe.backend)
@@ -2471,30 +2602,19 @@ fn handle_tls_proxy_request(
                 }
                 out.err = 0
                 out.bytes_out = str_len(body_welcome)
-                out.buckets = rate_list
-                return out
+                return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
             }
         }
         log_proxy_reject("backend_missing", method, path, host, "status=503")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 503, "no backend\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 503, "no backend\n")
-        }
-        out.buckets = rate_list
-        return out
+        tls_client_respond(conn, h2_stream, method, 503, "no backend\n")
+        return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
     }
 
     let mut be = be_list[bi]
-    if backend_at_maxconn(srv_list, be) == 1 {
+    if backend_at_maxconn(servers, be) == 1 {
         log_proxy_reject("backend_maxconn", method, path, host, "status=503")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 503, "backend maxconn reached\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 503, "backend maxconn reached\n")
-        }
-        out.buckets = rate_list
-        return out
+        tls_client_respond(conn, h2_stream, method, 503, "backend maxconn reached\n")
+        return proxy_result_handback(out, 0, be_list, rate_dirty, rate_list, stick_dirty, stick_session, stick_n, peer_line)
     }
 
     let mut sticky_val = ""
@@ -2507,10 +2627,27 @@ fn handle_tls_proxy_request(
         let ck = stick_client_key(fe, client_ip, xff)
         stick_key = stick_make_key(be.name, "src", ck)
     }
-    let si, stick2, stick_n2, pline = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
-    stick = stick2
-    stick_n = stick_n2
-    peer_line = pline
+    let mut si = 0 - 1
+    let mut stick = stick_session
+    let mut need_stick = 0
+    if not str_eq(be.stick_on, "") {
+        need_stick = 1
+    }
+    if str_len(fe.sticky_cookie) > 0 {
+        need_stick = 1
+    }
+    if need_stick == 1 {
+        let si2, stick2, stick_n2, pline = pick_server_stick(
+            servers, be, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
+        )
+        si = si2
+        stick = stick2
+        stick_n = stick_n2
+        peer_line = pline
+        stick_dirty = 1
+    } else {
+        si = pick_server(servers, be, host, fe.sticky_cookie, sticky_val)
+    }
     be.rr_idx = be.rr_idx + 1
     if be.rr_idx > 1000000000 {
         be.rr_idx = 0
@@ -2518,25 +2655,17 @@ fn handle_tls_proxy_request(
     be_list[bi] = be
     if si < 0 {
         log_proxy_reject("no_server", method, path, host, "status=502")
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 502, "no server\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 502, "no server\n")
-        }
-        out.backends = be_list
-        out.buckets = rate_list
-        out.stick_table = stick
-        out.stick_count = stick_n
-        out.stick_peer_line = peer_line
-        return out
+        tls_client_respond(conn, h2_stream, method, 502, "no server\n")
+        // rr advanced — always hand back backends
+        return proxy_result_handback(out, 1, be_list, rate_dirty, rate_list, stick_dirty, stick, stick_n, peer_line)
     }
 
-    let s = srv_list[si]
+    let s = servers[si]
     let mut timeout_ms = be.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
     }
-    srv_list = server_conn_delta(srv_list, si, 1)
+    let mut srv_list = server_conn_delta(servers, si, 1)
     let res = forward_http_retries(method, path, body, req.cookie, traceparent, s.host, s.port, timeout_ms, be.retries, host, req_extra, resp_extra)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
@@ -2560,11 +2689,7 @@ fn handle_tls_proxy_request(
     } else {
         st = 502
         log_upstream_failure(method, path, s.host, s.port, res.status, res.retries)
-        if h2_stream > 0 {
-            let _ = h2_write_chunked_response(conn, h2_stream, 502, "bad gateway\n")
-        } else {
-            let _ = tls_http_respond_method(conn, method, 502, "bad gateway\n")
-        }
+        tls_client_respond(conn, h2_stream, method, 502, "bad gateway\n")
         srv_list = mark_server_req(srv_list, si, 0, 1)
         out.err = 1
     }
@@ -2575,10 +2700,18 @@ fn handle_tls_proxy_request(
     out.retries = res.retries
     out.server_idx = si
     out.servers = srv_list
+    out.servers_dirty = 1
     out.backends = be_list
-    out.buckets = rate_list
-    out.stick_table = stick
-    out.stick_count = stick_n
+    out.backends_dirty = 1
+    if rate_dirty == 1 {
+        out.rate_dirty = 1
+        out.buckets = rate_list
+    }
+    if stick_dirty == 1 {
+        out.stick_dirty = 1
+        out.stick_table = stick
+        out.stick_count = stick_n
+    }
     out.stick_peer_line = peer_line
     return out
 }
@@ -2635,20 +2768,34 @@ fn handle_tls_h2_once(
     let _u = http2_conn_use(h2c)
     let _s = http2_conn_set_server(1)
     let _w = tls_write(conn, http2_empty_settings())
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
-    let mut stick = stick_table
+    // One deep-own of accept-thread state per H2 connection (not per stream).
+    // Free-analysis: never alias main's live arrays into mut locals.
+    let mut srv_list = server_array_clone(servers)
+    let mut be_list = backend_array_clone(backends)
+    // Rate/stick only if this FE can mutate them (streams share working set).
+    let mut rate_list = make([]RateBucket, 0, 0)
+    let mut rate_session = 0
+    if fe.rate_limit > 0 {
+        rate_list = rate_bucket_array_clone(buckets)
+        rate_session = 1
+    }
+    // Stick table: own once per H2 connection (backends may stick on src without FE cookie).
+    let mut stick = stick_table_own(stick_table)
     let mut stick_n = stick_count
+    let mut stick_session = 1
     let mut peer_line_acc = ""
     let mut out = ProxyResult {
         err: 1,
-        servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
-        stick_table: stick,
+        servers: make([]Server, 0, 0),
+        backends: make([]Backend, 0, 0),
+        buckets: make([]RateBucket, 0, 0),
+        stick_table: make(map[string]string),
         stick_count: stick_n,
-        stick_peer_line: ""
+        stick_peer_line: "",
+        rate_dirty: 0,
+        stick_dirty: 0,
+        servers_dirty: 0,
+        backends_dirty: 0
     }
     let mut done = 0
     let mut loops = 0
@@ -2672,12 +2819,33 @@ fn handle_tls_h2_once(
                         } else {
                             let _ = h2_wait_stream_body(conn, stream)
                             let req = h2_request_from_stream(stream)
-                            let tr = handle_tls_proxy_request(conn, req, fe, routes, acls, be_list, srv_list, rate_list, header_rules, stream, stick, stick_n, client_ip)
-                            srv_list = tr.servers
-                            be_list = tr.backends
-                            rate_list = tr.buckets
-                            stick = tr.stick_table
-                            stick_n = tr.stick_count
+                            // Lean stream handler + dirty merge (session owns working copies).
+                            let tr = handle_tls_proxy_request(
+                                conn, req, fe, routes, acls, be_list, srv_list, rate_list,
+                                header_rules, stream, stick, stick_n, client_ip
+                            )
+                            // Adversarial: never replace working state with empty non-dirty results.
+                            if tr.servers_dirty == 1 {
+                                srv_list = tr.servers
+                            } else {
+                                let _ = tr.servers
+                            }
+                            if tr.backends_dirty == 1 {
+                                be_list = tr.backends
+                            } else {
+                                let _ = tr.backends
+                            }
+                            if tr.rate_dirty == 1 {
+                                rate_list = tr.buckets
+                            } else {
+                                let _ = tr.buckets
+                            }
+                            if tr.stick_dirty == 1 {
+                                stick = tr.stick_table
+                                stick_n = tr.stick_count
+                            } else {
+                                let _ = tr.stick_table
+                            }
                             if not str_eq(tr.stick_peer_line, "") {
                                 peer_line_acc = peer_line_acc + tr.stick_peer_line
                             }
@@ -2730,11 +2898,20 @@ fn handle_tls_h2_once(
         }
         loops = loops + 1
     }
+    // Session-owned copies adopted by main (one clone per connection).
     out.servers = srv_list
     out.backends = be_list
-    out.buckets = rate_list
-    out.stick_table = stick
-    out.stick_count = stick_n
+    out.servers_dirty = 1
+    out.backends_dirty = 1
+    if rate_session == 1 {
+        out.buckets = rate_list
+        out.rate_dirty = 1
+    }
+    if stick_session == 1 {
+        out.stick_table = stick
+        out.stick_count = stick_n
+        out.stick_dirty = 1
+    }
     out.stick_peer_line = peer_line_acc
     if handled == 0 {
         if out.err != 0 {
@@ -2779,20 +2956,28 @@ fn handle_h3_proxy_request(
     let span_id = traceparent_span_id(traceparent)
     let mut req_extra, resp_extra = render_header_extras(header_rules)
     req_extra = request_header_extras(req_extra, req.content_type, req.csrf_token, req.attachment_filename, req.origin)
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
-    let mut stick = stick_table
+    let mut be_list = backend_array_clone(backends)
+    let mut rate_list = make([]RateBucket, 0, 0)
+    let mut rate_dirty = 0
+    if fe.rate_limit > 0 {
+        rate_list = rate_bucket_array_clone(buckets)
+        rate_dirty = 1
+    }
     let mut stick_n = stick_count
+    let mut stick_dirty = 0
     let mut out = ProxyResult {
         err: 1,
         bytes_in: req.bytes_in,
-        servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
-        stick_table: stick,
+        servers: make([]Server, 0, 0),
+        backends: make([]Backend, 0, 0),
+        buckets: make([]RateBucket, 0, 0),
+        stick_table: make(map[string]string),
         stick_count: stick_n,
-        stick_peer_line: ""
+        stick_peer_line: "",
+        rate_dirty: 0,
+        stick_dirty: 0,
+        servers_dirty: 0,
+        backends_dirty: 0
     }
 
     if req.ok == 0 {
@@ -2814,21 +2999,30 @@ fn handle_h3_proxy_request(
                 log_proxy_reject("rate_limited", method, path, host, "status=429")
                 let _ = h3_respond(h3_handle, stream, 429, "rate limited\n")
                 out.rate_limited = 1
+                out.rate_dirty = 1
+                out.buckets = rate_list
                 return out
             }
             rate_list[ri] = rate_take(rate_list[ri])
         }
     }
-    if frontend_at_maxconn(srv_list, fe) == 1 {
+    if frontend_at_maxconn(servers, fe) == 1 {
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
         let _ = h3_respond(h3_handle, stream, 503, "frontend maxconn reached\n")
+        if rate_dirty == 1 {
+            out.rate_dirty = 1
+            out.buckets = rate_list
+        }
         return out
     }
     if acl_decide(acls, fe.name, path, host, method) == 1 {
         log_proxy_reject("acl_denied", method, path, host, "status=403")
         let _ = h3_respond(h3_handle, stream, 403, "forbidden\n")
         out.denied = 1
-        out.buckets = rate_list
+        if rate_dirty == 1 {
+            out.rate_dirty = 1
+            out.buckets = rate_list
+        }
         return out
     }
 
@@ -2841,21 +3035,30 @@ fn handle_h3_proxy_request(
                 let _ = h3_respond(h3_handle, stream, 200, body_welcome)
                 out.err = 0
                 out.bytes_out = str_len(body_welcome)
-                out.buckets = rate_list
+                if rate_dirty == 1 {
+                    out.rate_dirty = 1
+                    out.buckets = rate_list
+                }
                 return out
             }
         }
         log_proxy_reject("backend_missing", method, path, host, "status=503")
         let _ = h3_respond(h3_handle, stream, 503, "no backend\n")
-        out.buckets = rate_list
+        if rate_dirty == 1 {
+            out.rate_dirty = 1
+            out.buckets = rate_list
+        }
         return out
     }
 
     let mut be = be_list[bi]
-    if backend_at_maxconn(srv_list, be) == 1 {
+    if backend_at_maxconn(servers, be) == 1 {
         log_proxy_reject("backend_maxconn", method, path, host, "status=503")
         let _ = h3_respond(h3_handle, stream, 503, "backend maxconn reached\n")
-        out.buckets = rate_list
+        if rate_dirty == 1 {
+            out.rate_dirty = 1
+            out.buckets = rate_list
+        }
         return out
     }
 
@@ -2872,11 +3075,28 @@ fn handle_h3_proxy_request(
             stick_key = stick_make_key(be.name, "src", ck)
         }
     }
-    let si, stick2, stick_n2, peer_line = pick_server_stick(
-        srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n
-    )
-    stick = stick2
-    stick_n = stick_n2
+    let mut si = 0 - 1
+    let mut stick = make(map[string]string)
+    let mut peer_line = ""
+    let mut need_stick = 0
+    if not str_eq(be.stick_on, "") {
+        need_stick = 1
+    }
+    if str_len(fe.sticky_cookie) > 0 {
+        need_stick = 1
+    }
+    if need_stick == 1 {
+        let si2, stick2, stick_n2, peer2 = pick_server_stick(
+            servers, be, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
+        )
+        si = si2
+        stick = stick2
+        stick_n = stick_n2
+        peer_line = peer2
+        stick_dirty = 1
+    } else {
+        si = pick_server(servers, be, host, fe.sticky_cookie, sticky_val)
+    }
     be.rr_idx = be.rr_idx + 1
     if be.rr_idx > 1000000000 {
         be.rr_idx = 0
@@ -2886,19 +3106,26 @@ fn handle_h3_proxy_request(
         log_proxy_reject("no_server", method, path, host, "status=502")
         let _ = h3_respond(h3_handle, stream, 502, "no server\n")
         out.backends = be_list
-        out.buckets = rate_list
-        out.stick_table = stick
-        out.stick_count = stick_n
+        out.backends_dirty = 1
+        if rate_dirty == 1 {
+            out.rate_dirty = 1
+            out.buckets = rate_list
+        }
+        if stick_dirty == 1 {
+            out.stick_dirty = 1
+            out.stick_table = stick
+            out.stick_count = stick_n
+        }
         out.stick_peer_line = peer_line
         return out
     }
 
-    let s = srv_list[si]
+    let s = servers[si]
     let mut timeout_ms = be.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
     }
-    srv_list = server_conn_delta(srv_list, si, 1)
+    let mut srv_list = server_conn_delta(servers, si, 1)
     let res = forward_http_retries(method, path, body, req.cookie, traceparent, s.host, s.port, timeout_ms, be.retries, host, req_extra, resp_extra)
     srv_list = server_conn_delta(srv_list, si, 0 - 1)
     let mut st = res.status
@@ -2924,10 +3151,18 @@ fn handle_h3_proxy_request(
     out.retries = res.retries
     out.server_idx = si
     out.servers = srv_list
+    out.servers_dirty = 1
     out.backends = be_list
-    out.buckets = rate_list
-    out.stick_table = stick
-    out.stick_count = stick_n
+    out.backends_dirty = 1
+    if rate_dirty == 1 {
+        out.rate_dirty = 1
+        out.buckets = rate_list
+    }
+    if stick_dirty == 1 {
+        out.stick_dirty = 1
+        out.stick_table = stick
+        out.stick_count = stick_n
+    }
     out.stick_peer_line = peer_line
     return out
 }
@@ -2979,23 +3214,24 @@ fn worker_upstream(
     done: chan[(int, int, int, int, int, int, int, int, int, int)]
 ) -> int {
     let mut res = FwdResult {}
+    let headers = build_upstream_headers(orig_host, cookie, traceparent, req_extra_headers)
     if pool >= 0 {
         let fd = tcp_pool_acquire(pool)
         if fd >= 0 {
-            let headers = build_upstream_headers(orig_host, cookie, traceparent, req_extra_headers)
             let fr = http_forward_fd(fd, method, path, host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
             let bdy = http_forward_body(fr)
             let uph = http_forward_headers(fr)
+            let st0 = http_forward_status(fr)
             res = FwdResult {
-                status: http_forward_status(fr),
+                status: st0,
                 body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
             }
-            let reusable = upstream_connection_reusable(ok, http_forward_status(fr), uph)
+            let reusable = upstream_connection_reusable(ok, st0, uph)
             let _rel = tcp_pool_release(pool, fd, reusable)
         }
     }
@@ -3036,43 +3272,45 @@ fn worker_upstream(
     return err
 }
 
-// Try one hop: pool first, then full connect. Returns FwdResult with ok set.
+// Try one hop: pool first, then full connect. headers is pre-built once per request.
 fn try_upstream_hop(
     method: string,
     path: string,
     body: string,
-    cookie: string,
-    traceparent: string,
     hop: RetryHop,
     timeout_ms: int,
+    headers: string,
+    resp_extra_headers: string,
+    cookie: string,
+    traceparent: string,
     orig_host: string,
-    req_extra_headers: string,
-    resp_extra_headers: string
+    req_extra_headers: string
 ) -> FwdResult {
     let mut res = FwdResult {}
     if hop.pool >= 0 {
         let fd = tcp_pool_acquire(hop.pool)
         if fd >= 0 {
-            let headers = build_upstream_headers(orig_host, cookie, traceparent, req_extra_headers)
             let fr = http_forward_fd(fd, method, path, hop.host, headers, body, timeout_ms)
             let ok = http_forward_ok(fr)
             let bdy = http_forward_body(fr)
             let uph = http_forward_headers(fr)
+            let st = http_forward_status(fr)
             res = FwdResult {
-                status: http_forward_status(fr),
+                status: st,
                 body: bdy,
                 ok: ok,
                 bytes: http_forward_body_len(fr),
                 content_type: resolve_content_type(uph, bdy),
                 extra_headers: merge_response_extras(extract_pass_headers(uph), resp_extra_headers)
             }
-            let reusable = upstream_connection_reusable(ok, http_forward_status(fr), uph)
+            let reusable = upstream_connection_reusable(ok, st, uph)
             let _rel = tcp_pool_release(hop.pool, fd, reusable)
         }
     }
     if res.ok == 0 {
         if hop.server_idx >= 0 {
             if not str_eq(hop.host, "") {
+                // Fallback connect path rebuilds headers only when pool miss/fail.
                 res = forward_http(method, path, body, cookie, traceparent, hop.host, hop.port, timeout_ms, orig_host, req_extra_headers, resp_extra_headers)
             }
         }
@@ -3110,6 +3348,8 @@ fn worker_raw_upstream(
     let mut failed_hops = 0
     let mut last_host = ""
     let mut last_port = 0
+    // Build upstream request headers once for all hops (pool path).
+    let headers = build_upstream_headers(orig_host, cookie, traceparent, req_extra_headers)
     let mut i = 0
     while i < plan.n {
         let hop = retry_plan_hop(plan, i)
@@ -3119,7 +3359,10 @@ fn worker_raw_upstream(
         }
         last_host = hop.host
         last_port = hop.port
-        res = try_upstream_hop(method, path, body, cookie, traceparent, hop, timeout_ms, orig_host, req_extra_headers, resp_extra_headers)
+        res = try_upstream_hop(
+            method, path, body, hop, timeout_ms, headers, resp_extra_headers,
+            cookie, traceparent, orig_host, req_extra_headers
+        )
         if res.ok == 1 {
             served_si = hop.server_idx
             break
@@ -3267,11 +3510,17 @@ fn prepare_ws_dispatch(
     if not str_eq(req.authorization, "") {
         req_extra = req_extra + "Authorization: " + req.authorization + "\r\n"
     }
-    let mut srv_list = servers
-    let mut be_list = backends
-    let mut rate_list = buckets
-    let mut stick = stick_table
+    // Match prepare_raw_dispatch ownership: clone backends; rate only if limited;
+    // stick only when stick/cookie sticky; servers once at conn_delta.
+    let mut be_list = backend_array_clone(backends)
+    let mut rate_list = make([]RateBucket, 0, 0)
+    let mut rate_dirty = 0
+    if fe.rate_limit > 0 {
+        rate_list = rate_bucket_array_clone(buckets)
+        rate_dirty = 1
+    }
     let mut stick_n = stick_count
+    let mut stick_dirty = 0
     let empty = Dispatch {
         need_worker: 0,
         c: 0 - 1,
@@ -3300,10 +3549,12 @@ fn prepare_ws_dispatch(
         ws_raw: req.raw,
         req_extra_headers: req_extra,
         resp_extra_headers: resp_extra,
-        servers: srv_list,
-        backends: be_list,
-        buckets: rate_list,
-        stick_table: stick,
+        rate_dirty: 0,
+        stick_dirty: 0,
+        servers: make([]Server, 0, 0),
+        backends: make([]Backend, 0, 0),
+        buckets: make([]RateBucket, 0, 0),
+        stick_table: make(map[string]string),
         stick_count: stick_n,
         stick_peer_line: ""
     }
@@ -3319,40 +3570,33 @@ fn prepare_ws_dispatch(
                 log_proxy_reject("rate_limited", method, path, host, "status=429")
                 let mut d = empty
                 d.rate_limited = 1
+                d.rate_dirty = 1
                 d.buckets = rate_list
                 return d
             }
             rate_list[ri] = rate_take(rate_list[ri])
         }
     }
-    if frontend_at_maxconn(srv_list, fe) == 1 {
+    if frontend_at_maxconn(servers, fe) == 1 {
         log_proxy_reject("frontend_maxconn", method, path, host, "status=503")
-        let mut d = empty
-        d.buckets = rate_list
-        return d
+        return empty
     }
     if acl_decide(acls, fe.name, path, host, method) == 1 {
         log_proxy_reject("acl_denied", method, path, host, "status=403")
         let mut d = empty
         d.denied = 1
-        d.buckets = rate_list
         return d
     }
     let be_name = select_backend(routes, fe.name, path, host, fe.backend)
     let bi = find_backend(be_list, be_name)
     if bi < 0 {
         log_proxy_reject("backend_missing", method, path, host, "status=503")
-        let mut d = empty
-        d.buckets = rate_list
-        return d
+        return empty
     }
     let mut be = be_list[bi]
-    if backend_at_maxconn(srv_list, be) == 1 {
+    if backend_at_maxconn(servers, be) == 1 {
         log_proxy_reject("backend_maxconn", method, path, host, "status=503")
-        let mut d = empty
-        d.backends = be_list
-        d.buckets = rate_list
-        return d
+        return empty
     }
     let mut sticky_val = ""
     if str_len(fe.sticky_cookie) > 0 {
@@ -3364,9 +3608,28 @@ fn prepare_ws_dispatch(
         let ck = stick_client_key(fe, client_ip, xff)
         stick_key = stick_make_key(be.name, "src", ck)
     }
-    let si, stick2, stick_n2, peer_line = pick_server_stick(srv_list, be, host, fe.sticky_cookie, sticky_val, stick, stick_key, now_ms(), stick_n)
-    stick = stick2
-    stick_n = stick_n2
+    let mut si = 0 - 1
+    let mut stick = make(map[string]string)
+    let mut peer_line = ""
+    let mut need_stick = 0
+    if not str_eq(be.stick_on, "") {
+        need_stick = 1
+    }
+    if str_len(fe.sticky_cookie) > 0 {
+        need_stick = 1
+    }
+    if need_stick == 1 {
+        let si2, stick2, stick_n2, peer2 = pick_server_stick(
+            servers, be, host, fe.sticky_cookie, sticky_val, stick_table, stick_key, now_ms(), stick_n
+        )
+        si = si2
+        stick = stick2
+        stick_n = stick_n2
+        peer_line = peer2
+        stick_dirty = 1
+    } else {
+        si = pick_server(servers, be, host, fe.sticky_cookie, sticky_val)
+    }
     be.rr_idx = be.rr_idx + 1
     if be.rr_idx > 1000000000 {
         be.rr_idx = 0
@@ -3376,18 +3639,24 @@ fn prepare_ws_dispatch(
         log_proxy_reject("no_server", method, path, host, "status=502")
         let mut d = empty
         d.backends = be_list
-        d.buckets = rate_list
-        d.stick_table = stick
-        d.stick_count = stick_n
+        if rate_dirty == 1 {
+            d.rate_dirty = 1
+            d.buckets = rate_list
+        }
+        if stick_dirty == 1 {
+            d.stick_dirty = 1
+            d.stick_table = stick
+            d.stick_count = stick_n
+        }
         d.stick_peer_line = peer_line
         return d
     }
-    let s = srv_list[si]
+    let s = servers[si]
     let mut timeout_ms = be.connect_timeout_ms
     if timeout_ms <= 0 {
         timeout_ms = 5000
     }
-    srv_list = server_conn_delta(srv_list, si, 1)
+    let srv_list = server_conn_delta(servers, si, 1)
     return Dispatch {
         need_worker: 1,
         c: 0 - 1,
@@ -3416,6 +3685,8 @@ fn prepare_ws_dispatch(
         ws_raw: req.raw,
         req_extra_headers: req_extra,
         resp_extra_headers: resp_extra,
+        rate_dirty: rate_dirty,
+        stick_dirty: stick_dirty,
         servers: srv_list,
         backends: be_list,
         buckets: rate_list,
@@ -3425,12 +3696,12 @@ fn prepare_ws_dispatch(
     }
 }
 
-// Read upstream HTTP response headers (and any bytes already available after \r\n\r\n).
+// Read upstream HTTP response headers (and any bytes already available after headers end).
 fn ws_read_http_response(up: int, timeout_ms: int) -> string {
     let _ = tcp_set_timeout(up, timeout_ms)
     let mut resp = ""
     let mut spins = 0
-    while str_index(resp, "\r\n\r\n") < 0 {
+    while http_headers_end(resp) < 0 {
         let chunk = tcp_read(up)
         if str_eq(chunk, "") {
             return resp
@@ -3674,8 +3945,8 @@ fn prepare_tcp_dispatch(
     backends: []Backend,
     servers: []Server
 ) -> Dispatch {
-    let mut srv_list = servers
-    let mut be_list = backends
+    let mut srv_list = server_array_clone(servers)
+    let mut be_list = backend_array_clone(backends)
     let rate_list = make([]RateBucket, 0, 0)
     let empty = Dispatch {
         need_worker: 0,

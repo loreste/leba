@@ -4,7 +4,8 @@ pack balance
 fn server_indices_for(servers: []Server, backend: string) -> []int {
     let mut out = make([]int, 0, 8)
     for i, s in range servers {
-        if str_eq(own_string(s.backend), own_string(backend)) {
+        // No own_string: hot path; strings are already owned on Server.
+        if str_eq(s.backend, backend) {
             out = append(out, i)
         }
     }
@@ -110,41 +111,54 @@ fn pick_server(
     sticky_name: string,
     sticky_val: string
 ) -> int {
-    let idxs = server_indices_for(servers, own_string(be.name))
-    if len(idxs) == 0 {
-        return -1
-    }
-
-    // Sticky cookie: value is server name (must be eligible — never stick to DRAIN/DOWN)
+    // Single-pass: membership + sticky + eligible pool (avoid own_string and double scans).
+    let mut idxs = make([]int, 0, 8)
+    let mut pool = make([]int, 0, 8)
+    let mut sticky_hit = 0 - 1
+    let mut want_sticky = 0
     if str_len(sticky_name) > 0 {
         if str_len(sticky_val) > 0 {
-            for _, si in range idxs {
-                if str_eq(own_string(servers[si].name), own_string(sticky_val)) {
-                    if server_eligible(servers[si]) == 1 {
-                        return si
+            want_sticky = 1
+        }
+    }
+    let mut i = 0
+    while i < len(servers) {
+        let s = servers[i]
+        if str_eq(s.backend, be.name) {
+            idxs = append(idxs, i)
+            if want_sticky == 1 {
+                if sticky_hit < 0 {
+                    if str_eq(s.name, sticky_val) {
+                        if server_eligible(s) == 1 {
+                            sticky_hit = i
+                        }
                     }
                 }
             }
-            // sticky target unusable — fall through to normal pick
+            if server_eligible(s) == 1 {
+                pool = append(pool, i)
+            }
         }
+        i = i + 1
     }
-
-    // Eligible only (UP and not DRAIN). Drained servers never receive new traffic.
-    // Last-resort for all-DOWN (not drain): pick any alive so total outage is rare;
-    // pure DRAIN of all members fails closed (502) so deploys can empty a pool.
-    let mut pool = make([]int, 0, len(idxs))
-    for _, si in range idxs {
-        if server_eligible(servers[si]) == 1 {
-            pool = append(pool, si)
-        }
+    if len(idxs) == 0 {
+        return -1
+    }
+    // Sticky cookie: value is server name (must be eligible — never stick to DRAIN/DOWN)
+    if sticky_hit >= 0 {
+        return sticky_hit
     }
     if len(pool) == 0 {
         // Fail closed when only DRAIN members remain (deploy empty pool).
         // If everything is hard-DOWN, also fail closed (no silent blackhole to dead hosts).
         return -1
     }
+    // One eligible member → any algorithm is the same (common SMB config).
+    if len(pool) == 1 {
+        return pool[0]
+    }
 
-    let algo = own_string(be.balance)
+    let algo = be.balance
     match algo {
         "random" => {
             let r = rand_intn(len(pool))
@@ -332,6 +346,7 @@ fn stick_table_get(table: map[string]string, key: string, now_ms: int) -> string
 }
 
 // Returns updated table, new entry count, absolute expiry (0 if no write).
+// Always deep-owns `table` (free-analysis cannot safely transfer map ownership).
 fn stick_table_set(
     table: map[string]string,
     key: string,
@@ -344,10 +359,11 @@ fn stick_table_set(
     let k = own_string(key)
     let srv = own_string(server_name)
     if str_eq(k, "") {
-        return (table, entry_count, 0)
+        // Match historical semantics: no write, return owned snapshot.
+        return (stick_table_own(table), entry_count, 0)
     }
     if str_eq(srv, "") {
-        return (table, entry_count, 0)
+        return (stick_table_own(table), entry_count, 0)
     }
     let mut out = stick_table_own(table)
     let mut count = entry_count
@@ -580,6 +596,7 @@ fn pick_server_stick(
     now_ms: int,
     entry_count: int
 ) -> (int, map[string]string, int, string) {
+    // Always deep-own first (never `let mut table = stick_table` — free-analysis free-alias).
     let mut table = stick_table_own(stick_table)
     let mut count = entry_count
     // Cookie sticky first (inside pick_server). Table only when no usable cookie pin.
@@ -613,7 +630,9 @@ fn pick_server_stick(
         if not str_eq(be.stick_on, "") {
             if not str_eq(stick_key, "") {
                 if cookie_pinned == 0 {
-                    let t2, c2, exp = stick_table_set(table, stick_key, servers[si].name, be.stick_expire_ms, be.stick_size, now_ms, count)
+                    let t2, c2, exp = stick_table_set(
+                        table, stick_key, servers[si].name, be.stick_expire_ms, be.stick_size, now_ms, count
+                    )
                     table = t2
                     count = c2
                     if exp > 0 {
@@ -811,6 +830,10 @@ fn build_retry_plan(
     }
     if extra > 3 {
         extra = 3
+    }
+    // Hot path: no retries configured → single hop, no alternate pick_server scans.
+    if extra == 0 {
+        return plan
     }
     let mut be = be_in
     // Prefer alternate eligible servers not already in the plan.

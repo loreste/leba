@@ -118,8 +118,11 @@ configured runtime state has eligible upstream capacity.
 - [x] HA active/standby docs (`docs/HA.md`).
 - [x] WAF adapter (local + remote inspect).
 - [x] DNS service discovery (`resolve` / `resolve_interval` / `expand`).
-- [ ] More exhaustive concurrent connection tests.
+- [x] More exhaustive concurrent connection tests (`make test-concurrent`: GET/KA/POST/OPTIONS waves + header forward check; soak covers reload under load).
 - [x] Upstream forwarding of validated trace headers.
+- [x] Credentialed browser header path (LF/CRLF framing, CSRF/Origin/Content-Type forward, `LEBA_CORS_ORIGIN`).
+- [x] Hot-path ownership: rate/stick dirty-flag adopt; skip stick map own when unused; single server clone on reserve (`docs/ROADMAP.md` performance north star).
+- [ ] Beat nginx on RPS/p99/CPU/RSS (track with `make bench-nginx` / `scripts/bench_vs_nginx.sh`).
 
 Product roadmap: [`ROADMAP.md`](ROADMAP.md).
 Full competitive design depth: [`COMPETITIVE_ARCHITECTURE.md`](COMPETITIVE_ARCHITECTURE.md).

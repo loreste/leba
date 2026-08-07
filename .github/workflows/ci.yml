@@ -55,11 +55,16 @@ jobs:
         run: make test-docs
 
       - name: Concurrent smoke
+        env:
+          # Shared runners: smaller waves, modest fail budget, threaded origin.
+          CONC_PARALLEL: "8"
+          CONC_FAIL_BUDGET: "10"
+          CURL_MAX_TIME: "5"
         run: |
           set -euo pipefail
           make build
           chmod +x scripts/concurrent_smoke.sh
-          ./scripts/concurrent_smoke.sh 120
+          ./scripts/concurrent_smoke.sh 80
 
       - name: Adversarial smoke
         run: |

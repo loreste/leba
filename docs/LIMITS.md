@@ -55,13 +55,43 @@ through the configured limit. Plan edge gateways accordingly:
   TLS stack before relying on it for connection budget planning.
 - Upstream connections use short-lived or pooled I/O depending on path; do not assume
   HTTP keep-alive to backends without load testing.
+- Each keep-alive client holds **one crew worker** for the whole series. Size
+  `workers` ≥ peak concurrent KA clients or pending queues and p99 will grow.
+
+## Memory safety (bounded process memory)
+
+Leba targets **bounded, ownership-correct** memory under Mako free-analysis:
+
+| Bound | Default policy |
+|-------|----------------|
+| Pending accept queue | `min(4096, max(128, workers×16))` — hard cap; overflow closes/rejects |
+| Done channel | `min(2048, max(128, workers×4))` |
+| Upstream pool per server | default 32 idle sockets, hard cap 128 (or `server maxconn`) |
+| Request body | `request_body_limit` (default 1MB) — reject 413 over limit |
+| Workers | config `workers` (cap 512) — each thread costs stack RSS |
+| Sched threads | `2×workers+8` — needed so accept never starves; stacks cost RSS |
+
+**Ownership (no free-alias):** pending requeue always deep-owns buffers
+(`pending_client_clone` / `pending_client_with_buffer`); stick maps use
+`stick_table_own`; success fast-path completions skip `servers[]` clone when
+no maxconn reservation (LiveStats still updated).
+
+**Allocator honesty:** Mako C free-analysis **does not return freed pages to the
+OS**. Process RSS after a load spike can stay high even when live objects drop.
+That is not an unbounded live leak of the data plane queues (those are capped
+above), but it **does** mean RSS is a poor steady-state gauge vs nginx. Prefer
+capping `workers` / body limits / pool size for a fixed connection budget.
+
+Runtime logs: `event=memory_bounds pending_limit=… done_cap=… workers=…`.
 
 ## Operator checklist
 
 - [ ] Set `request_body_limit` per frontend that accepts uploads
+- [ ] Size `workers` ≥ peak concurrent keep-alive clients (and not much larger)
 - [ ] `leba doctor` clean (no unexpected large-body warnings you did not intend)
 - [ ] Soak with `make test-soak` after changing workers / maxconn / body limits
 - [ ] Prometheus: `leba_requests_total`, `leba_errors_total`, `leba_active_connections`
+- [ ] After load tests, expect RSS plateaus under free-analysis; restart to reclaim OS pages
 
 ## Related
 

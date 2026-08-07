@@ -220,10 +220,13 @@ fn main() {
 
     let slots = chan_new(workers)
     // done: err, status, conn_si, served_si, bytes, retries, client_fd, keep_alive, frontend_idx, ka_count
-    // Deep done buffer so workers never block on send under bursty completion.
-    let mut done_cap = workers * 8
-    if done_cap < 256 {
-        done_cap = 256
+    // Bound channel memory: enough for bursts, not multi-MB idle reservation.
+    let mut done_cap = workers * 4
+    if done_cap < 128 {
+        done_cap = 128
+    }
+    if done_cap > 2048 {
+        done_cap = 2048
     }
     let done = chan_open[(int, int, int, int, int, int, int, int, int, int)](done_cap)
     fill_slots(slots, workers)
@@ -516,19 +519,19 @@ fn main() {
     let mut completed = 0
     let mut inflight = 0
     let mut udp_flows = make([]UdpFlow, 0, 64)
-    // Pending holds accepted clients waiting for a worker slot (or partial read).
-    // Size for high concurrency: do not stop accept just because slots are full.
-    let mut pending_limit = workers * 128
-    if pending_limit < 1024 {
-        pending_limit = 1024
+    // Pending: accepted clients waiting for a slot or partial body.
+    // Memory-safe: hard cap + small initial capacity (grow on demand).
+    // Over-sizing capacity to the limit reserved multi-MB free-analysis slabs
+    // that never returned to the OS under load.
+    let mut pending_limit = workers * 16
+    if pending_limit < 128 {
+        pending_limit = 128
     }
-    if pending_limit > 65536 {
-        pending_limit = 65536
+    if pending_limit > 4096 {
+        pending_limit = 4096
     }
-    // This queue is explicitly bounded below. Keep its backing storage at the
-    // limit so accepted clients never trigger a Mako array realloc while the
-    // event loop is also moving client records between generations.
-    let mut pending_clients = make([]PendingClient, 0, pending_limit)
+    let mut pending_clients = make([]PendingClient, 0, 32)
+    log_info_event("memory_bounds", f"pending_limit={pending_limit} done_cap={done_cap} workers={workers}")
     let drain_token = mint_drain_token()
     let mut last_bg_ms = 0
     // Initial DNS resolve for servers marked resolve.
@@ -673,7 +676,14 @@ fn main() {
                         break
                     }
                     let d_err, d_st, d_conn_si, d_served_si, d_bytes, d_retries, d_fd, d_ka, d_fe_idx, d_ka_n = done.recv()
-                    servers = apply_done_servers_split(d_err, d_st, d_conn_si, d_served_si, d_bytes, servers)
+                    // Memory: skip servers[] clone when no maxconn release and no health index.
+                    if d_conn_si >= 0 {
+                        servers = apply_done_servers_split(d_err, d_st, d_conn_si, d_served_si, d_bytes, servers)
+                    } else {
+                        if d_served_si >= 0 {
+                            servers = apply_done_servers_split(d_err, d_st, d_conn_si, d_served_si, d_bytes, servers)
+                        }
+                    }
                     st = apply_done(d_err, d_served_si, d_bytes, d_retries, servers, st)
                     inflight = inflight - 1
                     completed = completed + 1
@@ -744,7 +754,15 @@ fn main() {
                     }
                 }
                 if need_pending_scan == 1 {
-                let mut next_pending = make([]PendingClient, 0, pending_limit)
+                // Capacity ~ current size (not pending_limit) — avoids multi-MB empty slabs.
+                let mut next_cap = len(pending_clients)
+                if next_cap < 16 {
+                    next_cap = 16
+                }
+                if next_cap > pending_limit {
+                    next_cap = pending_limit
+                }
+                let mut next_pending = make([]PendingClient, 0, next_cap)
                 let mut pi = 0
                 while pi < len(pending_clients) {
                     let pc = pending_clients[pi]

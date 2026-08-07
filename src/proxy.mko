@@ -3728,7 +3728,17 @@ fn worker_fast_http(
     // Worker closes client after KA series (accept still owns accounting via done).
     // D21 exception for fast path: worker is sole closer when ka loop ends.
     let _ = tcp_close(c)
-    let _ = done.send((total_err, last_st, conn_si, server_idx, total_bytes, total_retries, 0 - 1, 0, frontend_idx, nreq))
+    // Memory: only report served_si when maxconn reserved or error (passive health).
+    // Success without reservation skips accept-thread servers[] clone (RSS/CPU).
+    let mut done_served = 0 - 1
+    if reserved == 1 {
+        done_served = server_idx
+    } else {
+        if total_err == 1 {
+            done_served = server_idx
+        }
+    }
+    let _ = done.send((total_err, last_st, conn_si, done_served, total_bytes, total_retries, 0 - 1, 0, frontend_idx, nreq))
     let _ = slots.send(1)
     return total_err
 }

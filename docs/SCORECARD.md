@@ -50,14 +50,18 @@ wrk -t4 -c40 -d5s --latency http://127.0.0.1:<nginx-proxy>/
 | p90 (warm) | ~1.5 ms | — |
 | p99 (warm) | ~4 ms | ~2–6 ms |
 
-### Memory (honest)
+### Memory (honest + bounded)
 
 | State | Leba RSS | nginx RSS |
 |-------|----------|-----------|
 | Idle | ~10–12 MiB | ~4–6 MiB |
-| After wrk load | **hundreds of MiB–1+ GiB** | ~4 MiB |
+| After wrk load | Elevated (allocator retains pages) | ~4 MiB |
 
-Leba’s C free-analysis allocator **does not return freed pages to the OS**. RSS under load is not comparable to nginx’s slab/pool model. Prefer RPS/latency for the “faster” claim; RSS is a known platform limit until a releasing allocator or pooling strategy lands.
+**Live structures are capped** (pending queue, done channel, upstream pools — see
+`docs/LIMITS.md`). Mako free-analysis still **does not return freed pages to the
+OS**, so process RSS after a spike can stay high without an unbounded live leak.
+Size `workers` to the connection budget; do not over-provision “for headroom”
+if RSS matters.
 
 ### Concurrency scaling (Leba, workers ≥ c, fast path)
 

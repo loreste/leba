@@ -512,10 +512,11 @@ fn init_server_pools(servers: []Server, backends: []Backend) -> []Server {
         if s.pool < 0 {
             let mut max = s.maxconn
             if max <= 0 {
-                max = 64
+                // Memory-safe default: few idle upstream sockets; KA reuses well.
+                max = 32
             }
-            if max > 256 {
-                max = 256
+            if max > 128 {
+                max = 128
             }
             let timeout_ms = backend_timeout_for_pool(backends, s.backend)
             let p = tcp_pool_open(s.host, s.port, max, timeout_ms)

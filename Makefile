@@ -1,17 +1,18 @@
 # Leba — production reverse proxy built with Mako.
 #
-# Requires Mako ≥ 0.5.1 (ownership drops, --release, MAKO_ALLOCATOR, SAFE model).
-# Install: https://github.com/loreste/mako/releases (or build from source).
+# Requires Mako ≥ 0.5.1 (ownership drops, --release, MAKO_ALLOCATOR, SAFE model)
+# with multi-module native IR compile support (mako#29, main ≥ 24f36a6).
+# Install: https://github.com/loreste/mako (main or a release that includes #29).
 #
-# Backend: C is required today. Mako 0.5+ defaults to native (Cranelift), but
-# native still rejects non-scalar struct fields (e.g. HostPort.host: string).
-# CI and production always use --backend c until that lands.
+# Backend: default remains **c** for CI/tests (native still SIGSEGV in
+# []string drop during config parse — see docs/MAKO.md). Native **builds**
+# succeed: `make build-native`. Use MAKO_BACKEND=native to experiment.
 #
 # After upgrading Mako: `make clean-cache` then rebuild (object cache is not
 # versioned across compiler revisions).
 #
 # Production build (default): --release (-O3 -flto) + mimalloc when available.
-# Debug / ASan: make build-debug   MAKO_RELEASE=0
+# Debug / ASan: make build-debug MAKO_RELEASE=0
 
 MAKO ?= $(shell command -v mako)
 MAKO_BACKEND ?= c
@@ -40,8 +41,8 @@ endif
 # Prefer in-tree quiche so HTTP/3 links when the third_party FFI build exists.
 export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_party/quiche/target/release/libquiche.a ]; then echo /Users/loreste/mako/runtime/third_party/quiche; elif [ -f "$$HOME/mako/runtime/third_party/quiche/target/release/libquiche.a" ]; then echo "$$HOME/mako/runtime/third_party/quiche"; fi)
 
-.PHONY: all build build-debug build-release check-mako test check doctor doctor-linux \
-	explain smoke run clean clean-cache \
+.PHONY: all build build-debug build-release build-c build-native check-mako test check \
+	doctor doctor-linux explain smoke run clean clean-cache \
 	test-linux-assets test-ha-assets test-docs test-haproxy-compare \
 	test-soak test-ha-peers test-concurrent test-adversarial \
 	test-full test-ci test-all bench-nginx
@@ -76,6 +77,14 @@ build-debug:
 # Explicit production binary (same as default when MAKO_RELEASE=1).
 build-release:
 	$(MAKE) build MAKO_RELEASE=1
+
+# C backend (sanitizers, older Mako, or differential vs native).
+build-c:
+	$(MAKE) build MAKO_BACKEND=c
+
+# Force native (same as default when MAKO_BACKEND=native).
+build-native:
+	$(MAKE) build MAKO_BACKEND=native
 
 # Unit suites only (fast). Prefer these over `mako test .` (C redefinition).
 test: check-mako

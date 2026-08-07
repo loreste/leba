@@ -1,25 +1,27 @@
 # Building Leba with Mako
 
-Leba is written in [Mako](https://github.com/loreste/mako) and is built to use
-**100% of the production path Mako 0.5.1+ supports for this codebase**.
+Leba is written in [Mako](https://github.com/loreste/mako) and targets
+**Mako 0.5.1+** with the multi-module native compile path from
+[mako#29](https://github.com/loreste/mako/issues/29).
 
 ## Required toolchain
 
 | Item | Value |
 |------|--------|
-| Mako | **≥ 0.5.1** (`mako version`) |
-| Backend | **`c`** (required) |
+| Mako | **≥ 0.5.1** with multi-module native IR fixes (**main ≥ `24f36a6`**, or a release that includes that commit) |
+| Backend | **`c`** default for production + tests; **`native`** builds (compile) work |
 | Default build | **`--release`** (`-O3 -flto`) |
 | Allocator | **mimalloc** when present (`MAKO_ALLOCATOR`) |
 
 ```bash
-# Install Mako (macOS/Linux)
-curl -fsSL https://github.com/loreste/mako/releases/latest/download/install-release.sh | bash
-# or Linux: install-linux.sh — see mako README
+# Install Mako from main (recommended until a release includes #29):
+git clone https://github.com/loreste/mako.git && cd mako && make install
+# Ensure native_bridge.c is installed (make install on main ≥ 5ef5186).
 
 mako doctor
 make check-mako   # Leba’s gate: version + backend + allocator
-make build        # release binary → ./leba
+make build        # release binary → ./leba  (C backend by default)
+make build-native # same with --backend native (compile OK)
 ```
 
 After any Mako upgrade:
@@ -40,20 +42,62 @@ make test-full
 | `sched_set_workers` | Crew pool sized `2×workers+8` so accept never starves |
 | HTTP / TLS / H2 / pools | Cleartext fast path + TLS/H2/H3 surfaces |
 | `mako doctor` | Install health before CI/cutover |
+| Native compile (mako#29) | Shared IR lowers multi-file packs, string struct fields, HTTP/proxy builtins |
+
+## Native backend status (honest)
+
+| Capability | Status |
+|------------|--------|
+| **Compile** `main.mko` with `--backend native` | **Works** (mako#29 closed) — no more misleading `HostPort.host` scalar error |
+| Pack-local helpers + string struct fields | **Works** on shared IR |
+| **`make test` / `leba_core1_test.mko` under native** | **Fails** — SIGSEGV in `mako_native_string_slice_free_elements` while dropping `[]string` during `parse_config_text` (`TestRouteAndAcl`) |
+| Production default | Still **`c`** until native unit suites are green |
+
+```bash
+# Compile path (should succeed with Mako main ≥ 24f36a6 + installed bridge .c):
+make build-native
+# or:
+mako build main.mko -o leba --backend native --release
+
+# Tests still pin C:
+make test                    # MAKO_BACKEND=c
+mako test leba_core1_test.mko --backend c
+```
+
+Crash signature (for upstream):
+
+```text
+EXC_BAD_ACCESS in mako_native_string_slice_free_elements
+  ← mako_native_string_slice_drop_ptr
+  ← parse_config_text
+  ← TestRouteAndAcl
+```
+
+## Backends
+
+| Backend | When |
+|---------|------|
+| **`c`** (default) | CI, unit/e2e tests, production until native runtime is clean |
+| **`native`** | Experiment / compile validation; `make build-native` |
+| **`llvm`** | Optional; needs `mako` built with `--features llvm-backend` |
+
+```bash
+make build                    # c + release
+make build-c                  # explicit c
+make build-native             # native compile
+MAKO_BACKEND=native make build
+
+# ASan (C backend only):
+mako build main.mko -o leba --backend c --sanitize address
+```
 
 ## What we do **not** use yet (honest)
 
 | Feature | Why not |
 |---------|---------|
-| **Native backend (default in 0.5.0)** | Cranelift still errors: `struct field HostPort.host type is not implemented yet (only scalar fields)`. Leba is full of string/struct fields. |
-| **LLVM backend** | Needs `mako` built with `--features llvm-backend`; optional later. |
-| **DTLS / WSI (0.5.1)** | Not part of reverse-proxy product surface. |
-
-When native supports non-scalar struct fields, re-evaluate:
-
-```bash
-mako build main.mko -o leba --backend native --release
-```
+| **Native as default for test/prod** | Remaining `[]string` drop crash in config parse (above) |
+| **LLVM backend** | Needs `mako` built with `--features llvm-backend`; optional later |
+| **DTLS / WSI (0.5.1)** | Not part of reverse-proxy product surface |
 
 ## Allocator (RSS under load)
 
@@ -82,7 +126,7 @@ allocator choice affects fragmentation and OS reclaim, not those hard caps.
 ## CI
 
 `.github/workflows/ci.yml` clones Mako `main`, installs with cargo, then
-`make test` / `make build` with `MAKO_BACKEND=c`. Release flag and mimalloc
+`make test` / `make build` with default **`c`**. Release flag and mimalloc
 apply when available on the runner; absence of mimalloc falls back to system.
 
 ## Debug / sanitizers
@@ -102,13 +146,7 @@ mako build main.mko -o leba --backend c --sanitize address
 
 ## Upstream tracker
 
-| Issue | Topic |
-|-------|--------|
-| [mako#29](https://github.com/loreste/mako/issues/29) | Native backend: multi-module apps (Leba) fail — IR missing builtins + misleading scalar-struct fallback |
-
-When that lands, re-try:
-
-```bash
-mako build main.mko -o leba --backend native --release
-make test-full
-```
+| Issue | Topic | Status |
+|-------|--------|--------|
+| [mako#29](https://github.com/loreste/mako/issues/29) | Native multi-module compile: missing IR builtins + misleading HostPort fallback | **Fixed** (`24f36a6`) |
+| [mako#30](https://github.com/loreste/mako/issues/30) | Native runtime: `[]string` drop SIGSEGV in config parse / `TestRouteAndAcl` | Open — blocks native default for tests |

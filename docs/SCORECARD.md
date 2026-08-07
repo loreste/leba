@@ -8,7 +8,7 @@ Directional local measurements — re-run on your hardware before capacity claim
 |-------|--------|
 | Date | 2026-08-07 |
 | Host | macOS arm64 (developer laptop) |
-| Leba | 0.15.0+ (`--backend c`) — **HTTP fast path** (worker-owned KA loop) |
+| Leba | 0.15.0+ (native default; scorecard historically `--backend c`) — **HTTP fast path** (worker-owned KA loop) |
 | nginx | 1.31.3 (Homebrew), `worker_processes 1`, upstream keepalive 64 |
 | Origin | nginx static `return 200 'ok\n'` with **upstream keep-alive enabled** |
 | Loadgen | `wrk` keep-alive (default) |

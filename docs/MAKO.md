@@ -99,3 +99,16 @@ mako build main.mko -o leba --backend c --sanitize address
 - [LIMITS.md](LIMITS.md) — memory bounds  
 - [SCORECARD.md](SCORECARD.md) — RPS/latency vs nginx  
 - [Mako LONG_RUNNING.md](https://github.com/loreste/mako/blob/main/docs/LONG_RUNNING.md)  
+
+## Upstream tracker
+
+| Issue | Topic |
+|-------|--------|
+| [mako#29](https://github.com/loreste/mako/issues/29) | Native backend: multi-module apps (Leba) fail — IR missing builtins + misleading scalar-struct fallback |
+
+When that lands, re-try:
+
+```bash
+mako build main.mko -o leba --backend native --release
+make test-full
+```

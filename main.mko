@@ -633,14 +633,23 @@ fn main() {
                     }
                 }
             }
+            // Drain worker completions aggressively so slots free and new accepts kick.
+            // Cap per tick so accept/pending still get CPU under completion storms.
             if inflight > 0 {
-                if chan_len(done) > 0 {
+                let mut drained = 0
+                while drained < 256 {
+                    if inflight <= 0 {
+                        break
+                    }
+                    if chan_len(done) <= 0 {
+                        break
+                    }
                     let d_err, d_st, d_conn_si, d_served_si, d_bytes, d_retries, d_fd, d_ka, d_fe_idx, d_ka_n = done.recv()
-                    servers = apply_done_servers_conn(d_conn_si, servers)
-                    servers = apply_done_servers_health(d_err, d_st, d_served_si, d_bytes, servers)
+                    servers = apply_done_servers_split(d_err, d_st, d_conn_si, d_served_si, d_bytes, servers)
                     st = apply_done(d_err, d_served_si, d_bytes, d_retries, servers, st)
                     inflight = inflight - 1
                     completed = completed + 1
+                    drained = drained + 1
                     // D21: accept thread is sole closer for cleartext HTTP fds (d_fd >= 0).
                     if d_fd >= 0 {
                         let mut do_ka = 0
@@ -945,7 +954,16 @@ fn main() {
                 }
                 pending_clients = next_pending
             }
-            let ready = evloop_wait(tcp_ev, 5)
+            // Short poll when work is in flight — never 0ms (busy-spin starves crew workers).
+            let mut wait_ms = 5
+            if len(pending_clients) > 0 {
+                wait_ms = 1
+            } else {
+                if inflight > 0 {
+                    wait_ms = 1
+                }
+            }
+            let ready = evloop_wait(tcp_ev, wait_ms)
             let mut ei = 0
             while ei < ready {
                 if max_req > 0 {
@@ -1455,20 +1473,148 @@ fn main() {
                                         }
                                     }
                                     } else {
-                                        if len(pending_clients) >= pending_limit {
-                                            log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")
-                                            let _ = tcp_close(c)
-                                        } else {
-                                            let _ = io_set_nonblocking(c, 1)
-                                            pending_clients = append(pending_clients, PendingClient {
-                                                fd: c,
-                                                kind: 2,
-                                                frontend_idx: hi_match,
-                                                deadline_ms: now_ms() + 3000,
-                                                buffer: "",
-                                                ka_count: 0,
-                                                frontend_name: h.frontend.name
-                                            })
+                                        // Cleartext: try read+dispatch when request bytes are already
+                                        // present (typical Connection: close loadgen). Only prepare when
+                                        // a worker slot is free so we never double-prepare on requeue.
+                                        let _ = io_set_nonblocking(c, 1)
+                                        let mut accepted = 0
+                                        if chan_len(slots) > 0 {
+                                            if io_read_ready(c, 0) > 0 {
+                                                let mut req_limit_acc = h.frontend.request_body_limit_bytes
+                                                if req_limit_acc <= 0 {
+                                                    req_limit_acc = 1048576
+                                                }
+                                                let raw_acc = tcp_read(c)
+                                                if raw_request_complete(raw_acc, req_limit_acc) == 1 {
+                                                    let raw_req_acc = parse_raw_request(raw_acc)
+                                                    let dp_acc = prepare_raw_dispatch(
+                                                        c, raw_req_acc, h.frontend, routes, acls, backends, servers,
+                                                        buckets, header_rules, app_auth_users, hi_match, 0,
+                                                        stick_table, stick_count
+                                                    )
+                                                    if dp_acc.need_worker == 0 {
+                                                        let _ = dp_acc.servers
+                                                        let _ = dp_acc.backends
+                                                        if dp_acc.rate_dirty == 1 {
+                                                            buckets = dp_acc.buckets
+                                                        } else {
+                                                            let _ = dp_acc.buckets
+                                                        }
+                                                        if dp_acc.stick_dirty == 1 {
+                                                            stick_table = stick_table_own(dp_acc.stick_table)
+                                                            stick_count = dp_acc.stick_count
+                                                        } else {
+                                                            let _ = dp_acc.stick_table
+                                                        }
+                                                        if not str_eq(dp_acc.stick_peer_line, "") {
+                                                            let nout_acc = peers_broadcast(peer_conns, dp_acc.stick_peer_line)
+                                                            st.peers_upserts_out = st.peers_upserts_out + nout_acc
+                                                        }
+                                                        if dp_acc.waf_blocked == 1 {
+                                                            st.waf_blocked = st.waf_blocked + 1
+                                                        }
+                                                        if dp_acc.waf_detected == 1 {
+                                                            st.waf_detected = st.waf_detected + 1
+                                                        }
+                                                        let _ = tcp_close(c)
+                                                        if dp_acc.bytes_in > 0 {
+                                                            completed = completed + 1
+                                                        }
+                                                        accepted = 1
+                                                    } else {
+                                                        if len(dp_acc.servers) > 0 {
+                                                            servers = dp_acc.servers
+                                                        } else {
+                                                            let _ = dp_acc.servers
+                                                        }
+                                                        if len(dp_acc.backends) > 0 {
+                                                            backends = dp_acc.backends
+                                                        } else {
+                                                            let _ = dp_acc.backends
+                                                        }
+                                                        if dp_acc.retry_plan.reserved == 1 {
+                                                            servers = server_conn_delta(servers, dp_acc.server_idx, 1)
+                                                        }
+                                                        if dp_acc.rate_dirty == 1 {
+                                                            buckets = dp_acc.buckets
+                                                        } else {
+                                                            let _ = dp_acc.buckets
+                                                        }
+                                                        if dp_acc.stick_dirty == 1 {
+                                                            stick_table = stick_table_own(dp_acc.stick_table)
+                                                            stick_count = dp_acc.stick_count
+                                                        } else {
+                                                            let _ = dp_acc.stick_table
+                                                        }
+                                                        if not str_eq(dp_acc.stick_peer_line, "") {
+                                                            let nout_acc2 = peers_broadcast(peer_conns, dp_acc.stick_peer_line)
+                                                            st.peers_upserts_out = st.peers_upserts_out + nout_acc2
+                                                        }
+                                                        if dp_acc.waf_blocked == 1 {
+                                                            st.waf_blocked = st.waf_blocked + 1
+                                                        }
+                                                        if dp_acc.waf_detected == 1 {
+                                                            st.waf_detected = st.waf_detected + 1
+                                                        }
+                                                        let _ = slots.recv()
+                                                        inflight = inflight + 1
+                                                        st.active_conns = st.active_conns + 1
+                                                        if dp_acc.is_ws == 1 {
+                                                            let _ = pool.kick(worker_ws_upstream(
+                                                                dp_acc.c, dp_acc.ws_raw, dp_acc.up_host, dp_acc.up_port, dp_acc.timeout_ms,
+                                                                dp_acc.server_idx, dp_acc.access_log, h.frontend.name, dp_acc.path, slots, done
+                                                            ))
+                                                        } else {
+                                                            let _ = pool.kick(worker_raw_upstream(
+                                                                dp_acc.c, dp_acc.method, dp_acc.path, dp_acc.body, dp_acc.cookie, dp_acc.traceparent, dp_acc.trace_id, dp_acc.span_id,
+                                                                dp_acc.retry_plan, dp_acc.timeout_ms, dp_acc.access_log, dp_acc.access_log_file, dp_acc.orig_host,
+                                                                dp_acc.req_extra_headers, dp_acc.resp_extra_headers, dp_acc.client_ka, dp_acc.frontend_idx, dp_acc.ka_count,
+                                                                slots, done
+                                                            ))
+                                                        }
+                                                        accepted = 1
+                                                    }
+                                                } else {
+                                                    if str_len(raw_acc) > req_limit_acc {
+                                                        log_warn_event("client_rejected", "stage=request_read reason=request_too_large")
+                                                        let _ = tcp_close(c)
+                                                        accepted = 1
+                                                    } else {
+                                                        if len(pending_clients) < pending_limit {
+                                                            pending_clients = append(pending_clients, PendingClient {
+                                                                fd: c,
+                                                                kind: 2,
+                                                                frontend_idx: hi_match,
+                                                                deadline_ms: now_ms() + 3000,
+                                                                buffer: raw_acc,
+                                                                ka_count: 0,
+                                                                frontend_name: h.frontend.name
+                                                            })
+                                                            accepted = 1
+                                                        } else {
+                                                            log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")
+                                                            let _ = tcp_close(c)
+                                                            accepted = 1
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if accepted == 0 {
+                                            if len(pending_clients) >= pending_limit {
+                                                log_warn_event("client_rejected", "stage=accept reason=pending_full frontend=http")
+                                                let _ = tcp_close(c)
+                                            } else {
+                                                pending_clients = append(pending_clients, PendingClient {
+                                                    fd: c,
+                                                    kind: 2,
+                                                    frontend_idx: hi_match,
+                                                    deadline_ms: now_ms() + 3000,
+                                                    buffer: "",
+                                                    ka_count: 0,
+                                                    frontend_name: h.frontend.name
+                                                })
+                                            }
                                         }
                                     }
                                     http_accepts = http_accepts + 1
@@ -1653,8 +1799,7 @@ fn main() {
         while inflight > 0 {
             if chan_len(done) > 0 {
                 let dr_err, dr_st, dr_conn_si, dr_served_si, dr_bytes, dr_retries, dr_fd, dr_ka, dr_fe, dr_kan = done.recv()
-                servers = apply_done_servers_conn(dr_conn_si, servers)
-                servers = apply_done_servers_health(dr_err, dr_st, dr_served_si, dr_bytes, servers)
+                servers = apply_done_servers_split(dr_err, dr_st, dr_conn_si, dr_served_si, dr_bytes, servers)
                 st = apply_done(dr_err, dr_served_si, dr_bytes, dr_retries, servers, st)
                 if dr_fd >= 0 {
                     let _ = tcp_close(dr_fd)

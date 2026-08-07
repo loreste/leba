@@ -81,11 +81,11 @@ defaults
   timeout_server 5s
   timeout_connect 2s
   workers 8
-  retries 1
-  maxconn 20000
+  retries 0
 frontend web
   bind 127.0.0.1:${LEBA_PORT}
   mode http
+  access_log off
   route default -> app
 frontend stats
   bind 127.0.0.1:${STATS_PORT}

@@ -1418,12 +1418,17 @@ fn TestApplyDoneSplitConnVsHealth() {
     servers = server_conn_delta(servers, 0, 1)
     assert_eq(servers[0].conns, 1)
     // hop0 reserved, hop1 served successfully
-    servers = apply_done_servers_conn(0, servers)
-    servers = apply_done_servers_health(0, 200, 1, 42, servers)
+    servers = apply_done_servers_split(0, 200, 0, 1, 42, servers)
     assert_eq(servers[0].conns, 0)
     assert_eq(servers[1].conns, 0)
     assert_eq(servers[1].total_req, 1)
     assert_eq(servers[0].total_req, 0)
+    // Same-index path: one slot update for conn release + health.
+    servers = server_conn_delta(servers, 1, 1)
+    servers = apply_done_servers_split(0, 200, 1, 1, 7, servers)
+    assert_eq(servers[1].conns, 0)
+    assert_eq(servers[1].total_req, 2)
+    assert_eq(servers[1].total_bytes, 49)
 }
 
 // --- 0.14.1 free-analysis / framing / rate / retry coverage ---------------

@@ -84,28 +84,102 @@ fn apply_done_servers_conn(conn_si: int, servers: []Server) -> []Server {
 }
 
 // Mark request/bytes/errors and passive health on the hop that answered (or last tried).
-// Ownership-transfer path only — no full array clone on the accept-thread hot path.
+// One deep-owned slot update (not two clones via mark + passive separately).
 fn apply_done_servers_health(err: int, status: int, served_si: int, bytes: int, servers: []Server) -> []Server {
-    let mut srv = servers
-    if served_si >= 0 {
-        if err == 0 {
-            srv = mark_server_req(srv, served_si, bytes, 0)
-        } else {
-            srv = mark_server_req(srv, served_si, 0, 1)
-        }
-        // Passive health: track upstream status and auto-mark DOWN after
-        // consecutive 5xx responses (fall threshold defaults to 3).
-        srv = apply_passive_health(srv, served_si, status, 3)
+    if served_si < 0 {
+        return servers
     }
-    return srv
+    if served_si >= len(servers) {
+        return servers
+    }
+    let mut out = servers
+    let mut s = server_clone(out[served_si])
+    s.total_req = s.total_req + 1
+    if err == 0 {
+        s.total_bytes = s.total_bytes + bytes
+    } else {
+        s.total_err = s.total_err + 1
+    }
+    // Passive health: auto-mark DOWN after consecutive 5xx (fall = 3).
+    if status >= 500 {
+        s.fails = s.fails + 1
+        if s.alive == 1 {
+            if s.fails >= 3 {
+                s.alive = 0
+                s.fails = 0
+                log_warn_event("passive_health_down", f"server {s.backend}/{s.name} marked DOWN after 3 consecutive 5xx")
+            }
+        }
+    } else {
+        if status > 0 {
+            if s.fails > 0 {
+                s.fails = 0
+            }
+        }
+    }
+    out[served_si] = s
+    return out
 }
 
-// Legacy single-si helper: conn release + health on the same index (pre-retry-plan paths).
-// Assign intermediate then return — do not `return f(srv)` (free-analysis can drop updates).
+// Conn release + health on the same index in one slot clone (common hop0-served path).
 fn apply_done_servers(err: int, status: int, si: int, bytes: int, servers: []Server) -> []Server {
-    let mut srv = apply_done_servers_conn(si, servers)
-    srv = apply_done_servers_health(err, status, si, bytes, srv)
-    return srv
+    if si < 0 {
+        return servers
+    }
+    if si >= len(servers) {
+        return servers
+    }
+    let mut out = servers
+    let mut s = server_clone(out[si])
+    s.conns = s.conns - 1
+    if s.conns < 0 {
+        s.conns = 0
+    }
+    s.total_req = s.total_req + 1
+    if err == 0 {
+        s.total_bytes = s.total_bytes + bytes
+    } else {
+        s.total_err = s.total_err + 1
+    }
+    if status >= 500 {
+        s.fails = s.fails + 1
+        if s.alive == 1 {
+            if s.fails >= 3 {
+                s.alive = 0
+                s.fails = 0
+                log_warn_event("passive_health_down", f"server {s.backend}/{s.name} marked DOWN after 3 consecutive 5xx")
+            }
+        }
+    } else {
+        if status > 0 {
+            if s.fails > 0 {
+                s.fails = 0
+            }
+        }
+    }
+    out[si] = s
+    return out
+}
+
+// Split conn_si / served_si: one or two slot updates depending on whether indices match.
+fn apply_done_servers_split(
+    err: int,
+    status: int,
+    conn_si: int,
+    served_si: int,
+    bytes: int,
+    servers: []Server
+) -> []Server {
+    if conn_si >= 0 {
+        if conn_si == served_si {
+            let mut srv = apply_done_servers(err, status, conn_si, bytes, servers)
+            return srv
+        }
+        let mut srv = apply_done_servers_conn(conn_si, servers)
+        srv = apply_done_servers_health(err, status, served_si, bytes, srv)
+        return srv
+    }
+    return apply_done_servers_health(err, status, served_si, bytes, servers)
 }
 
 fn frontend_bind_key(host: string, port: int) -> string {

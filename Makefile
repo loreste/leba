@@ -38,6 +38,11 @@ test-linux-assets:
 	grep -q 'bind 80' deploy/linux/leba.conf
 	grep -q 'state_file /var/lib/leba/state' deploy/linux/leba.conf
 	grep -q 'admin_users_file /etc/leba/admin-users.conf' deploy/linux/leba.conf
+	grep -q 'acme_webroot /var/lib/leba/acme' deploy/linux/leba.conf
+	grep -q 'acme_storage /var/lib/leba/lego' deploy/linux/leba.conf
+	grep -q 'acme_email' deploy/linux/leba.conf
+	test -f deploy/linux/leba-acme-renew.timer
+	test -f deploy/linux/leba-acme-renew.service
 	grep -q 'CHANGE_ME_KDF_ADMIN_PASSWORD' deploy/linux/admin-users.conf
 	grep -q '10.0.10.11:8080' deploy/linux/leba.conf
 

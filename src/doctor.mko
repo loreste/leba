@@ -708,7 +708,7 @@ fn doctor_world(w: World) -> DoctorReport {
         }
     }
 
-    // ACME defaults / helper readiness (NPM control plane).
+    // Let's Encrypt / ACME defaults (lego client readiness).
     if not str_eq(w.defaults.acme_webroot, "") {
         if str_contains(w.defaults.acme_webroot, "..") {
             builder_write(b, "ERROR  defaults acme_webroot must not contain '..'\n")
@@ -717,7 +717,7 @@ fn doctor_world(w: World) -> DoctorReport {
         if str_eq(w.defaults.acme_email, "") {
             let env_em = env_get("LEBA_ACME_EMAIL")
             if str_eq(env_em, "") {
-                builder_write(b, "WARN   acme_webroot set but no acme_email / LEBA_ACME_EMAIL — certificate issue will fail\n")
+                builder_write(b, "WARN   acme_webroot set but no acme_email / LEBA_ACME_EMAIL — Let's Encrypt issue will fail\n")
                 builder_write(b, "  fix:  defaults acme_email you@example.com  or export LEBA_ACME_EMAIL\n")
                 warnings = warnings + 1
             }
@@ -727,6 +727,18 @@ fn doctor_world(w: World) -> DoctorReport {
                 builder_write(b, "ERROR  defaults acme_storage must not contain '..'\n")
                 errors = errors + 1
             }
+        }
+        let mut helper = w.defaults.acme_helper
+        if str_eq(helper, "") {
+            helper = "lego"
+        }
+        if acme_helper_available(helper) == 0 {
+            builder_write(b, "WARN   Let's Encrypt helper not found on PATH — install lego (or set acme_helper / LEBA_ACME_HELPER)\n")
+            builder_write(b, "  fix:  https://go-acme.github.io/lego/  or use the official Docker image\n")
+            warnings = warnings + 1
+        }
+        if w.defaults.acme_staging == 1 {
+            builder_write(b, "INFO   ACME staging on — certificates from Let's Encrypt staging are not browser-trusted\n")
         }
     }
 

@@ -59,7 +59,7 @@ wildcard CORS without credentials.
 - IP allowlist/blocklist via `src` ACL rules (access lists)
 - Application HTTP Basic (`auth_basic` + `auth_user` on frontends)
 - WAF adapter: local signatures + optional remote inspect sidecar
-- ACME HTTP-01 webroot (`acme_webroot`) + live TLS reload
+- **Let's Encrypt** via lego (HTTP-01 / DNS-01, production + staging directories, live SNI reload)
 - Per-frontend and per-client-IP rate limiting (token bucket)
 - Request body size limits
 - Directory traversal prevention for static file serving
@@ -87,9 +87,9 @@ wildcard CORS without credentials.
 ### Admin & Operations
 - Built-in web admin dashboard with RBAC (viewer, operator, admin)
 - Standalone admin UI with proxy host management cards
-- Certificates tab: list PEMs, issue/renew Let's Encrypt via lego, live TLS reload
+- **Let's Encrypt** tab: ACME readiness, issue/renew, staging toggle, inventory
 - Access Lists tab: IP/path ACL CRUD + app HTTP Basic users
-- Proxy host upsert with Force SSL, per-domain SNI certs, Edit
+- Proxy host upsert with **Request SSL** (one-shot LE cert + Force SSL + SNI)
 - Session-based authentication with secure cookies
 - Analytics dashboard with top paths and status breakdown
 - Live request rate chart with 30-sample history

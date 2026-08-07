@@ -7,11 +7,12 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=-/etc/leba/leba.env
 # Expect LEBA_ADMIN_AUTH=user:pass and optional LEBA_ADMIN_URL
+# Default admin bind in deploy/linux/leba.conf is :18404 (Docker demo uses :8404).
 ExecStart=/usr/bin/curl -fsS -u "${LEBA_ADMIN_AUTH}" -X POST \
-  "${LEBA_ADMIN_URL:-http://127.0.0.1:8404}/admin/certificates/renew"
-# tls-reload is triggered by the renew API; optional explicit reload:
+  "${LEBA_ADMIN_URL:-http://127.0.0.1:18404}/admin/certificates/renew"
+# Renew API sets tls_reload; optional explicit reload:
 # ExecStartPost=/usr/bin/curl -fsS -u "${LEBA_ADMIN_AUTH}" -X POST \
-#   "${LEBA_ADMIN_URL:-http://127.0.0.1:8404}/admin/tls-reload"
+#   "${LEBA_ADMIN_URL:-http://127.0.0.1:18404}/admin/tls-reload"
 
 [Install]
 WantedBy=multi-user.target

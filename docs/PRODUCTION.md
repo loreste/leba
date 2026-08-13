@@ -6,8 +6,8 @@ Use this checklist before calling Leba **production-ready** for a site.
 
 | Item | Check |
 |------|--------|
-| Mako | **≥ 0.5.1** with multi-module native compile fixes (main ≥ `24f36a6` / mako#29); see [MAKO.md](MAKO.md) |
-| Build | `make build` → **release** binary on **c** by default (native compile works; tests still C); mimalloc when available |
+| Mako | **≥ 0.5.1** (verified on 0.5.2); see [MAKO.md](MAKO.md) |
+| Build | `make build` → **release** binary on **c** by default (native compiles but still crashes at runtime on 0.5.2); mimalloc when available |
 | Version | `leba version` ≥ 0.15.0 |
 | Doctor | `leba doctor /etc/leba/leba.conf` → 0 errors |
 | Auth | Hashed admin users; no demo passwords |

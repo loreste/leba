@@ -4,9 +4,10 @@
 # with multi-module native IR compile support (mako#29, main ≥ 24f36a6).
 # Install: https://github.com/loreste/mako (main or a release that includes #29).
 #
-# Backend: default remains **c** for CI/tests (native builds after #29 but
-# SIGSEGV in doctor_world / string clone — mako#31). Use `make build-native`
-# only to validate compile until https://github.com/loreste/mako/issues/31.
+# Backend: default remains **c** for CI/tests. Native compiles (mako#29) but
+# still SIGSEGVs at runtime on Mako 0.5.2 (doctor_world string clone /
+# struct-slice clone — mako#32, see docs/MAKO.md). Use `make build-native`
+# only to re-validate native after a Mako upgrade.
 #
 # After upgrading Mako: `make clean-cache` then rebuild (object cache is not
 # versioned across compiler revisions).

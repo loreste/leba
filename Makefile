@@ -107,7 +107,7 @@ test-linux-assets:
 	grep -q 'state_file /var/lib/leba/state' deploy/linux/leba.conf
 	grep -q 'admin_users_file /etc/leba/admin-users.conf' deploy/linux/leba.conf
 	grep -q 'acme_webroot /var/lib/leba/acme' deploy/linux/leba.conf
-	grep -q 'acme_storage /var/lib/leba/lego' deploy/linux/leba.conf
+	grep -q 'acme_storage /var/lib/leba/acme-state' deploy/linux/leba.conf
 	grep -q 'acme_email' deploy/linux/leba.conf
 	test -f deploy/linux/leba-acme-renew.timer
 	test -f deploy/linux/leba-acme-renew.service
@@ -137,7 +137,7 @@ test-docs:
 
 test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh
-	./scripts/adversarial_smoke.sh
+	MAKO_BIN="$(MAKO)" ./scripts/adversarial_smoke.sh
 
 test-concurrent: build
 	chmod +x scripts/concurrent_smoke.sh

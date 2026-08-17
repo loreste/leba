@@ -1,15 +1,3 @@
-# Leba — one-command NPM-style demo.
-#
-#   # From source (builds local image):
-#   make build && docker compose up --build
-#
-#   # Or published release image (no local Mako needed):
-#   LEBA_IMAGE=ghcr.io/loreste/leba:0.15.0 docker compose up
-#
-#   open http://localhost:8404/   (admin / change-me)
-#   curl http://localhost/        → demo origin via Leba
-#
-# ACME: set LEBA_ACME_EMAIL and publish port 80 for HTTP-01.
 services:
   origin:
     image: hashicorp/http-echo:1.0
@@ -30,38 +18,19 @@ services:
       LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
       LEBA_SESSION_SECRET: "${LEBA_SESSION_SECRET:-change-me-session-secret-use-long}"
       LEBA_ACME_EMAIL: "${LEBA_ACME_EMAIL:-}"
-      LEBA_ACME_STORAGE: /var/lib/leba/lego
+      LEBA_ACME_STORAGE: /var/lib/leba/acme-state
       LEBA_ACME_WEBROOT: /var/lib/leba/acme
-      LEBA_ACME_HELPER: lego
+      LEBA_ACME_HELPER: native
     volumes:
       - ./certs:/etc/leba/certs
       - leba-state:/var/lib/leba
       - leba-logs:/var/log/leba
       - leba-acme:/var/lib/leba/acme
-      - leba-lego:/var/lib/leba/lego
-    # Demo config proxies to the origin service.
+      - leba-acme-state:/var/lib/leba/acme-state
     command: ["/usr/local/bin/leba", "-f", "/etc/leba/leba.demo.conf"]
-
-  lego:
-    image: goacme/lego:latest
-    profiles: ["acme"]
-    network_mode: "service:leba"
-    volumes:
-      - leba-lego:/lego
-      - leba-acme:/acme
-      - ./deploy/docker/lego-deploy-hook.sh:/hooks/deploy.sh:ro
-    environment:
-      LEBA_ADMIN_AUTH: "${LEBA_ADMIN_AUTH:-admin:change-me}"
-      LEBA_ADMIN_URL: "http://127.0.0.1:8404"
-    entrypoint:
-      [
-        "/bin/sh",
-        "-c",
-        "echo 'lego profile ready — use Admin UI Certificates or: lego --email $$LEBA_ACME_EMAIL --http --http.webroot /acme --path /lego --domains HOST run'; sleep infinity",
-      ]
 
 volumes:
   leba-state:
   leba-logs:
   leba-acme:
-  leba-lego:
+  leba-acme-state:

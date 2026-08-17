@@ -61,7 +61,7 @@ wildcard CORS without credentials.
 - IP allowlist/blocklist via `src` ACL rules (access lists)
 - Application HTTP Basic (`auth_basic` + `auth_user` on frontends)
 - WAF adapter: local signatures + optional remote inspect sidecar
-- **Let's Encrypt** via lego (HTTP-01 / DNS-01, production + staging directories, live SNI reload)
+- **Let's Encrypt** via native ACME (HTTP-01, production + staging directories, live SNI reload; legacy DNS-01 helper compatibility)
 - Per-frontend and per-client-IP rate limiting (token bucket)
 - Request body size limits
 - Directory traversal prevention for static file serving
@@ -98,7 +98,7 @@ wildcard CORS without credentials.
 - Config viewer with sensitive field redaction
 - REST API for drain, ready, disable, enable, reload
 - Vhost and proxy host management API
-- Certificates API (`/admin/certificates`, issue/renew via lego HTTP-01 or DNS-01)
+- Certificates API (`/admin/certificates`, native issue/renew via HTTP-01; legacy DNS-01 helper compatibility)
 - Access lists + app HTTP Basic API (`/admin/access-list*`, `/admin/http-auth*`)
 - Host parity: enable/disable, WebSocket toggle, locations, redirect/dead, host IP ACL, host Basic
 - Config doctor with validation and fix suggestions
@@ -281,7 +281,7 @@ Linux packaging sketch: [`deploy/linux/`](deploy/linux/) · HA keepalived: [`dep
 
 Leba is working software with 170+ automated unit tests, concurrent/adversarial/soak harnesses, and dual-node
 peers smoke (**v0.15.0**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
-stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, lego ACME,
+stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, native ACME,
 access lists) on a HAProxy-class data plane.
 
 **Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — release plan and beat criteria
@@ -294,7 +294,7 @@ Known limits:
   (`h3_strategy=recreate` on `POST /admin/tls-reload`).
 - SIP support is signaling-focused; media relay is not implemented.
 - Full config reload with HTTP/TCP/UDP/H3/stats/peers rebind and live OIDC/peers apply (`SIGHUP` / `POST /admin/reload`).
-- ACME is lego-orchestrated (not in-process JOSE); see [`docs/ACME.md`](docs/ACME.md).
+- ACME is native Mako ACME; see [`docs/ACME.md`](docs/ACME.md).
 - No response compression (gzip/brotli) or response caching yet.
 - Stick-table peers: dual-node smoke + ownership fixes shipped; treat as
   **production** only after your VIP multi-hour soak (see [`docs/HA.md`](docs/HA.md)).

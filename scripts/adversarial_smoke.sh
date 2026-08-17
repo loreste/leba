@@ -7,6 +7,7 @@ MAKO="${MAKO_BIN:-/Users/loreste/mako/target/release/mako}"
 [[ -x "$MAKO" ]] || MAKO="$(command -v mako)"
 # Match Makefile/CI: native backend lacks HTTP builtins Leba needs.
 MAKO_BACKEND="${MAKO_BACKEND:-c}"
+MAKO_RELEASE_FLAG="${MAKO_RELEASE_FLAG:---release}"
 
 echo "== unit tests =="
 "$MAKO" test leba_core1_test.mko --backend "$MAKO_BACKEND"
@@ -14,7 +15,7 @@ echo "== unit tests =="
 "$MAKO" test leba_web_test.mko --backend "$MAKO_BACKEND"
 
 echo "== build =="
-"$MAKO" build main.mko -o leba --backend "$MAKO_BACKEND"
+"$MAKO" build main.mko -o leba --backend "$MAKO_BACKEND" "$MAKO_RELEASE_FLAG"
 
 echo "== doctor sample must pass =="
 ./leba doctor configs/leba.conf | tee /tmp/leba_doc.txt

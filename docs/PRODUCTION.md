@@ -13,7 +13,7 @@ Use this checklist before calling Leba **production-ready** for a site.
 | Auth | Hashed admin users; no demo passwords |
 | Session | `state_key` or `LEBA_SESSION_SECRET` set |
 | Admin plane | Not on public VIP; private NIC / firewall |
-| TLS | Valid PEMs on both HA nodes; or **Let's Encrypt** via lego (`acme_email`, `acme_webroot` on :80, `leba-acme-renew.timer`) |
+| TLS | Valid PEMs on both HA nodes; or native **Let's Encrypt** (`acme_email`, `acme_webroot` on :80, `leba-acme-renew.timer`) |
 | Unit + e2e gate | `make test-full` green (units, concurrent, adversarial, assets) |
 | Soak | `make test-soak` green in CI or pre-flight (`make test-ci` runs both) |
 | Concurrent | `make test-concurrent` green (GET/KA/POST/OPTIONS waves) |
@@ -38,11 +38,11 @@ cutover.
 
 ```bash
 # 1. Real email in /etc/leba/leba.conf (or LEBA_ACME_EMAIL)
-# 2. lego installed; port 80 public
+# 2. Port 80 public and routed to acme_webroot
 # 3. Optional: test staging first
 curl -su admin:… -X POST \
   'http://127.0.0.1:18404/admin/certificates/issue?domain=app.example.com&frontend=web&staging=1&attach=1'
-# 4. Production issue (or Proxy Hosts → Request SSL)
+# 4. Production issue (or Proxy Hosts -> Request SSL)
 curl -su admin:… -X POST \
   'http://127.0.0.1:18404/admin/proxy-host?frontend=web&domain=app.example.com&backend=app&server=s1&addr=10.0.20.11:8080&ssl=1&force_ssl=1'
 # 5. Daily renew

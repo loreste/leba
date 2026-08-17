@@ -1,5 +1,5 @@
 [Unit]
-Description=Leba ACME certificate renew (lego via admin API)
+Description=Leba ACME certificate renew (native ACME via admin API)
 After=network-online.target leba.service
 Wants=network-online.target
 

@@ -296,11 +296,11 @@ struct Defaults {
     workers: int
     request_body_limit_bytes: int
     acme_webroot: string
-    // lego --path storage (certificates + account).
+    // Native ACME storage (account key, account URL, certificates).
     acme_storage: string
     // Contact email for ACME registration (or LEBA_ACME_EMAIL).
     acme_email: string
-    // ACME helper binary name or absolute path (default "lego", or LEBA_ACME_HELPER).
+    // ACME mode/helper. Default "native"; external helper is legacy compatibility.
     acme_helper: string
     // ACME directory URL (empty = Let's Encrypt production). Aliases: staging, letsencrypt.
     acme_server: string
@@ -363,7 +363,7 @@ fn defaults_new() -> Defaults {
         acme_webroot: "",
         acme_storage: "",
         acme_email: "",
-        acme_helper: "lego",
+        acme_helper: "native",
         acme_server: "",
         acme_staging: 0
     }

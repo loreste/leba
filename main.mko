@@ -131,7 +131,7 @@ fn main() {
         return
     }
     log_info_event("doctor_passed", f"path={path} warnings={rep.warnings}")
-    let mut servers = init_server_pools(w.servers, w.backends)
+    let mut servers = w.servers
     let mut backends = w.backends
     let mut frontends = w.frontends
     let mut routes = w.routes
@@ -1986,4 +1986,5 @@ fn main() {
     clear_drain(drain_token)
     log_info_event("runtime_stop", f"completed={completed}")
     print("ok")
+    exit(0)
 }

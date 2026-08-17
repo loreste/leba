@@ -61,7 +61,7 @@ Stats frontend uses `admin_users_file` / session cookies / RBAC. Do not reuse
 | Access List (IP) | `allow` / `deny` `src` ACLs — also **Access Lists** UI / `/admin/access-list` |
 | Access List (HTTP Basic) | `auth_basic` + `auth_user` — also **Access Lists** UI / `/admin/http-auth*` |
 | Proxy host | `POST /admin/proxy-host` or `route host` |
-| SSL Certificates | **Certificates** UI / `/admin/certificates*` + lego |
+| SSL Certificates | **Certificates** UI / `/admin/certificates*` native ACME |
 | Force SSL | `force_ssl=1` on proxy-host or `redirect https` |
 
 Managed files written by the admin UI:

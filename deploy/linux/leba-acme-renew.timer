@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Leba ACME renew (Let’s Encrypt via lego)
+Description=Daily Leba ACME renew (native ACME)
 Requires=leba-acme-renew.service
 
 [Timer]

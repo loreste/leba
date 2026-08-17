@@ -77,14 +77,14 @@ curl -u admin:secret -X POST \
 
 | Query | Effect |
 |-------|--------|
-| `ssl=1` / `request_ssl=1` / `auto_ssl=1` | Reuse PEMs under `acme_storage` or run lego HTTP-01, attach SNI |
+| `ssl=1` / `request_ssl=1` / `auto_ssl=1` | Reuse PEMs under `acme_storage` or run native HTTP-01, attach SNI |
 | `force_ssl=1` | Per-host HTTP→HTTPS (does **not** force every other host) |
 | `cert=` + `key=` | Use absolute PEM paths instead of ACME |
 
 UI: **Proxy Hosts → + Add** (Request SSL / Force SSL checked by default), or **Request SSL** on a host card.
 
 - HTTP-01: `challenge=http` (default) via `POST /admin/certificates/issue`
-- DNS-01: `challenge=dns&dns_provider=cloudflare` (+ lego env e.g. `CF_DNS_API_TOKEN`)
+- DNS-01: `challenge=dns&dns_provider=cloudflare` (legacy helper compatibility; provider env e.g. `CF_DNS_API_TOKEN`)
   or `LEBA_ACME_DNS_PROVIDER`
 
 Daily renew timer: `deploy/linux/leba-acme-renew.timer` + `.service`.

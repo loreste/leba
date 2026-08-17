@@ -2091,7 +2091,7 @@ fn handle_admin_state(
         let domain_own = own_string(domain)
         let mut ssl_status = "none"
         let mut ssl_error = ""
-        // Automatic certificate: reuse existing ACME PEMs or issue via lego.
+        // Automatic certificate: reuse existing ACME PEMs or issue via native ACME.
         if want_ssl == 1 {
             if str_eq(cert_own, "") or str_eq(key_own, "") {
                 let settings = acme_settings_resolve_path(acme_first_webroot(out_frontends), config_path)
@@ -2371,7 +2371,7 @@ fn handle_admin_state(
         }
     }
 
-    // --- Certificates (list / issue via lego / renew) -----------------------
+    // --- Certificates (list / issue via native ACME / renew) -----------------------
     if str_eq(path, "/admin/certificates") {
         if not str_eq(method, "GET") {
             return AdminStateResult { handled: 1, status: 405, body: "{\"error\":\"method not allowed\"}\n", servers: server_array_clone(servers), frontends: frontends, backends: backends, routes: routes, acls: acls }

@@ -4,9 +4,10 @@
 # with multi-module native IR compile support (mako#29, main ≥ 24f36a6).
 # Install: https://github.com/loreste/mako (main or a release that includes #29).
 #
-# Backend: default remains **c** for CI/tests (native builds after #29 but
-# SIGSEGV in doctor_world / string clone — mako#31). Use `make build-native`
-# only to validate compile until https://github.com/loreste/mako/issues/31.
+# Backend: default remains **c** for CI/tests. Native compiles (mako#29) but
+# still SIGSEGVs at runtime on Mako 0.5.2 (doctor_world string clone /
+# struct-slice clone — mako#32, see docs/MAKO.md). Use `make build-native`
+# only to re-validate native after a Mako upgrade.
 #
 # After upgrading Mako: `make clean-cache` then rebuild (object cache is not
 # versioned across compiler revisions).
@@ -45,7 +46,7 @@ export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_par
 	doctor doctor-linux explain smoke run clean clean-cache \
 	test-linux-assets test-ha-assets test-docs test-haproxy-compare \
 	test-soak test-ha-peers test-concurrent test-adversarial \
-	test-full test-ci test-all bench-nginx
+	test-full test-ci test-all bench-nginx bench-proxy-matrix
 
 all: build
 
@@ -106,7 +107,7 @@ test-linux-assets:
 	grep -q 'state_file /var/lib/leba/state' deploy/linux/leba.conf
 	grep -q 'admin_users_file /etc/leba/admin-users.conf' deploy/linux/leba.conf
 	grep -q 'acme_webroot /var/lib/leba/acme' deploy/linux/leba.conf
-	grep -q 'acme_storage /var/lib/leba/lego' deploy/linux/leba.conf
+	grep -q 'acme_storage /var/lib/leba/acme-state' deploy/linux/leba.conf
 	grep -q 'acme_email' deploy/linux/leba.conf
 	test -f deploy/linux/leba-acme-renew.timer
 	test -f deploy/linux/leba-acme-renew.service
@@ -133,10 +134,11 @@ test-docs:
 	test -f scripts/adversarial_smoke.sh
 	test -f scripts/soak.sh
 	test -f scripts/bench_vs_nginx.sh
+	test -f scripts/bench_proxy_matrix.sh
 
 test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh
-	./scripts/adversarial_smoke.sh
+	MAKO_BIN="$(MAKO)" ./scripts/adversarial_smoke.sh
 
 test-concurrent: build
 	chmod +x scripts/concurrent_smoke.sh
@@ -169,6 +171,12 @@ test-all: test-ci test-haproxy-compare
 bench-nginx: build
 	chmod +x scripts/bench_vs_nginx.sh
 	./scripts/bench_vs_nginx.sh 8 40
+
+# Docker-backed RPS/latency matrix vs nginx + HAProxy.
+# Strict gate: LEBA_REQUIRE_WIN=1 make bench-proxy-matrix
+bench-proxy-matrix: build
+	chmod +x scripts/bench_proxy_matrix.sh
+	./scripts/bench_proxy_matrix.sh 8 40
 
 check: doctor
 

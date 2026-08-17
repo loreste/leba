@@ -1,6 +1,6 @@
-// Let's Encrypt integration via lego (ACME client).
-// Pure-Mako ACME is not possible without JOSE account signing — shell out to lego
-// with the official Let's Encrypt ACME directories (production or staging).
+// Native ACME integration for Let's Encrypt-compatible providers.
+// Core issue/renew is Mako-native: HTTPS client + ES256 JWS + P-256 account key.
+// External helpers are legacy compatibility only.
 pack acme
 
 // Official Let's Encrypt ACME v2 directories (RFC 8555).
@@ -17,7 +17,7 @@ struct AcmeSettings {
     storage: string
     email: string
     helper: string
-    // ACME directory URL. Empty → Let's Encrypt production (lego default).
+    // ACME directory URL. Empty → Let's Encrypt production (native default).
     server: string
     // 1 = use LE staging directory (rate-limit safe for testing).
     staging: int
@@ -153,7 +153,7 @@ fn acme_server_ok(s: string) -> int {
     return 1
 }
 
-// Resolve effective ACME directory URL for lego --server.
+// Resolve effective ACME directory URL for native ACME and legacy helpers.
 fn acme_effective_server(settings: AcmeSettings) -> string {
     if settings.staging == 1 {
         return acme_le_staging_directory()
@@ -161,7 +161,7 @@ fn acme_effective_server(settings: AcmeSettings) -> string {
     if not str_eq(settings.server, "") {
         return settings.server
     }
-    // Empty server → lego's default is Let's Encrypt production; return explicit URL for logs/API.
+    // Empty server -> Let's Encrypt production; return explicit URL for logs/API.
     return acme_le_production_directory()
 }
 
@@ -241,7 +241,7 @@ fn acme_settings_resolve_path(webroot_hint: string, config_path: string) -> Acme
         storage = acme_kv_from_config(config_path, "acme_storage")
     }
     if str_eq(storage, "") {
-        storage = "/var/lib/leba/lego"
+        storage = "/var/lib/leba/acme-state"
     }
     let mut email = env_get_or("LEBA_ACME_EMAIL", "")
     if str_eq(email, "") {
@@ -252,7 +252,7 @@ fn acme_settings_resolve_path(webroot_hint: string, config_path: string) -> Acme
         helper = acme_kv_from_config(config_path, "acme_helper")
     }
     if str_eq(helper, "") {
-        helper = "lego"
+        helper = "native"
     }
     let mut server = env_get_or("LEBA_ACME_SERVER", "")
     if str_eq(server, "") {
@@ -360,7 +360,7 @@ fn acme_first_webroot(frontends: []Frontend) -> string {
     return ""
 }
 
-// lego stores PEMs as <storage>/certificates/<domain>.crt and .key
+// Native ACME stores PEMs as <storage>/certificates/<domain>.crt and .key
 fn acme_cert_paths(storage: string, domain: string) -> (string, string) {
     let base = storage + "/certificates/" + domain
     return (base + ".crt", base + ".key")
@@ -393,23 +393,10 @@ fn acme_helper_available(helper: string) -> int {
     return 0
 }
 
-// PEM notAfter via openssl when available. Returns "" if unknown.
+// Native cert expiry parsing is intentionally not shell-backed. Returns "" if unknown.
 fn acme_cert_not_after(cert_path: string) -> string {
-    if str_eq(cert_path, "") {
-        return ""
-    }
-    if not file_exists(cert_path) {
-        return ""
-    }
-    if acme_token_safe(cert_path) == 0 {
-        return ""
-    }
-    // Prefer openssl; fail soft if missing.
-    let raw = exec_output("openssl x509 -enddate -noout -in " + cert_path + " 2>/dev/null || true")
-    let t = str_trim_space(raw)
-    if str_has_prefix(t, "notAfter=") {
-        return str_trim_space(substr(t, 9, str_len(t)))
-    }
+    if str_eq(cert_path, "") { return "" }
+    if not file_exists(cert_path) { return "" }
     return ""
 }
 
@@ -419,11 +406,13 @@ fn acme_preflight_issue(settings: AcmeSettings, domain: string, email_override: 
     if acme_token_safe(domain) == 0 {
         return "code=invalid_domain message=domain must be a safe hostname (letters, digits, . - _)"
     }
-    if acme_token_safe(settings.helper) == 0 {
-        return "code=invalid_helper message=acme_helper path/name contains unsafe characters"
-    }
-    if acme_helper_available(settings.helper) == 0 {
-        return "code=missing_helper message=ACME helper not found on PATH — install lego or set LEBA_ACME_HELPER to an absolute path (Docker image includes lego)"
+    if not str_eq(settings.helper, "native") {
+        if acme_token_safe(settings.helper) == 0 {
+            return "code=invalid_helper message=acme_helper path/name contains unsafe characters"
+        }
+        if acme_helper_available(settings.helper) == 0 {
+            return "code=missing_helper message=legacy ACME helper not found on PATH — use native mode or set LEBA_ACME_HELPER"
+        }
     }
     let mut email = email_override
     if str_eq(email, "") {
@@ -446,7 +435,7 @@ fn acme_preflight_renew(settings: AcmeSettings) -> string {
         return "code=invalid_helper message=acme_helper path/name contains unsafe characters"
     }
     if acme_helper_available(settings.helper) == 0 {
-        return "code=missing_helper message=ACME helper not found — install lego or set LEBA_ACME_HELPER"
+        return "code=missing_helper message=legacy ACME helper not found — use native mode or set LEBA_ACME_HELPER"
     }
     if acme_token_safe(settings.storage) == 0 {
         return "code=invalid_storage message=acme_storage path is empty or unsafe"
@@ -505,8 +494,291 @@ fn acme_preflight_http_status(err: string) -> int {
     return 500
 }
 
+
+fn acme_storage_dir(settings: AcmeSettings, name: string) -> string {
+    return settings.storage + "/" + name
+}
+
+fn acme_account_key_path(settings: AcmeSettings) -> string {
+    return acme_storage_dir(settings, "accounts/account-p256.key")
+}
+
+fn acme_account_url_path(settings: AcmeSettings) -> string {
+    return acme_storage_dir(settings, "accounts/account.url")
+}
+
+fn acme_safe_mkdirs(settings: AcmeSettings) -> int {
+    if acme_token_safe(settings.storage) == 0 {
+        return 0
+    }
+    let _ = mkdir(settings.storage)
+    let _ = mkdir(settings.storage + "/accounts")
+    let _ = mkdir(settings.storage + "/certificates")
+    if not str_eq(settings.webroot, "") {
+        let _ = mkdir(settings.webroot)
+    }
+    return 1
+}
+
+fn acme_native_account_key(settings: AcmeSettings) -> string {
+    if acme_safe_mkdirs(settings) == 0 {
+        return ""
+    }
+    let path = acme_account_key_path(settings)
+    if not file_exists(path) {
+        if p256_keygen(path) != 0 {
+            return ""
+        }
+    }
+    return read_file(path)
+}
+
+fn acme_compact_part(token: string, idx: int) -> string {
+    let p1 = str_index(token, ".")
+    if p1 < 0 { return "" }
+    if idx == 0 { return substr(token, 0, p1) }
+    let rest = substr(token, p1 + 1, str_len(token))
+    let p2 = str_index(rest, ".")
+    if p2 < 0 { return "" }
+    if idx == 1 { return substr(rest, 0, p2) }
+    if idx == 2 { return substr(rest, p2 + 1, str_len(rest)) }
+    return ""
+}
+
+fn acme_jws_json(url: string, nonce: string, kid: string, key_pem: string, payload: string) -> string {
+    let mut header = str_builder()
+    builder_write(header, "{\"alg\":\"ES256\",\"nonce\":\"")
+    builder_write(header, json_escape(nonce))
+    builder_write(header, "\",\"url\":\"")
+    builder_write(header, json_escape(url))
+    builder_write(header, "\",")
+    if str_eq(kid, "") {
+        let jwk = p256_public_jwk(key_pem)
+        if str_eq(jwk, "") { return "" }
+        builder_write(header, "\"jwk\":")
+        builder_write(header, jwk)
+    } else {
+        builder_write(header, "\"kid\":\"")
+        builder_write(header, json_escape(kid))
+        builder_write(header, "\"")
+    }
+    builder_write(header, "}")
+    let compact = jwt_sign_es256_header(payload, key_pem, builder_string(header))
+    let protected = acme_compact_part(compact, 0)
+    let pay = acme_compact_part(compact, 1)
+    let sig = acme_compact_part(compact, 2)
+    if str_eq(protected, "") or str_eq(sig, "") { return "" }
+    let mut out = str_builder()
+    builder_write(out, "{\"protected\":\"")
+    builder_write(out, protected)
+    builder_write(out, "\",\"payload\":\"")
+    builder_write(out, pay)
+    builder_write(out, "\",\"signature\":\"")
+    builder_write(out, sig)
+    builder_write(out, "\"}")
+    return builder_string(out)
+}
+
+fn acme_post_jws(url: string, nonce: string, kid: string, key_pem: string, payload: string) -> string {
+    let body = acme_jws_json(url, nonce, kid, key_pem, payload)
+    if str_eq(body, "") { return "" }
+    return https_post(url, body, "application/jose+json", "", 30000)
+}
+
+fn acme_next_nonce(new_nonce_url: string) -> string {
+    let _ = https_get(new_nonce_url, "", 15000)
+    return https_last_header("Replay-Nonce")
+}
+
+fn acme_json_first_array_string(json: string, key: string) -> string {
+    let needle = "\"" + key + "\":[\""
+    let i = str_index(json, needle)
+    if i < 0 { return "" }
+    let start = i + str_len(needle)
+    let rest = substr(json, start, str_len(json))
+    let e = str_index(rest, "\"")
+    if e < 0 { return "" }
+    return substr(rest, 0, e)
+}
+
+fn acme_json_string_after(json: string, marker: string, key: string) -> string {
+    let mi = str_index(json, marker)
+    if mi < 0 { return "" }
+    let tail = substr(json, mi, str_len(json))
+    let needle = "\"" + key + "\":\""
+    let ki = str_index(tail, needle)
+    if ki < 0 { return "" }
+    let start = ki + str_len(needle)
+    let rest = substr(tail, start, str_len(tail))
+    let e = str_index(rest, "\"")
+    if e < 0 { return "" }
+    return substr(rest, 0, e)
+}
+
+fn acme_http01_url(authz: string) -> string {
+    return acme_json_string_after(authz, "\"type\":\"http-01\"", "url")
+}
+
+fn acme_http01_token(authz: string) -> string {
+    return acme_json_string_after(authz, "\"type\":\"http-01\"", "token")
+}
+
+
+fn acme_pem_block_der_b64url(pem: string, begin: string, finish: string) -> string {
+    let bi = str_index(pem, begin)
+    if bi < 0 { return "" }
+    let tail = substr(pem, bi + str_len(begin), str_len(pem))
+    let ei = str_index(tail, finish)
+    if ei < 0 { return "" }
+    let mut body = substr(tail, 0, ei)
+    body = str_replace(body, "\r", "")
+    body = str_replace(body, "\n", "")
+    body = str_replace(body, " ", "")
+    if str_eq(body, "") { return "" }
+    return base64url_encode(base64_decode(body))
+}
+
+fn acme_csr_der_b64url(csr_pem: string) -> string {
+    return acme_pem_block_der_b64url(csr_pem, "-----BEGIN CERTIFICATE REQUEST-----", "-----END CERTIFICATE REQUEST-----")
+}
+
+fn acme_native_issue_http(settings: AcmeSettings, domain: string, email_override: string) -> AcmeRunResult {
+    let pre = acme_preflight_issue(settings, domain, email_override)
+    if not str_eq(pre, "") {
+        return AcmeRunResult { ok: 0, error: pre, cert: "", key: "", domain: domain, output: "" }
+    }
+    let key_pem = acme_native_account_key(settings)
+    if str_eq(key_pem, "") {
+        return AcmeRunResult { ok: 0, error: "code=account_key_failed message=failed to generate native P-256 ACME account key", cert: "", key: "", domain: domain, output: "" }
+    }
+    let directory = https_get(acme_effective_server(settings), "", 30000)
+    if https_last_status() < 200 or https_last_status() >= 300 {
+        return AcmeRunResult { ok: 0, error: "code=directory_failed message=failed to fetch ACME directory", cert: "", key: "", domain: domain, output: directory }
+    }
+    let new_nonce = json_get_string(directory, "newNonce")
+    let new_account = json_get_string(directory, "newAccount")
+    let new_order = json_get_string(directory, "newOrder")
+    if str_eq(new_nonce, "") or str_eq(new_account, "") or str_eq(new_order, "") {
+        return AcmeRunResult { ok: 0, error: "code=directory_invalid message=ACME directory missing required endpoints", cert: "", key: "", domain: domain, output: directory }
+    }
+    let mut email = email_override
+    if str_eq(email, "") { email = settings.email }
+    let mut kid = str_trim_space(read_file(acme_account_url_path(settings)))
+    let mut nonce = acme_next_nonce(new_nonce)
+    if str_eq(nonce, "") {
+        return AcmeRunResult { ok: 0, error: "code=nonce_failed message=ACME server did not return Replay-Nonce", cert: "", key: "", domain: domain, output: "" }
+    }
+    if str_eq(kid, "") {
+        let acct_payload = "{\"termsOfServiceAgreed\":true,\"contact\":[\"mailto:" + email + "\"]}"
+        let acct = acme_post_jws(new_account, nonce, "", key_pem, acct_payload)
+        let st = https_last_status()
+        if st < 200 or st >= 300 {
+            return AcmeRunResult { ok: 0, error: "code=account_failed message=ACME account creation failed", cert: "", key: "", domain: domain, output: acct }
+        }
+        kid = https_last_header("Location")
+        if str_eq(kid, "") {
+            return AcmeRunResult { ok: 0, error: "code=account_location_missing message=ACME account response missing Location", cert: "", key: "", domain: domain, output: acct }
+        }
+        let _ = atomic_write_file(acme_account_url_path(settings), kid + "\n")
+        nonce = https_last_header("Replay-Nonce")
+    }
+    if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+    let order_payload = "{\"identifiers\":[{\"type\":\"dns\",\"value\":\"" + domain + "\"}]}"
+    let order = acme_post_jws(new_order, nonce, kid, key_pem, order_payload)
+    let order_url = https_last_header("Location")
+    nonce = https_last_header("Replay-Nonce")
+    if https_last_status() < 200 or https_last_status() >= 300 {
+        return AcmeRunResult { ok: 0, error: "code=order_failed message=ACME order creation failed", cert: "", key: "", domain: domain, output: order }
+    }
+    let authz_url = acme_json_first_array_string(order, "authorizations")
+    let finalize_url = json_get_string(order, "finalize")
+    if str_eq(authz_url, "") or str_eq(finalize_url, "") or str_eq(order_url, "") {
+        return AcmeRunResult { ok: 0, error: "code=order_invalid message=ACME order missing authorization/finalize URL", cert: "", key: "", domain: domain, output: order }
+    }
+    if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+    let authz = acme_post_jws(authz_url, nonce, kid, key_pem, "")
+    nonce = https_last_header("Replay-Nonce")
+    if https_last_status() < 200 or https_last_status() >= 300 {
+        return AcmeRunResult { ok: 0, error: "code=authz_failed message=failed to fetch ACME authorization", cert: "", key: "", domain: domain, output: authz }
+    }
+    let chall_url = acme_http01_url(authz)
+    let token = acme_http01_token(authz)
+    if str_eq(chall_url, "") or str_eq(token, "") {
+        return AcmeRunResult { ok: 0, error: "code=http01_missing message=ACME authorization missing http-01 challenge", cert: "", key: "", domain: domain, output: authz }
+    }
+    let thumb = p256_jwk_thumbprint(key_pem)
+    if str_eq(thumb, "") {
+        return AcmeRunResult { ok: 0, error: "code=thumbprint_failed message=failed to compute account key thumbprint", cert: "", key: "", domain: domain, output: "" }
+    }
+    let keyauth = token + "." + thumb
+    let _ = write_file(settings.webroot + "/" + token, keyauth)
+    if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+    let chall = acme_post_jws(chall_url, nonce, kid, key_pem, "{}")
+    nonce = https_last_header("Replay-Nonce")
+    if https_last_status() < 200 or https_last_status() >= 300 {
+        return AcmeRunResult { ok: 0, error: "code=challenge_failed message=ACME challenge trigger failed", cert: "", key: "", domain: domain, output: chall }
+    }
+    let mut valid = 0
+    let mut last_authz = chall
+    let mut poll = 0
+    while poll < 20 {
+        sleep_ms(1000)
+        if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+        last_authz = acme_post_jws(authz_url, nonce, kid, key_pem, "")
+        nonce = https_last_header("Replay-Nonce")
+        if str_contains(last_authz, "\"status\":\"valid\"") {
+            valid = 1
+            break
+        }
+        if str_contains(last_authz, "\"status\":\"invalid\"") {
+            break
+        }
+        poll = poll + 1
+    }
+    if valid == 0 {
+        return AcmeRunResult { ok: 0, error: "code=challenge_not_valid message=HTTP-01 challenge did not become valid", cert: "", key: "", domain: domain, output: last_authz }
+    }
+    let cert, cert_key = acme_cert_paths(settings.storage, domain)
+    let csr = settings.storage + "/certificates/" + domain + ".csr"
+    if tls_make_csr(csr, cert_key, domain, 2048) != 0 {
+        return AcmeRunResult { ok: 0, error: "code=csr_failed message=failed to create CSR/key PEM", cert: cert, key: cert_key, domain: domain, output: "" }
+    }
+    let csr_der = acme_csr_der_b64url(read_file(csr))
+    if str_eq(csr_der, "") {
+        return AcmeRunResult { ok: 0, error: "code=csr_encoding_failed message=failed to DER/base64url encode CSR", cert: cert, key: cert_key, domain: domain, output: "" }
+    }
+    let csr_payload = "{\"csr\":\"" + csr_der + "\"}"
+    if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+    let fin = acme_post_jws(finalize_url, nonce, kid, key_pem, csr_payload)
+    nonce = https_last_header("Replay-Nonce")
+    if https_last_status() < 200 or https_last_status() >= 300 {
+        return AcmeRunResult { ok: 0, error: "code=finalize_failed message=ACME finalize failed", cert: cert, key: cert_key, domain: domain, output: fin }
+    }
+    let mut cert_url = json_get_string(fin, "certificate")
+    let mut order_body = fin
+    let mut opoll = 0
+    while str_eq(cert_url, "") and opoll < 20 {
+        sleep_ms(1000)
+        if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+        order_body = acme_post_jws(order_url, nonce, kid, key_pem, "")
+        nonce = https_last_header("Replay-Nonce")
+        cert_url = json_get_string(order_body, "certificate")
+        opoll = opoll + 1
+    }
+    if str_eq(cert_url, "") {
+        return AcmeRunResult { ok: 0, error: "code=certificate_missing message=ACME order did not expose certificate URL", cert: cert, key: cert_key, domain: domain, output: order_body }
+    }
+    if str_eq(nonce, "") { nonce = acme_next_nonce(new_nonce) }
+    let pem = acme_post_jws(cert_url, nonce, kid, key_pem, "")
+    if https_last_status() < 200 or https_last_status() >= 300 or not str_contains(pem, "BEGIN CERTIFICATE") {
+        return AcmeRunResult { ok: 0, error: "code=certificate_download_failed message=failed to download issued certificate", cert: cert, key: cert_key, domain: domain, output: pem }
+    }
+    let _ = atomic_write_file(cert, pem)
+    return acme_issue_finish(settings, domain, pem, "http")
+}
+
 // challenge: "http" (default) or "dns". dns_provider e.g. cloudflare, route53, digitalocean.
-// DNS credentials come from lego-standard env vars (CF_DNS_API_TOKEN, AWS_*, etc.).
+// DNS credentials come from provider-standard env vars (CF_DNS_API_TOKEN, AWS_*, etc.).
 fn acme_issue(settings: AcmeSettings, domain: string, email_override: string) -> AcmeRunResult {
     return acme_issue_challenge(settings, domain, email_override, "http", "")
 }
@@ -518,6 +790,16 @@ fn acme_issue_challenge(
     challenge: string,
     dns_provider: string
 ) -> AcmeRunResult {
+    let mut ch0 = challenge
+    if str_eq(ch0, "") {
+        ch0 = "http"
+    }
+    if str_eq(settings.helper, "native") {
+        if str_eq(ch0, "http") {
+            return acme_native_issue_http(settings, domain, email_override)
+        }
+        return AcmeRunResult { ok: 0, error: "code=native_dns_unsupported message=native ACME currently supports HTTP-01; DNS-01 provider adapters are not enabled", cert: "", key: "", domain: domain, output: "" }
+    }
     let pre = acme_preflight_issue(settings, domain, email_override)
     if not str_eq(pre, "") {
         return AcmeRunResult { ok: 0, error: pre, cert: "", key: "", domain: domain, output: "" }
@@ -599,19 +881,42 @@ fn acme_issue_finish(settings: AcmeSettings, domain: string, out: string, challe
         log_info_event("acme_issue_ok", f"domain={domain} cert={cert} challenge={challenge}")
         return AcmeRunResult { ok: 1, error: "", cert: cert, key: key, domain: domain, output: out }
     }
-    let mut err = "code=lego_failed message=lego did not produce certificate files under acme_storage/certificates/"
+    let mut err = "code=acme_failed message=ACME did not produce certificate files under acme_storage/certificates/"
     if str_len(out) > 0 {
         let mut snippet = out
         if str_len(snippet) > 400 {
             snippet = substr(snippet, 0, 400)
         }
-        err = "code=lego_failed message=" + snippet
+        err = "code=acme_failed message=" + snippet
     }
     log_warn_event("acme_issue_failed", f"domain={domain} err={err}")
     return AcmeRunResult { ok: 0, error: err, cert: cert, key: key, domain: domain, output: out }
 }
 
 fn acme_renew(settings: AcmeSettings) -> AcmeRunResult {
+    if str_eq(settings.helper, "native") {
+        let certs_dir = settings.storage + "/certificates"
+        if not file_exists(certs_dir) {
+            return AcmeRunResult { ok: 0, error: "code=no_certs message=no certificates directory under acme_storage — issue a cert first", cert: "", key: "", domain: "", output: "" }
+        }
+        let entries = read_dir(certs_dir)
+        let mut renewed = 0
+        let mut last = AcmeRunResult { ok: 1, error: "", cert: "", key: "", domain: "", output: "" }
+        for _, name in range entries {
+            if str_has_suffix(name, ".crt") {
+                let domain = substr(name, 0, str_len(name) - 4)
+                let r = acme_native_issue_http(settings, domain, "")
+                last = r
+                if r.ok == 0 { return r }
+                renewed = renewed + 1
+            }
+        }
+        if renewed == 0 {
+            return AcmeRunResult { ok: 0, error: "code=no_certs message=no certificate PEMs under acme_storage", cert: "", key: "", domain: "", output: "" }
+        }
+        log_info_event("acme_renew_done", f"storage={settings.storage} renewed={renewed}")
+        return last
+    }
     let pre = acme_preflight_renew(settings)
     if not str_eq(pre, "") {
         return AcmeRunResult { ok: 0, error: pre, cert: "", key: "", domain: "", output: "" }
@@ -623,7 +928,7 @@ fn acme_renew(settings: AcmeSettings) -> AcmeRunResult {
     let with_server = acme_append_server_flag(builder_string(cmd), settings)
     let full = with_server + " renew --no-random-sleep 2>&1"
     let ca = acme_ca_name(settings)
-    log_info_event("acme_renew_start", f"storage={settings.storage} ca={ca} server={acme_effective_server(settings)}")
+    log_info_event("acme_renew_start", f"storage={settings.storage} ca={ca} server={acme_effective_server(settings)} helper=legacy")
     let out = exec_output(full)
     let certs_dir = settings.storage + "/certificates"
     if file_exists(certs_dir) {
@@ -694,7 +999,7 @@ fn acme_list_json(frontends: []Frontend, settings: AcmeSettings) -> string {
                     builder_write(b, ",")
                 }
                 first = 0
-                builder_write(b, "{\"source\":\"lego\",\"frontend\":\"\",\"hostname\":\"")
+                builder_write(b, "{\"source\":\"native\",\"frontend\":\"\",\"hostname\":\"")
                 builder_write(b, json_escape(domain))
                 builder_write(b, "\",\"cert\":\"")
                 builder_write(b, json_escape(cert))
@@ -712,7 +1017,8 @@ fn acme_list_json(frontends: []Frontend, settings: AcmeSettings) -> string {
             }
         }
     }
-    let helper_ok = acme_helper_available(settings.helper)
+    let mut helper_ok = acme_helper_available(settings.helper)
+    if str_eq(settings.helper, "native") { helper_ok = 1 }
     let email_ok = acme_email_ok(settings.email)
     builder_write(b, "],\"settings\":{\"provider\":\"letsencrypt\",\"ca\":\"")
     builder_write(b, json_escape(acme_ca_name(settings)))
@@ -757,7 +1063,7 @@ fn acme_list_json(frontends: []Frontend, settings: AcmeSettings) -> string {
     builder_write(b, ",\"issues\":[")
     let mut ifirst = 1
     if helper_ok == 0 {
-        builder_write(b, "{\"code\":\"missing_helper\",\"message\":\"Install lego or set LEBA_ACME_HELPER\"}")
+        builder_write(b, "{\"code\":\"missing_helper\",\"message\":\"Use native ACME or set LEBA_ACME_HELPER\"}")
         ifirst = 0
     }
     if email_ok == 0 {

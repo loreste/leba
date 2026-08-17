@@ -815,3 +815,36 @@ fn TestLetsEncryptDirectoryAndStaging() {
     assert(str_contains(j, "\"staging\":true"))
     assert(str_contains(j, "letsencrypt.org"))
 }
+
+
+fn TestNativeAcmeHelpers() {
+    let mut s = acme_settings_resolve("")
+    s.helper = "native"
+    s.email = "ops@example.com"
+    s.webroot = "/tmp/leba-native-acme-webroot"
+    s.storage = "/tmp/leba-native-acme-store"
+    let pre = acme_preflight_issue(s, "app.example.com", "")
+    assert_eq_str(pre, "")
+    let key_pem = acme_native_account_key(s)
+    assert(str_contains(key_pem, "PRIVATE KEY"))
+    let jwk = p256_public_jwk(key_pem)
+    assert(str_contains(jwk, "P-256"))
+    let th = p256_jwk_thumbprint(key_pem)
+    assert(str_len(th) > 20)
+    let jws = acme_jws_json("https://acme.example/order", "nonce123", "", key_pem, "{}")
+    assert(str_contains(jws, "protected"))
+    assert(str_contains(jws, "payload"))
+    assert(str_contains(jws, "signature"))
+}
+
+fn TestNativeAcmeCsrDerEncoding() {
+    let csr = "/tmp/leba-native-acme-test.csr"
+    let key = "/tmp/leba-native-acme-test.key"
+    let rc = tls_make_csr(csr, key, "app.example.com", 2048)
+    assert_eq(rc, 0)
+    let enc = acme_csr_der_b64url(read_file(csr))
+    assert(str_len(enc) > 100)
+    assert(not str_contains(enc, "BEGIN"))
+    assert(not str_contains(enc, "+"))
+    assert(not str_contains(enc, "/"))
+}

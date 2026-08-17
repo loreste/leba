@@ -273,22 +273,22 @@ Removes a host route. Query parameters: `frontend`, `domain`.
 ### `GET /admin/certificates`
 
 Lists frontend TLS material, SNI entries, and PEMs discovered under ACME storage.
-Includes helper settings (`webroot`, `storage`, `email`, `helper`, `helper_available`).
+Includes ACME settings (`webroot`, `storage`, `email`, `helper`, `helper_available`; `helper` defaults to `native`).
 Role: **viewer**.
 
 ### `POST /admin/certificates/issue`
 
-Runs external **lego** (HTTP-01 webroot), attaches cert as SNI for `domain` on
+Runs native ACME HTTP-01, attaches cert as SNI for `domain` on
 `frontend` (unless `attach=0`), persists managed vhosts, and triggers live TLS reload.
 
 Query: `domain`, `frontend`, optional `email`, `attach`. Role: **admin**.
 
-Requires `lego` on `PATH` (or `LEBA_ACME_HELPER` / `acme_helper`), plus
+Requires native ACME support plus
 `LEBA_ACME_EMAIL` or `acme_email` / query `email`.
 
 ### `POST /admin/certificates/renew`
 
-Runs `lego renew` on ACME storage and triggers TLS reload. Role: **admin**.
+Runs native ACME renew on managed storage and triggers TLS reload. Role: **admin**.
 
 See `docs/ACME.md`.
 

@@ -7,19 +7,14 @@ Leba is written in [Mako](https://github.com/loreste/mako) and is built to use
 
 | Item | Value |
 |------|--------|
-| Mako | **≥ 0.5.1** tip with [#29](https://github.com/loreste/mako/issues/29) for native *compile* |
-| Backend (production) | **`c`** until [#31](https://github.com/loreste/mako/issues/31) is fixed |
+| Mako | **≥ 0.5.1** (verified on **0.5.2**) |
+| Backend (production) | **`c`** — native compiles ([#29](https://github.com/loreste/mako/issues/29)) but still crashes at runtime on 0.5.2 (see below) |
 | Default build | **`--release`** (`-O3 -flto`) |
 | Allocator | **mimalloc** when present (`MAKO_ALLOCATOR`) |
 
 ```bash
 # Install Mako (macOS/Linux)
 curl -fsSL https://github.com/loreste/mako/releases/latest/download/install-release.sh | bash
-# For native experiments, use a source checkout at/after 24f36a6:
-#   cargo build --release -p mako
-#   export MAKO=$PWD/target/release/mako
-#   export MAKO_RUNTIME=$PWD/runtime
-#   export MAKO_STD=$PWD/std
 
 mako doctor
 make check-mako
@@ -43,21 +38,26 @@ make test-full
 | `MAKO_ALLOCATOR` (0.4.11+) | Auto-link static mimalloc when available |
 | `sched_set_workers` | Crew pool sized `2×workers+8` |
 | HTTP / TLS / H2 / pools | Cleartext fast path + TLS/H2/H3 surfaces |
-| Native multi-module compile (#29) | **Builds** with tip Mako; **not** production default yet |
+| Native multi-module compile (#29) | **Builds** on 0.5.2; **not** production default yet (runtime crash, see below) |
 
 ## Native backend status
 
+Re-validated on **Mako 0.5.2** (contains the #31 fix, `f638e64`): native
+**still crashes**. The original moved-from-slot bug is fixed, but Leba hits a
+follow-on native fault in the same doctor/validation path.
+
 | Stage | Status |
 |-------|--------|
-| Compile `main.mko --backend native` | **OK** on Mako `main` ≥ `24f36a6` ([#29 closed](https://github.com/loreste/mako/issues/29)) |
-| Run / unit tests / concurrent smoke | **Crash** — `SIGSEGV` in `doctor_world` → `mako_native_string_clone_ptr` ([#31 open](https://github.com/loreste/mako/issues/31)) |
-| Production default | **`--backend c`** until #31 fixed and full test matrix green |
+| Compile `main.mko --backend native` | **OK** on 0.5.2 ([#29](https://github.com/loreste/mako/issues/29), [#31](https://github.com/loreste/mako/issues/31) closed) |
+| Run minimal conf (`frontend web` + `route default -> app`) | **Crash** — `SIGSEGV` in `doctor_world` → `mako_native_string_clone_ptr`; faulting slot address (`x23`) is a wild non-heap value |
+| Run full `configs/leba.conf` | **Crash** — `SIGSEGV` in `mako_native_struct_slice_clone_ptr` cloning `[]Route` (10 fields, str_mask=191) |
+| Unit tests (`leba_*_test.mko --backend native`) | **Crash** — SIGSEGV / SIGABRT |
+| Production default | **`--backend c`** until native survives `make test-full` + concurrent smoke |
 
 ```bash
-# Experimental native (expect crash after config_load until #31):
-export MAKO_RUNTIME=/path/to/mako/runtime
+# Experimental native (still crashes on 0.5.2, right after config_load):
 mako build main.mko -o leba-native --backend native --release
-./leba-native -f configs/leba.conf   # SIGSEGV today
+./leba-native doctor configs/leba.conf   # SIGSEGV
 
 # Production:
 make build
@@ -81,7 +81,8 @@ brew install mimalloc                     # enable auto static link
 ## CI
 
 `.github/workflows/ci.yml` clones Mako `main` and builds with `MAKO_BACKEND=c`
-(default). Flip to native only after #31 and CI matrix are green.
+(default). Flip to native only after the native runtime crash (see above) is
+fixed and the CI matrix is green on native.
 
 ## Debug / sanitizers
 
@@ -95,13 +96,12 @@ mako build main.mko -o leba --backend c --sanitize address
 | Issue | Status | Topic |
 |-------|--------|--------|
 | [mako#29](https://github.com/loreste/mako/issues/29) | **Closed** | Compile: multi-module IR, builtins, honest diagnostics |
-| [mako#31](https://github.com/loreste/mako/issues/31) | **Open** | Runtime: Leba SIGSEGV in `doctor_world` / string clone |
+| [mako#31](https://github.com/loreste/mako/issues/31) | **Closed** (`f638e64`, shipped in 0.5.2) | Runtime: moved-from slot use-after-free |
+| [mako#32](https://github.com/loreste/mako/issues/32) | **Open** | Runtime: Leba still SIGSEGVs on native in 0.5.2 — `doctor_world` string clone (wild slot address) / `[]Route` struct-slice clone |
 
-When #31 lands:
+When native survives the full gate on a future Mako release:
 
 ```bash
-export MAKO=/path/to/mako/target/release/mako
-export MAKO_RUNTIME=/path/to/mako/runtime
 make clean-cache
 MAKO_BACKEND=native make build
 make test-full && make test-concurrent

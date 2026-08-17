@@ -27,7 +27,7 @@
 //     acme_webroot PATH       # HTTP-01 challenge tokens (defaults inherit)
 //     acme_storage PATH       # lego --path (defaults; env LEBA_ACME_STORAGE)
 //     acme_email ADDR         # ACME registration email (env LEBA_ACME_EMAIL)
-//     acme_helper PATH|NAME   # lego binary (default lego; env LEBA_ACME_HELPER)
+//     acme_helper native      # native by default; legacy helper only when explicit
 //     acme_server URL|alias   # Let's Encrypt directory (empty=production; staging|letsencrypt)
 //     acme_staging on|off     # Use LE staging directory (rate-limit safe)
 //     auth_basic REALM        # require HTTP Basic for proxied apps (non-ACME)

@@ -2,6 +2,38 @@
 
 Directional local measurements — re-run on your hardware before capacity claims.
 
+## Replacement Claim Gate
+
+Leba can be evaluated as an nginx/NPM replacement for HTTP reverse proxying,
+native HTTP-01 certificates, live SNI reload, access lists, and admin UI/API
+operations today. Broader HAProxy Enterprise / NGINX Plus replacement claims
+require all of:
+
+- release scorecard rerun on target hardware with RPS, p99, CPU, and RSS
+- HA pair VIP soak evidence for the deployment topology
+- security review closure for native ACME, cert/key writes, and TLS reload
+- a clear support and rollback plan
+
+## Competitive Benchmark Gate
+
+Use the Docker-backed matrix for repeatable local checks against both nginx and
+HAProxy:
+
+```bash
+make build
+make bench-proxy-matrix
+LEBA_REQUIRE_WIN=1 make bench-proxy-matrix
+```
+
+The matrix starts one keep-alive origin, Leba on the host, and nginx + HAProxy
+containers. It reports `SCORE` lines with RPS, successful requests, failures,
+p50, p99, and memory/RSS. `LEBA_REQUIRE_WIN=1` makes the command fail unless
+Leba beats both nginx and HAProxy on RPS for that run.
+
+Do not publish a broad "faster than nginx and HAProxy" claim from one laptop
+run. Publish multi-run medians with the host, CPU governor, file descriptor
+limit, Docker version, images, concurrency, duration, p99, CPU, and RSS.
+
 ## Environment (scorecard host)
 
 | Field | Value |

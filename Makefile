@@ -46,7 +46,7 @@ export MAKO_QUICHE_ROOT ?= $(shell if [ -f /Users/loreste/mako/runtime/third_par
 	doctor doctor-linux explain smoke run clean clean-cache \
 	test-linux-assets test-ha-assets test-docs test-haproxy-compare \
 	test-soak test-ha-peers test-concurrent test-adversarial \
-	test-full test-ci test-all bench-nginx
+	test-full test-ci test-all bench-nginx bench-proxy-matrix
 
 all: build
 
@@ -134,6 +134,7 @@ test-docs:
 	test -f scripts/adversarial_smoke.sh
 	test -f scripts/soak.sh
 	test -f scripts/bench_vs_nginx.sh
+	test -f scripts/bench_proxy_matrix.sh
 
 test-adversarial: test test-linux-assets
 	chmod +x scripts/adversarial_smoke.sh
@@ -170,6 +171,12 @@ test-all: test-ci test-haproxy-compare
 bench-nginx: build
 	chmod +x scripts/bench_vs_nginx.sh
 	./scripts/bench_vs_nginx.sh 8 40
+
+# Docker-backed RPS/latency matrix vs nginx + HAProxy.
+# Strict gate: LEBA_REQUIRE_WIN=1 make bench-proxy-matrix
+bench-proxy-matrix: build
+	chmod +x scripts/bench_proxy_matrix.sh
+	./scripts/bench_proxy_matrix.sh 8 40
 
 check: doctor
 

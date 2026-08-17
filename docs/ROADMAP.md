@@ -4,7 +4,7 @@
 |-------|-------|
 | **Baseline** | Leba 0.15.x |
 | **North star** | HAProxy-class data plane + Nginx Proxy Manager day-1 UX, delivered as one Mako-native binary |
-| **Current focus** | Native ACME, production test gates, and honest performance scorecards |
+| **Current focus** | Security review, production test gates, and honest performance scorecards |
 | **Related** | [ACME.md](ACME.md), [PRODUCTION.md](PRODUCTION.md), [SCORECARD.md](SCORECARD.md), [LIMITS.md](LIMITS.md) |
 
 ## Positioning
@@ -15,6 +15,7 @@
 | Edge / platform | Load balancing, drain, stick tables, hitless reload paths, Prometheus, doctor, and explain |
 | Both | Single binary, plain config as source of truth, no hidden DB, no nginx sidecar |
 | Performance | Beat nginx/HAProxy on targeted reverse-proxy efficiency before making broad replacement claims |
+| Security reviewers | Memory-safe core, fail-closed controls, and a narrow audit target for ACME/certificate-management paths |
 
 ## Shipped
 
@@ -40,6 +41,7 @@
 | Gap | Why it matters |
 |-----|----------------|
 | Native DNS-01 provider adapters | Wildcards and closed-port-80 environments still need an explicit legacy helper or future provider adapters |
+| White-hat sign-off | Native ACME and certificate reload are built and tested, but external security review should close before stronger production marketing |
 | Peers production sign-off | Dual-node smoke is green, but production HA still needs site-specific VIP soak |
 | Streaming / large bodies / RTP | Not part of the day-1 edge-LB target; see [LIMITS.md](LIMITS.md) |
 | Broad replacement claims | Do not claim full HAProxy Enterprise or NGINX Plus replacement until feature and soak gates are explicit |
@@ -81,6 +83,7 @@
 | Admin certificates tab and proxy-host Request SSL flow | P0 | Done |
 | Linux/Docker native ACME defaults | P0 | Done |
 | Full local gate with release-built adversarial smoke | P0 | Done |
+| Public security / white-hat review request | P0 | In review |
 | Native DNS-01 provider adapters | P1 | Future |
 
 ### 0.16+ Candidate Work
@@ -90,6 +93,7 @@
 | Native DNS-01 adapters | Cloudflare first, then Route53/DigitalOcean if needed |
 | Longer HA soak reports | Publish repeatable VIP failover evidence |
 | Performance scorecard refresh | Compare nginx and HAProxy on the same release hardware |
+| Security review closure | Track findings/fixes for ACME, admin certificate actions, and TLS reload |
 | SAML admin SSO | Only if customer demand appears |
 | Paid/open-core modules | WAF packs or multi-cluster control plane are product decisions |
 
@@ -98,6 +102,7 @@
 - `make test-full` is the local pre-push gate: unit tests, assets, concurrent smoke, and adversarial smoke.
 - `make doctor` must report 0 errors for the sample config.
 - Native ACME unit coverage must include account helper, JWS construction, and CSR DER/base64url encoding.
+- Security review must cover P-256 account-key storage, JWK thumbprints, HTTP-01 challenge isolation, path validation, cert/key file writes, and TLS reload behavior.
 - Live Let's Encrypt staging issuance requires a public DNS name and public port 80 reachability; local tests validate the ACME plumbing but cannot replace CA validation.
 
 ## Claim Policy

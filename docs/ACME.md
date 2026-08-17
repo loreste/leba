@@ -12,12 +12,30 @@ Leba issues and renews certificates with a native Mako ACME v2 client. The defau
 
 The native client uses Mako HTTPS, ES256 JWS, a generated P-256 account key, HTTP-01 challenge files, CSR creation, certificate download, SNI attach, and live TLS reload. No nginx, HAProxy, certbot, or lego process is required for HTTP-01.
 
+## Security Review Scope
+
+The native ACME path is intentionally small and reviewable. White-hat review
+should focus on:
+
+- P-256 account-key generation, storage location, and file permissions.
+- ES256 JWS protected-header construction, nonce handling, and replay behavior.
+- Canonical public JWK and RFC 7638 thumbprint generation.
+- HTTP-01 token validation, challenge-file isolation, and bypass rules.
+- Domain/path validation, especially traversal and unsafe absolute paths.
+- CSR DER/base64url encoding and finalize/certificate download handling.
+- Certificate/key writes under `acme_storage` and live SNI reload behavior.
+
+Until that review is closed, keep broad production replacement claims tied to
+the gates in [ROADMAP.md](ROADMAP.md) and [SCORECARD.md](SCORECARD.md).
+
 ## Requirements
 
 1. `acme_email` or `LEBA_ACME_EMAIL` for ACME account registration.
 2. Public port 80 for HTTP-01 validation.
 3. `acme_webroot` on the HTTP frontend serving `/.well-known/acme-challenge/*`.
 4. `acme_storage` writable by the Leba process.
+5. A least-privilege runtime user that owns only Leba state, challenge, and
+   certificate directories.
 
 ## Config
 
@@ -81,6 +99,9 @@ GET /.well-known/acme-challenge/<token>
 ```
 
 Challenge paths bypass HTTPS redirect, ACLs, rate limiting, and app Basic auth so the ACME CA can validate the domain.
+
+Only the `/.well-known/acme-challenge/<token>` path is special-cased. All other
+requests continue through the normal redirect, ACL, rate-limit, and auth paths.
 
 ## Renew
 

@@ -1,7 +1,16 @@
 # Security Notes
 
-Leba is intended to be deployed on internet-facing hosts, so the default
-operational stance should be conservative.
+Leba is intended to run on internet-facing hosts. The default operational stance
+should be conservative: least privilege, explicit admin credentials, private
+control-plane exposure, and fail-closed routing.
+
+## Memory Safety
+
+Leba is written in Mako and relies on Mako ownership/free analysis for
+application code. The project still treats security as a process, not a slogan:
+native ACME, certificate writes, TLS reload, and admin mutation paths require
+code review, adversarial tests, and white-hat review before stronger replacement
+claims.
 
 ## Admin Surface
 
@@ -23,16 +32,16 @@ viewer leba-kdf-v1:ITERATIONS:SALT_HEX:HASH_HEX viewer
 operator leba-kdf-v1:ITERATIONS:SALT_HEX:HASH_HEX operator
 ```
 
-New hashes use Argon2id when the linked Mako crypto backend supports it and
-fall back to `leba-kdf-v1` otherwise. Legacy SHA-256 hashes are accepted only
-for compatibility.
+New hashes use Argon2id when the linked Mako crypto backend supports it and fall
+back to `leba-kdf-v1` otherwise. Legacy SHA-256 hashes are accepted only for
+compatibility.
 
 When credentials are configured, Leba protects:
 
-- the admin dashboard,
-- `/stats`,
-- `/metrics`,
-- `/admin/*` runtime actions.
+- admin dashboard
+- `/stats`
+- `/metrics`
+- `/admin/*` runtime actions
 
 Probe endpoints remain unauthenticated:
 
@@ -40,25 +49,28 @@ Probe endpoints remain unauthenticated:
 - `/livez`
 - `/readyz`
 
-Unauthenticated admin requests return `401` JSON.
-Authenticated users without enough role privilege receive `403`.
-
-Roles:
+Unauthenticated admin requests return `401` JSON. Authenticated users without
+enough role privilege receive `403`.
 
 | Role | Access |
 |------|--------|
-| `viewer` | Dashboard, stats, metrics, and server listing. |
-| `operator` | Viewer access plus drain, ready, disable, enable, and `servers_file` reload. |
-| `admin` | Full admin access. |
+| `viewer` | Dashboard, stats, metrics, server listing |
+| `operator` | Viewer access plus drain, ready, disable, enable, `servers_file` reload |
+| `admin` | Full admin access |
 
 ## Credentials
 
-The sample local config uses demo plaintext credentials. The Linux template
-uses `admin_users_file` with `CHANGE_ME_*` placeholders. `leba doctor` warns on
+Sample local config uses demo plaintext credentials. The Linux template uses
+`admin_users_file` with `CHANGE_ME_*` placeholders. `leba doctor` warns on
 placeholder/demo values and errors on malformed hashes.
 
 Use long random passwords and store only salted, iterated hashes in production
-configs. Generate hashes with `leba admin hash-password 'strong-password'`.
+configs.
+
+```bash
+leba admin hash-password 'strong-password'
+```
+
 Treat the admin endpoint as a privileged control plane because it can drain,
 enable, disable, and reload upstream server membership.
 
@@ -66,42 +78,55 @@ enable, disable, and reload upstream server membership.
 
 Recommended deployment shape:
 
-- expose only the public HTTP/TCP/SIP frontend ports to the internet,
-- keep the stats/admin port on a private interface or behind trusted network
-  controls,
-- use host firewall rules to restrict admin access,
-- run `leba doctor` before restarting a production instance.
+- expose only public HTTP/TCP/SIP frontend ports to the internet
+- keep stats/admin ports on private interfaces behind trusted network controls
+- restrict admin access with host firewall rules
+- run `leba doctor` before restarting a production instance
 
 ## Request Handling
 
 Current hardening:
 
-- raw HTTP requests larger than the configured limit (default 1 MiB) are rejected
-  with HTTP 413 before upstream forwarding,
-- raw HTTP request limits are configurable with `request_body_limit` (see
-  [LIMITS.md](LIMITS.md); doctor warns above 16MB),
-- protected admin requests write audit logs with request id, authenticated
-  user, role, method, path, status, and outcome,
-- ACL denies are enforced before backend selection,
-- rate limits are enforced before upstream forwarding,
-- backend and server `maxconn` caps fail closed when saturated,
-- all-drained or all-down pools fail closed instead of silently choosing an
-  unavailable server,
+- raw HTTP requests larger than the configured limit are rejected with HTTP 413
+  before upstream forwarding
+- raw HTTP request limits are configurable with `request_body_limit`; see
+  [LIMITS.md](LIMITS.md)
+- protected admin requests write audit logs with request ID, authenticated user,
+  role, method, path, status, and outcome
+- ACL denies are enforced before backend selection
+- rate limits are enforced before upstream forwarding
+- backend server `maxconn` caps fail closed when saturated
+- all-drained or all-down pools fail closed instead of choosing an unavailable
+  server
 - trace headers are validated before use and forwarded upstream only after
-  validation or regeneration.
+  validation or regeneration
+
+## Native ACME / Certificate Review
+
+Native HTTP-01 issuance avoids nginx, certbot, and lego as required runtime
+dependencies. Review the following before treating it as a high-trust production
+certificate manager:
+
+- P-256 account-key generation, storage path, and permissions
+- ES256 JWS construction, nonce use, JWK thumbprints, and CSR encoding
+- HTTP-01 token validation and challenge-file serving
+- domain/path validation and traversal rejection
+- certificate/key file writes and live TLS/SNI reload
+- admin RBAC on issue, renew, and reload endpoints
 
 ## Session Cookies
 
 Admin UI session cookies are signed with material from, in order:
 
-1. `state_key` in defaults (preferred),
-2. `LEBA_SESSION_SECRET` environment variable,
-3. an insecure local-dev default (doctor warns when neither 1 nor 2 is set).
+1. `state_key` in defaults (preferred)
+2. `LEBA_SESSION_SECRET` environment variable
+3. an insecure local-dev default; `doctor` warns when neither 1 nor 2 is set
 
 ## Remaining Security Work
 
-These are still open:
+These remain open:
 
-- configurable probe authentication policy,
-- broader TLS and HTTP/2 accept-path hardening,
-- RTP/media handling.
+- white-hat review closure for native ACME/certificate paths
+- configurable probe authentication policy
+- broader TLS HTTP/2 accept-path hardening
+- RTP/media handling

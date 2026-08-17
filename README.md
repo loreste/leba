@@ -1,10 +1,14 @@
 # Leba
 
-Leba is a load balancer written in [Mako](https://github.com/loreste/mako),
-showcasing what the language can do in a real systems program.
+Leba is a memory-safe edge load balancer written in
+[Mako](https://github.com/loreste/mako). It is being built to replace the common
+nginx / HAProxy / Nginx Proxy Manager stack with one auditable binary: fast data
+plane, operator-friendly control plane, native free TLS, and explicit security
+gates before broad replacement claims.
 
-**Current version: 0.15.0** — NPM-style control plane (Let's Encrypt, proxy hosts) +
-HAProxy-class data plane, full CI matrix (units / concurrent / adversarial / soak / peers).
+**Current version: 0.15.0** — NPM-style control plane (proxy hosts, Request SSL,
+access lists) + HAProxy-class data plane, native Let's Encrypt HTTP-01, and full
+CI matrix (units / concurrent / adversarial / soak / peers).
 
 Binary releases: tag `v0.15.0` on GitHub when cut (see `docs/PRODUCTION.md`).
 
@@ -21,6 +25,19 @@ gh repo clone loreste/leba && cd leba && make build
 ```
 
 ## Features
+
+### Why Leba
+- **One Mako-native binary:** no nginx sidecar, certbot daemon, Node service, or
+  Lua/plugin runtime required for the core proxy and certificate path.
+- **Native free TLS:** Let's Encrypt production/staging and custom ACME
+  directories through a built-in ACME v2 HTTP-01 client.
+- **Fast by design:** worker-owned keep-alive, upstream connection pools,
+  low-allocation routing, and explicit RPS/p99/CPU/RSS scorecards.
+- **Operational control:** admin UI/API, `doctor`, `explain`, live TLS reload,
+  drain/ready/disable/enable, Prometheus, JSON stats, and audit logs.
+- **Security posture:** memory-safe implementation language, fail-closed routing
+  decisions, RBAC/OIDC admin surface, WAF hooks, and public white-hat review
+  requested for native ACME and certificate-management paths.
 
 ### Load Balancing
 - Round-robin, least-connection, IP-hash, weighted, random, SIP Call-ID,
@@ -62,6 +79,7 @@ wildcard CORS without credentials.
 - Application HTTP Basic (`auth_basic` + `auth_user` on frontends)
 - WAF adapter: local signatures + optional remote inspect sidecar
 - **Let's Encrypt** via native ACME (HTTP-01, production + staging directories, live SNI reload; legacy DNS-01 helper compatibility)
+- Custom ACME directory support for other free or internal ACME-compatible CAs
 - Per-frontend and per-client-IP rate limiting (token bucket)
 - Request body size limits
 - Directory traversal prevention for static file serving
@@ -283,6 +301,17 @@ Leba is working software with 170+ automated unit tests, concurrent/adversarial/
 peers smoke (**v0.15.0**). It handles HTTP/1–3, TCP, UDP/SIP, WebSocket, TLS/mTLS,
 stick tables, WAF adapter, and an NPM-style control plane (proxy hosts, native ACME,
 access lists) on a HAProxy-class data plane.
+
+The current replacement stance is deliberate: Leba can replace nginx/NPM for
+HTTP reverse-proxy hosts with native HTTP-01 certificates, live SNI reload,
+admin UI/API management, and stronger LB operations than NPM. Treat full
+HAProxy Enterprise / NGINX Plus replacement claims as gated on the published
+scorecard, HA soak evidence, and security-review closure.
+
+White-hat review is requested for the native ACME/certificate path, especially
+P-256 account-key storage, ES256 JWS construction, JWK thumbprints, HTTP-01
+token validation, CSR/finalize handling, path traversal controls, file
+permissions, and live TLS reload behavior.
 
 **Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — release plan and beat criteria
 vs NPM / HAProxy Enterprise. Design depth: [`docs/COMPETITIVE_ARCHITECTURE.md`](docs/COMPETITIVE_ARCHITECTURE.md).

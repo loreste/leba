@@ -2,6 +2,18 @@
 
 Directional local measurements — re-run on your hardware before capacity claims.
 
+## Replacement Claim Gate
+
+Leba can be evaluated as an nginx/NPM replacement for HTTP reverse proxying,
+native HTTP-01 certificates, live SNI reload, access lists, and admin UI/API
+operations today. Broader HAProxy Enterprise / NGINX Plus replacement claims
+require all of:
+
+- release scorecard rerun on target hardware with RPS, p99, CPU, and RSS
+- HA pair VIP soak evidence for the deployment topology
+- security review closure for native ACME, cert/key writes, and TLS reload
+- a clear support and rollback plan
+
 ## Environment (scorecard host)
 
 | Field | Value |
